@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { versionSortDesc } from "@/lib/version";
 import {
   getInstalledVersion,
   installVersion,
@@ -19,20 +20,6 @@ import {
 } from "@/lib/tauri";
 import { toast } from "sonner";
 import { Package } from "lucide-react";
-
-/// 版本号比较：剥离 v 前缀后按数字段降序（最新在前）
-/// 例：v0.1.2-alpha.1 vs 0.1.1-rc.2 → 0.1.2 更大
-function versionSortDesc(a: string, b: string): number {
-  const pa = a.replace(/^v/, "").split(/[-+]/)[0].split(".");
-  const pb = b.replace(/^v/, "").split(/[-+]/)[0].split(".");
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = Number(pa[i] ?? 0);
-    const nb = Number(pb[i] ?? 0);
-    if (na !== nb) return nb - na; // 降序：大的在前
-  }
-  // 数字相同则按完整字符串倒序（如 alpha vs rc，rc 更大）
-  return b.localeCompare(a);
-}
 
 export default function VersionPanel() {
   const [npmVersions, setNpmVersions] = useState<DshVersion[]>([]);

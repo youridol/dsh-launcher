@@ -60,12 +60,13 @@ pub fn list_releases() -> Result<Vec<String>, String> {
 /// 返回安装到的目录
 pub fn install_version(version: &str) -> Result<String, String> {
     let cfg = AppConfig::load();
-    // tag 形如 v0.1.2-alpha.1
-    let tag = if version.starts_with('v') {
-        version.to_string()
-    } else {
-        format!("v{version}")
-    };
+    // 注意：GitHub release tag 命名形如 `dsh-v0.1.2-alpha.1`（带 dsh- 前缀）。
+    // list_releases 返回的 tag_name 即为完整 tag，这里必须原样使用，
+    // 不能自作主张加 v 前缀（否则会变成 vdsh-v0.1.2-alpha.1 → branch not found）。
+    let tag = version.trim().to_string();
+    if tag.is_empty() {
+        return Err("版本号为空".to_string());
+    }
     let dest = github_dsh_dir().join(&tag);
 
     // 已存在则先清理（全局单版本：覆盖旧版本目录）
@@ -116,7 +117,7 @@ pub fn install_version(version: &str) -> Result<String, String> {
         "pnpm build 失败",
     )?;
 
-    Ok(format!("GitHub 通道 v{version} 构建完成，位于 {}", dest.display()))
+    Ok(format!("GitHub 通道 {version} 构建完成，位于 {}", dest.display()))
 }
 
 /// 运行命令并检查退出码

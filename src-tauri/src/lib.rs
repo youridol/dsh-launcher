@@ -10,6 +10,7 @@ pub mod commands;
 use crate::core::logging::Logger;
 use crate::core::process::ProcessManager;
 use std::sync::Arc;
+use tauri::Manager;
 
 /// 全局状态：日志 + 进程管理器
 pub struct AppState {
@@ -34,6 +35,13 @@ pub fn run() {
             move |app| {
                 // 关联日志发射器（前端实时流式接收）
                 logger.set_emitter(app.handle().clone());
+                // 设置主窗口/任务栏高清图标（512px PNG，DPI 缩放后仍清晰）
+                if let Some(win) = app.get_webview_window("main") {
+                    const WIN_ICON: &[u8] = include_bytes!("../icons/icon.png");
+                    if let Ok(img) = tauri::image::Image::from_bytes(WIN_ICON) {
+                        let _ = win.set_icon(img);
+                    }
+                }
                 // 创建系统托盘
                 core::tray::setup_tray(app.handle(), process, logger);
                 Ok(())

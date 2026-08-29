@@ -26,3 +26,5 @@ dist-ssr
 # dsh-launcher 构建产物
 dist-bundles
 src-tauri/target
+# 旧版 16/32/48/256 ICO 备份（回滚用）
+icon.ico.bak

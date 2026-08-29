@@ -1,5 +1,30 @@
 # Changelog
 
+## [v0.1.6] - 2026-08-29
+
+### 修复
+
+- 修复任务栏图标模糊：
+  - 主窗口显式设置高清图标（`window.set_icon`，嵌入 512px icon.png，DPI 缩放后仍清晰）
+  - 重生成多尺寸 icon.ico（16/24/32/48/64/128/256），bundle.icon 增加 512px icon.png
+    （exe 资源图标与任务栏/Alt-Tab 均取高清源，不再模糊）
+- 修复 GitHub 通道安装失败：
+  - 根因：GitHub release tag 实际命名是 `dsh-v0.1.2-alpha.1`（带 dsh- 前缀），
+    但 `install_version` 对非 v 开头的版本号自作主张加 v 前缀，导致
+    `--branch vdsh-v0.1.2-alpha.1` → branch not found
+  - 修复：`list_releases` 返回的 tag_name 即完整 tag，`install_version` 原样使用
+  - 顺带修复前端排序：`versionSortDesc` 现能正确处理 dsh- 前缀（提取到 src/lib/version.ts）
+
+### 变更
+
+- 页面布局改为两列：左列（状态控制 / 工具链 / Web GUI），右列（版本管理 / 设置 / 日志），
+  列内用分割线分隔
+- GitHub 安装成功提示不再拼接多余 v 前缀（`GitHub 通道 dsh-v0.1.x 构建完成`）
+
+### 新增
+
+- 测试：GitHub 真实 tag 验证（dsh-v0.1.2-alpha.1）、目录路径构造
+
 ## [v0.1.5] - 2026-08-29
 
 ### 修复
