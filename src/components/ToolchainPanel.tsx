@@ -55,12 +55,12 @@ export default function ToolchainPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Wrench className="size-4" />
-          工具链与运行环境
+          工具链
           <Button variant="ghost" size="icon-sm" onClick={refresh} title="重新检测">
             <RefreshCw />
           </Button>
         </CardTitle>
-        <CardDescription>dsh 运行依赖（Node/npm/pnpm/Git/Python）</CardDescription>
+        <CardDescription>dsh 运行依赖</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {items.map((item, i) => (

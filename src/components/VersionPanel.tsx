@@ -200,7 +200,7 @@ export default function VersionPanel() {
             <RefreshCw className={refreshingInstalled ? "animate-spin" : ""} />
           </Button>
         </CardTitle>
-        <CardDescription>npm 通道 / GitHub 通道（全局单版本，切换先卸载再装）</CardDescription>
+        <CardDescription>npm / GitHub 双通道安装</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {/* 安装/下载目录（任务：显示 harness 下载和安装目录） */}
@@ -239,7 +239,7 @@ export default function VersionPanel() {
         )}
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-sm font-medium">npm 通道（registry 现有版本，最新置顶）</h3>
+            <h3 className="text-sm font-medium">npm 通道</h3>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -279,7 +279,7 @@ export default function VersionPanel() {
 
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-sm font-medium">GitHub 通道（v0.1.2-alpha.1 及更新源码，最新置顶）</h3>
+            <h3 className="text-sm font-medium">GitHub 通道</h3>
             <Button
               variant="ghost"
               size="icon-sm"

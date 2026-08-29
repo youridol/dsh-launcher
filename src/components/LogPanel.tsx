@@ -13,6 +13,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { listLogs, readLog, type LogFile } from "@/lib/tauri";
 import { listen } from "@tauri-apps/api/event";
+import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { FileText, Download, RefreshCw } from "lucide-react";
 
@@ -27,7 +28,7 @@ interface LogLine {
 // 实时流最大缓冲行数
 const MAX_STREAM_LINES = 2000;
 
-export default function LogPanel() {
+export default function LogPanel({ className }: { className?: string }) {
   const [logs, setLogs] = useState<LogFile[]>([]);
   const [content, setContent] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -123,7 +124,7 @@ export default function LogPanel() {
     .join("\n");
 
   return (
-    <Card className="flex h-full flex-col">
+    <Card className={cn("flex h-full flex-col", className)}>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <FileText className="size-4" />

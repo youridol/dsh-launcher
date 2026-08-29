@@ -1,4 +1,4 @@
-// 状态卡片：dsh 运行状态 + 启动/停止/重启控制 + 端口配置
+// 状态卡片：dsh 运行状态 + 生命周期控制 + 端口配置 + Web GUI（整合）
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   getDshStatus,
   getConfig,
@@ -21,7 +23,7 @@ import {
   type DshStatus as Status,
 } from "@/lib/tauri";
 import { toast } from "sonner";
-import { Play, Square, RotateCw, Activity } from "lucide-react";
+import { Play, Square, RotateCw, Activity, ExternalLink, MonitorUp } from "lucide-react";
 
 // 状态徽标配色
 const STATUS_META: Record<Status, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
@@ -115,6 +117,31 @@ export default function StatusCard() {
 
   const running = status === "running" || status === "starting";
 
+  // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器
+  async function openWebGui() {
+    const label = "dsh-web-gui";
+    const existing = await WebviewWindow.getByLabel(label);
+    if (existing) {
+      await existing.setFocus();
+      return;
+    }
+    try {
+      await new WebviewWindow(label, {
+        url: `http://127.0.0.1:${port}`,
+        title: "deepseek-harness Web UI",
+        width: 1100,
+        height: 750,
+      });
+    } catch (e) {
+      console.error("打开 Web GUI 失败", e);
+      toast.error(`打开 Web GUI 失败: ${e}`);
+    }
+  }
+
+  function openExternal() {
+    window.open(`http://127.0.0.1:${port}`, "_blank");
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -123,7 +150,7 @@ export default function StatusCard() {
           dsh 运行状态
           <Badge variant={STATUS_META[status].variant}>{STATUS_META[status].label}</Badge>
         </CardTitle>
-        <CardDescription>deepseek-harness 生命周期控制</CardDescription>
+        <CardDescription>dsh 生命周期与 Web GUI</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex items-end gap-4">
@@ -149,6 +176,25 @@ export default function StatusCard() {
             </Button>
             <Button variant="outline" onClick={handleRestart} disabled={!running || busy}>
               <RotateCw /> 重启
+            </Button>
+          </div>
+        </div>
+
+        <Separator className="my-4" />
+
+        {/* Web GUI（原独立面板，整合至此） */}
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <MonitorUp className="size-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Web GUI</span>
+            <Badge variant="outline">端口 {port}</Badge>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={openWebGui}>
+              <MonitorUp /> 内嵌打开
+            </Button>
+            <Button size="sm" variant="outline" onClick={openExternal}>
+              <ExternalLink /> 外部浏览器
             </Button>
           </div>
         </div>

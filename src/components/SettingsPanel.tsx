@@ -116,23 +116,24 @@ export default function SettingsPanel() {
             {installedVersion ? `dsh ${installedVersion}` : "dsh 未安装"}
           </Badge>
         </CardTitle>
-        <CardDescription>镜像源、滑动开关与运行行为</CardDescription>
+        <CardDescription>镜像源与运行行为</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-5">
+      <CardContent className="space-y-4">
         {/* 镜像源 */}
-        <div className="space-y-3">
+        <div className="space-y-2">
           <h3 className="text-sm font-medium">镜像源</h3>
           <div className="grid gap-2">
-            <Label htmlFor="npm">npm registry</Label>
-            <div className="flex gap-2">
+            <Label htmlFor="npm" className="text-xs">npm registry</Label>
+            <div className="flex gap-1.5">
               <Input
                 id="npm"
                 value={npmRegistry}
                 onChange={(e) => setNpmRegistry(e.target.value)}
                 placeholder="https://registry.npmjs.org"
+                className="text-xs"
               />
               <select
-                className="w-40 rounded-md border bg-background px-2 text-xs"
+                className="w-32 shrink-0 rounded-md border bg-background px-1.5 text-xs"
                 onChange={(e) => setNpmRegistry(e.target.value)}
                 value={PRESETS.npm.some((p) => p.value === npmRegistry) ? npmRegistry : ""}
               >
@@ -144,16 +145,17 @@ export default function SettingsPanel() {
               </select>
             </div>
 
-            <Label htmlFor="gh">GitHub 加速</Label>
-            <div className="flex gap-2">
+            <Label htmlFor="gh" className="text-xs">GitHub 加速</Label>
+            <div className="flex gap-1.5">
               <Input
                 id="gh"
                 value={githubMirror}
                 onChange={(e) => setGithubMirror(e.target.value)}
                 placeholder="https://ghproxy.com"
+                className="text-xs"
               />
               <select
-                className="w-40 rounded-md border bg-background px-2 text-xs"
+                className="w-32 shrink-0 rounded-md border bg-background px-1.5 text-xs"
                 onChange={(e) => setGithubMirror(e.target.value)}
                 value={PRESETS.github.some((p) => p.value === githubMirror) ? githubMirror : ""}
               >
@@ -165,16 +167,17 @@ export default function SettingsPanel() {
               </select>
             </div>
 
-            <Label htmlFor="node">Node 二进制镜像</Label>
-            <div className="flex gap-2">
+            <Label htmlFor="node" className="text-xs">Node 镜像</Label>
+            <div className="flex gap-1.5">
               <Input
                 id="node"
                 value={nodeMirror}
                 onChange={(e) => setNodeMirror(e.target.value)}
                 placeholder="https://nodejs.org/dist"
+                className="text-xs"
               />
               <select
-                className="w-40 rounded-md border bg-background px-2 text-xs"
+                className="w-32 shrink-0 rounded-md border bg-background px-1.5 text-xs"
                 onChange={(e) => setNodeMirror(e.target.value)}
                 value={PRESETS.node.some((p) => p.value === nodeMirror) ? nodeMirror : ""}
               >
@@ -193,30 +196,30 @@ export default function SettingsPanel() {
 
         <Separator />
 
-        {/* 滑动开关 */}
-        <div className="space-y-3">
+        {/* 滑动开关：两列排布，描述简化 */}
+        <div className="space-y-2">
           <h3 className="text-sm font-medium">窗口与运行行为</h3>
-          {(
-            [
-              ["closeExits", "关闭按钮直接退出（含 dsh）", "开启后点关闭会停止 dsh 并退出程序"],
-              ["minimizeToTray", "最小化到托盘", "最小化时隐藏到系统托盘而非任务栏"],
-              ["keepDshOnExit", "退出时驻留 dsh", "托盘退出时保留 dsh 在后台运行"],
-              ["keepDshHomeOnUninstall", "卸载保留 DSH_HOME", "卸载 dsh 时保留用户数据目录"],
-              ["autoStartDsh", "启动时自动启动 dsh", "打开启动器时自动拉起 dsh web"],
-              ["autoOpenBrowser", "启动时自动打开浏览器", "dsh 启动后自动打开 Web 界面"],
-            ] as const
-          ).map(([key, label, desc]) => (
-            <div key={key} className="flex items-center justify-between">
-              <div>
-                <div className="text-sm font-medium">{label}</div>
-                <div className="text-xs text-muted-foreground">{desc}</div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+            {(
+              [
+                ["closeExits", "关闭直接退出"],
+                ["minimizeToTray", "最小化到托盘"],
+                ["keepDshOnExit", "退出驻留 dsh"],
+                ["keepDshHomeOnUninstall", "卸载保留数据"],
+                ["autoStartDsh", "启动时自动启动"],
+                ["autoOpenBrowser", "启动时打开浏览器"],
+              ] as const
+            ).map(([key, label]) => (
+              <div key={key} className="flex items-center justify-between gap-2">
+                <span className="text-xs">{label}</span>
+                <Switch
+                  size="sm"
+                  checked={switches[key]}
+                  onCheckedChange={(v) => toggleSwitch(key, v === true)}
+                />
               </div>
-              <Switch
-                checked={switches[key]}
-                onCheckedChange={(v) => toggleSwitch(key, v === true)}
-              />
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </CardContent>
     </Card>
