@@ -35,12 +35,32 @@ pub struct DshVersion {
 }
 
 /// 获取某通道的可用版本列表（异步）
+/// v0.1.9：读取失败/空列表时写入日志（落盘 + 前端实时流）
 #[tauri::command]
-pub async fn list_versions(channel: String) -> Result<Vec<DshVersion>, String> {
-    tauri::async_runtime::spawn_blocking(move || match channel.as_str() {
-        "npm" => list_npm_versions(),
-        "github" => list_github_versions(),
-        other => Err(format!("未知通道: {other}")),
+pub async fn list_versions(
+    state: State<'_, AppState>,
+    channel: String,
+) -> Result<Vec<DshVersion>, String> {
+    let logger = Arc::clone(&state.logger);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = match channel.as_str() {
+            "npm" => list_npm_versions(),
+            "github" => list_github_versions(),
+            other => Err(format!("未知通道: {other}")),
+        };
+        // 读取不到版本时写入日志（便于在日志面板定位网络/镜像问题）
+        match &result {
+            Ok(versions) if versions.is_empty() => {
+                logger.warn(&format!(
+                    "读取 {channel} 通道版本列表成功但为空（请检查网络/镜像源）"
+                ));
+            }
+            Err(e) => {
+                logger.error(&format!("读取 {channel} 通道版本列表失败: {e}"));
+            }
+            _ => {}
+        }
+        result
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
