@@ -1,5 +1,5 @@
-// 版本管理面板：双通道版本列表 + 安装/卸载
-import { useCallback, useEffect, useState } from "react";
+// 版本管理面板：双通道版本列表 + 安装/卸载（最新版本置顶）
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,11 +20,35 @@ import {
 import { toast } from "sonner";
 import { Package } from "lucide-react";
 
+/// 版本号比较：剥离 v 前缀后按数字段降序（最新在前）
+/// 例：v0.1.2-alpha.1 vs 0.1.1-rc.2 → 0.1.2 更大
+function versionSortDesc(a: string, b: string): number {
+  const pa = a.replace(/^v/, "").split(/[-+]/)[0].split(".");
+  const pb = b.replace(/^v/, "").split(/[-+]/)[0].split(".");
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = Number(pa[i] ?? 0);
+    const nb = Number(pb[i] ?? 0);
+    if (na !== nb) return nb - na; // 降序：大的在前
+  }
+  // 数字相同则按完整字符串倒序（如 alpha vs rc，rc 更大）
+  return b.localeCompare(a);
+}
+
 export default function VersionPanel() {
   const [npmVersions, setNpmVersions] = useState<DshVersion[]>([]);
   const [ghVersions, setGhVersions] = useState<DshVersion[]>([]);
   const [installed, setInstalled] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // 最新版本置顶（npm 原始顺序是旧→新，需反转；GitHub 已是降序但统一处理）
+  const sortedNpm = useMemo(
+    () => [...npmVersions].sort((a, b) => versionSortDesc(a.version, b.version)),
+    [npmVersions],
+  );
+  const sortedGh = useMemo(
+    () => [...ghVersions].sort((a, b) => versionSortDesc(a.version, b.version)),
+    [ghVersions],
+  );
 
   const refresh = useCallback(async () => {
     // 并发拉取（互不阻塞）：npm 版本 + GitHub 版本 + 已安装版本
@@ -87,9 +111,9 @@ export default function VersionPanel() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div>
-          <h3 className="mb-2 text-sm font-medium">npm 通道（registry 现有版本）</h3>
-          <div className="max-h-48 space-y-1 overflow-y-auto">
-            {npmVersions.map((v) => (
+          <h3 className="mb-2 text-sm font-medium">npm 通道（registry 现有版本，最新置顶）</h3>
+          <div className="max-h-64 space-y-1 overflow-y-auto">
+            {sortedNpm.map((v) => (
               <div
                 key={v.version}
                 className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
@@ -116,9 +140,9 @@ export default function VersionPanel() {
         <Separator />
 
         <div>
-          <h3 className="mb-2 text-sm font-medium">GitHub 通道（v0.1.2-alpha.1 及更新源码）</h3>
-          <div className="max-h-48 space-y-1 overflow-y-auto">
-            {ghVersions.map((v) => (
+          <h3 className="mb-2 text-sm font-medium">GitHub 通道（v0.1.2-alpha.1 及更新源码，最新置顶）</h3>
+          <div className="max-h-64 space-y-1 overflow-y-auto">
+            {sortedGh.map((v) => (
               <div
                 key={v.version}
                 className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"

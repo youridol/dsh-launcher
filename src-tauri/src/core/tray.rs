@@ -45,10 +45,19 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
         .build()
         .expect("构建托盘菜单失败");
 
-    let _tray = TrayIconBuilder::with_id("dsh-launcher-tray")
+    let mut tray_builder = TrayIconBuilder::with_id("dsh-launcher-tray")
         .tooltip("dsh-launcher")
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        .show_menu_on_left_click(true);
+    // 托盘图标：编译期嵌入 32x32 PNG（Windows 托盘标准尺寸），避免运行时路径丢失
+    {
+        const TRAY_ICON: &[u8] = include_bytes!("../../icons/32x32.png");
+        if let Ok(img) = tauri::image::Image::from_bytes(TRAY_ICON) {
+            tray_builder = tray_builder.icon(img);
+        }
+    }
+
+    let _tray = tray_builder
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             match id {

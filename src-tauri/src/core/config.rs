@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// 启动器全局配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     /// dsh web 启动端口（用户自定义，默认 3080）
@@ -31,6 +31,24 @@ pub struct AppConfig {
     pub auto_start_dsh: bool,
     /// 启动时自动打开浏览器
     pub auto_open_browser: bool,
+}
+
+impl Default for AppConfig {
+    /// 默认配置：端口 3080（DEFAULT_PORT），其余字段取类型默认
+    fn default() -> Self {
+        Self {
+            port: Self::DEFAULT_PORT,
+            npm_registry: String::new(),
+            github_mirror: String::new(),
+            node_mirror: String::new(),
+            close_exits: false,
+            minimize_to_tray: true,
+            keep_dsh_on_exit: false,
+            keep_dsh_home_on_uninstall: true,
+            auto_start_dsh: false,
+            auto_open_browser: true,
+        }
+    }
 }
 
 impl AppConfig {

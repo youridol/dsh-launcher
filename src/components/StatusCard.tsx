@@ -49,9 +49,18 @@ export default function StatusCard() {
 
   useEffect(() => {
     refresh();
-    // 读取配置端口
+    // 读取配置端口（旧配置可能存了 0，兜底为 3080）
     getConfig()
-      .then((c) => setPort(c.port.toString()))
+      .then((c) => {
+        const p = c.port;
+        if (p >= 1 && p <= 65535) {
+          setPort(p.toString());
+        } else {
+          // 端口非法（0/默认）→ 重置为默认 3080 并回写
+          setPort("3080");
+          savePort(3080).catch(() => {});
+        }
+      })
       .catch((e) => console.error("读取配置失败", e));
     // 5 秒轮询兜底（Q27）
     const timer = setInterval(refresh, 5000);

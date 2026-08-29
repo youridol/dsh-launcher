@@ -1,5 +1,25 @@
 # Changelog
 
+## [v0.1.5] - 2026-08-29
+
+### 修复
+
+- 修复托盘图标丢失：TrayIconBuilder 未设置 `.icon()`；改为编译期嵌入 32x32.png
+  （`include_bytes!` + `Image::from_bytes`，启用 `image-png` feature），无运行时路径依赖
+- 修复启动端口输入框默认显示 0：`AppConfig::Default` 改为 port=3080
+  （原 derive Default 使 u16 默认 0）；前端读取旧配置 port=0 时兑底重置为 3080
+
+### 变更
+
+- 界面整合为单页：移除 Tabs，所有功能（状态/工具链/Web GUI/版本管理/设置/日志）
+  以 `<Separator>` 分割线纵向排列在一页
+- 版本管理 NPM/GitHub 通道均以最新版本置顶排序（语义化版本号比较，降序）
+- Web GUI 面板端口从配置读取（不再硬编码 3080），显示当前端口徽标
+
+### 新增
+
+- 测试：配置默认值（端口 3080）、托盘图标 PNG 可被 tauri Image 解析
+
 ## [v0.1.4] - 2026-08-29
 
 ### 变更（并发架构）
