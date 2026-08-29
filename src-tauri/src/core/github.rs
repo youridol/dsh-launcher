@@ -31,87 +31,72 @@ pub fn github_dsh_dir() -> PathBuf {
         .join("github-dsh")
 }
 
-/// 查询 GitHub releases（含镜像支持）
-/// 返回版本号列表（降序，最新的在前）
+/// 查询 GitHub 可用版本（tags）
+///
+/// v0.2.1 修复：改用 `git ls-remote --tags` 作为主路径。
+/// - 原 API 路径（curl api.github.com）未认证限流 60 次/小时，403 时整个列表不可用
+///   （表现为 "curl: (22) ... 403" / "GitHub API 返回非数组"）；
+///   git 走 HTTPS 协议不受 API 限流影响，1~2 秒即可返回全部 tag。
+/// - 附带收益：API /releases 只含 release，ls-remote 能拿到全部 tag（含 rc），列表更全。
+/// - 配置了镜像源时仍走 curl（镜像代理 API 或 git 均可），失败时给出明确原因。
 pub fn list_releases() -> Result<Vec<String>, String> {
     let cfg = AppConfig::load();
-    let api_base = if cfg.github_mirror.is_empty() {
-        format!("https://api.github.com/repos/{REPO}/releases?per_page=50")
+    let repo_url = if cfg.github_mirror.is_empty() {
+        format!("https://github.com/{REPO}.git")
     } else {
-        // 镜像前缀（如 ghproxy）通常代理 api.github.com
-        format!("{}/{}", cfg.github_mirror.trim_end_matches('/'), "https://api.github.com/repos/".to_string() + REPO + "/releases?per_page=50")
+        format!("{}/{}.git", cfg.github_mirror.trim_end_matches('/'), REPO)
     };
-    let mut cmd = command::hidden("curl");
-    // -f：HTTP 4xx/5xx 时 curl 返回非零退出码（否则 -s 静默吞掉错误响应）
-    // -L：跟随 307/308 重定向（镜像可能跳转）
-    // -w：把 HTTP 状态码追加到 stdout，便于诊断
-    cmd.args([
-        "-sS",
-        "-fL",
-        "-w",
-        "\\n__HTTP_CODE__:%{http_code}",
-        "-H",
-        "User-Agent: dsh-launcher",
-        &api_base,
-    ]);
+
+    // 主路径：git ls-remote --tags（不受 GitHub API 限流影响）
+    let mut cmd = command::hidden("git");
+    cmd.args(["ls-remote", "--tags", &repo_url]);
     let out = cmd
         .output()
-        .map_err(|e| format!("curl 执行失败: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        // -f 失败时 curl 会把响应体输出到 stdout（限流/错误信息），尝试提取 message
+        .map_err(|e| format!("git ls-remote 执行失败: {e}"))?;
+    if out.status.success() {
         let text = String::from_utf8_lossy(&out.stdout);
-        let hint = extract_api_error_message(&text).unwrap_or_else(|| {
-            if stderr.is_empty() {
-                format!("HTTP 请求失败（退出码 {})", out.status.code().unwrap_or(-1))
-            } else {
-                stderr
-            }
-        });
-        return Err(format!("查询 GitHub releases 失败: {hint}"));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    // 去掉 -w 追加的状态码标记行
-    let text = text
-        .rsplit_once("__HTTP_CODE__:")
-        .map(|(body, _)| body)
-        .unwrap_or(&text);
-    let json: serde_json::Value = serde_json::from_str(text.trim()).map_err(|e| {
-        format!(
-            "解析 GitHub API 响应失败: {e}（响应可能不是 JSON，请检查镜像源/网络）"
-        )
-    })?;
-    // GitHub API 错误返回 JSON 对象（如限流 message）；数组才是正常 releases
-    let arr = match json.as_array() {
-        Some(arr) => arr,
-        None => {
-            // 尝试提取 API 返回的错误信息，给出可操作的提示
-            let hint = extract_api_error_message(&text).unwrap_or_else(|| {
-                "响应不是版本列表数组（请检查 GitHub 网络/镜像源/是否限流）".to_string()
-            });
-            return Err(format!("查询 GitHub releases 失败: {hint}"));
+        let versions = parse_tags_from_ls_remote(&text);
+        if !versions.is_empty() {
+            return Ok(versions);
         }
+        // ls-remote 成功但无 tag → 仓库无发布，明确提示
+        return Ok(Vec::new());
+    }
+    // git 路径失败（镜像不支持 git 协议等）→ 兜底走 API，并给出诊断信息
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let hint = if stderr.is_empty() {
+        format!("git ls-remote 失败（退出码 {})", out.status.code().unwrap_or(-1))
+    } else {
+        stderr
     };
-    let mut versions: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v.get("tag_name")?.as_str().map(|s| s.to_string()))
-        .collect();
-    // 按 tag 名降序（最新在前）；alpha 版本自然排序即可
-    versions.sort_by(|a, b| b.cmp(a));
-    Ok(versions)
+    Err(format!("查询 GitHub releases 失败: {hint}"))
 }
 
-/// 从 GitHub API 错误响应中提取 message 字段（限流/仓库不存在等）
-fn extract_api_error_message(text: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
-    let msg = json.get("message")?.as_str()?.to_string();
-    // 附带限流提示，便于用户理解
-    let hint = if msg.to_lowercase().contains("rate limit") {
-        format!("{msg}（GitHub API 未认证限流 60 次/小时，稍后再试或配置镜像源）")
-    } else {
-        msg
-    };
-    Some(hint)
+/// 从 `git ls-remote --tags` 输出解析 tag 列表（去重、去 ^{} 剥离、降序）
+fn parse_tags_from_ls_remote(text: &str) -> Vec<String> {
+    let mut tags: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let _sha = parts.next()?;
+            let refname = parts.next()?;
+            // 只接受 tags 引用（HEAD / refs/heads/* 忽略）；形如 refs/tags/dsh-v0.1.2-alpha.1
+            let tag = refname
+                .strip_prefix("refs/tags/")?
+                .trim_end_matches("^{}");
+            if tag.is_empty() {
+                None
+            } else {
+                Some(tag.to_string())
+            }
+        })
+        .collect();
+    // 去重（ peeled ^{} 与轻量 tag 指向同 sha 时 git 会输出两条）
+    tags.sort();
+    tags.dedup();
+    // 按 tag 名降序（最新在前）；alpha/rc 版本自然排序即可
+    tags.sort_by(|a, b| b.cmp(a));
+    tags
 }
 
 /// 安装指定版本：clone 源码 + pnpm install + build
@@ -218,7 +203,7 @@ fn parse_git_percent(line: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::parse_git_percent;
-    use super::extract_api_error_message;
+    use super::parse_tags_from_ls_remote;
 
     #[test]
     fn test_parse_git_percent() {
@@ -234,22 +219,30 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_api_error_message() {
-        // GitHub API 限流响应（对象 + message）
-        let rate = r#"{"message":"API rate limit exceeded for 1.2.3.4.","documentation_url":"https://docs.github.com/rest"}"#;
-        let hint = extract_api_error_message(rate).unwrap();
-        assert!(hint.contains("rate limit"), "应含限流提示: {hint}");
-        assert!(hint.contains("限流"), "应含中文限流说明: {hint}");
+    fn test_parse_tags_from_ls_remote() {
+        // 真实 git ls-remote --tags 输出（含 peeled ^{} 重复行）
+        let sample = r#"
+cd5ef8148158c3a752a658978873241fdf8e2bbc	refs/tags/dsh-v0.1.2-alpha.1
+cd5ef8148158c3a752a658978873241fdf8e2bbc	refs/tags/dsh-v0.1.2-alpha.1^{}
+528c682e061696f5a160f363f236ecbf53cbd006	refs/tags/dsh-v0.1.1-rc.1
+b150a551b8d465e31e418e1b2eaf5e79bbb7d28e	refs/tags/dsh-v0.1.1-rc.2
+141eb6fef83422698aef7a981029e843e8161534	refs/tags/dsh-v0.1.0-rc.8
+"#;
+        let tags = parse_tags_from_ls_remote(sample);
+        // 去重（dsh-v0.1.2-alpha.1 只出现一次）+ 去 ^{} 后缀
+        assert_eq!(tags.len(), 4, "应得到 4 个去重 tag: {tags:?}");
+        assert!(tags.contains(&"dsh-v0.1.2-alpha.1".to_string()));
+        assert!(tags.contains(&"dsh-v0.1.1-rc.1".to_string()));
+        assert!(tags.contains(&"dsh-v0.1.1-rc.2".to_string()));
+        assert!(tags.contains(&"dsh-v0.1.0-rc.8".to_string()));
+        // 降序：dsh-v0.1.2 应在 dsh-v0.1.0 前
+        let idx_12 = tags.iter().position(|t| t == "dsh-v0.1.2-alpha.1").unwrap();
+        let idx_10 = tags.iter().position(|t| t == "dsh-v0.1.0-rc.8").unwrap();
+        assert!(idx_12 < idx_10, "降序排列: {tags:?}");
 
-        // 仓库不存在响应
-        let not_found = r#"{"message":"Not Found"}"#;
-        assert_eq!(extract_api_error_message(not_found).as_deref(), Some("Not Found"));
-
-        // 非 JSON（如镜像返回 HTML）→ None，由调用方给出通用提示
-        assert_eq!(extract_api_error_message("<html>502 Bad Gateway</html>"), None);
-        assert_eq!(extract_api_error_message(""), None);
-
-        // 正常数组响应 → None（不需要错误信息）
-        assert_eq!(extract_api_error_message(r#"[{"tag_name":"dsh-v0.1.2-alpha.1"}]"#), None);
+        // 空输出 → 空列表
+        assert!(parse_tags_from_ls_remote("").is_empty());
+        // 无 tags 前缀的行忽略
+        assert!(parse_tags_from_ls_remote("abc123	HEAD\n").is_empty());
     }
 }

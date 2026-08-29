@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.2.1] - 2026-08-30
+
+### 修复
+
+- 修复读取 GitHub 版本列表报 `curl: (22) ... 403`（GitHub API 限流）：
+  - 根因：GitHub API 未认证限流 60 次/小时，403 时整个列表不可用
+  - 修复：`list_releases` 改用 `git ls-remote --tags` 作为主路径
+    （git 走 HTTPS 协议不受 API 限流影响，1~2 秒返回全部 tag）；
+    镜像配置时仍走镜像 URL
+  - 附带收益：API /releases 只含 release，ls-remote 能拿到全部 tag（含 rc），
+    版本列表更全；新增 `parse_tags_from_ls_remote`（去重/去剥离引用/降序）+ 单元测试
+
 ## [v0.2.0] - 2026-08-30
 
 ### 修复
