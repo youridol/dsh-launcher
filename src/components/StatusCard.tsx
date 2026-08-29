@@ -130,8 +130,8 @@ export default function StatusCard() {
       await new WebviewWindow(label, {
         url: `http://127.0.0.1:${port}`,
         title: "deepseek-harness Web UI",
-        width: 1100,
-        height: 750,
+        width: 1600,
+        height: 900,
       });
     } catch (e) {
       console.error("打开内嵌 Web GUI 失败", e);

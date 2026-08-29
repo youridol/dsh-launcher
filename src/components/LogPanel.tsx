@@ -150,7 +150,7 @@ export default function LogPanel({ className }: { className?: string }) {
           全域日志（dsh + 启动器）{liveMode ? "· 实时流" : "· 文件"}
         </CardDescription>
       </CardHeader>
-      <CardContent className="flex h-full gap-3">
+      <CardContent className="flex min-h-0 flex-1 gap-3">
         {/* 日志文件列表（非实时流时显示） */}
         {!liveMode && (
           <div className="w-40 shrink-0 space-y-1">
@@ -172,7 +172,7 @@ export default function LogPanel({ className }: { className?: string }) {
         {/* 日志内容 */}
         <ScrollArea
           viewportRef={scrollRef}
-          className="min-h-64 flex-1 rounded-md border bg-muted/30 p-2 font-mono text-xs"
+          className="min-h-0 flex-1 rounded-md border bg-muted/30 p-2 font-mono text-xs"
         >
           <pre className="whitespace-pre-wrap">
             {liveMode
