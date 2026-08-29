@@ -164,19 +164,56 @@ pub fn install_version(
     // pnpm 从未执行 → 安装假成功。改为 hidden_cmd("pnpm")。
     logger.progress("github", InstallPhase::Install, 0, "pnpm install 开始…");
     logger.info("开始 pnpm install（安装依赖）…");
-    stream::run_cmd_script(logger, "pnpm", &["install".to_string()], Some(&dest), LogLevel::Info, None)
-        .map_err(|e| format!("pnpm install 失败: {e}"))?;
+    // 依赖安装阶段：按输出行数步进（pnpm 无逐字节百分比），每行 +2%，95% 封顶
+    let step = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let cb_install: Arc<stream::LineCallback> = {
+        let logger = Arc::clone(logger);
+        let step = Arc::clone(&step);
+        Arc::new(move |_lvl, line| {
+            if line.trim().is_empty() {
+                return;
+            }
+            use std::sync::atomic::Ordering;
+            let s = (step.load(Ordering::Relaxed) + 2).min(95);
+            step.store(s, Ordering::Relaxed);
+            logger.progress("github", InstallPhase::Install, s, "正在安装依赖…");
+        })
+    };
+    stream::run_cmd_script(
+        logger,
+        "pnpm",
+        &["install".to_string()],
+        Some(&dest),
+        LogLevel::Info,
+        Some(cb_install),
+    )
+    .map_err(|e| format!("pnpm install 失败: {e}"))?;
     logger.progress("github", InstallPhase::Install, 100, "依赖安装完成");
 
     logger.progress("github", InstallPhase::Build, 0, "pnpm build 开始…");
     logger.info("开始 pnpm build（构建产物）…");
+    // 构建阶段：输出行密集，每行 +1%，95% 封顶（避免提前 100）
+    let step = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let cb_build: Arc<stream::LineCallback> = {
+        let logger = Arc::clone(logger);
+        let step = Arc::clone(&step);
+        Arc::new(move |_lvl, line| {
+            if line.trim().is_empty() {
+                return;
+            }
+            use std::sync::atomic::Ordering;
+            let s = (step.load(Ordering::Relaxed) + 1).min(95);
+            step.store(s, Ordering::Relaxed);
+            logger.progress("github", InstallPhase::Build, s, "正在构建…");
+        })
+    };
     stream::run_cmd_script(
         logger,
         "pnpm",
         &["run".to_string(), "build".to_string()],
         Some(&dest),
         LogLevel::Info,
-        None,
+        Some(cb_build),
     )
     .map_err(|e| format!("pnpm build 失败: {e}"))?;
     logger.progress("github", InstallPhase::Build, 100, "构建完成");

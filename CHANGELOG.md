@@ -1,5 +1,19 @@
 # Changelog
 
+## [v0.2.2] - 2026-08-30
+
+### 修复
+
+- 修复安装进度条长时间为 0（github 下载 / pnpm build 开始阶段）：
+  - 根因：git clone 的进度输出以 `\r` 结尾持续刷新同一行（无 `\n`），
+    `BufRead::lines()` 按 `\n` 切分 → 整个 clone 期间不产生行 → 进度回调不触发；
+    pnpm install/build 则完全没有行回调，开始阶段进度停在 0
+  - 修复：core/stream.rs 改为逐字节缓冲、`\r` 与 `\n` 均视为行分隔
+    （`read_all_lines`），git 每条进度刷新实时回调；
+    pnpm install/build 增加按输出行数步进的进度回调（install +2%/行、build +1%/行，
+    95% 封顶避免提前满）；npm 通道步进从 5% 调整为 2%/行
+  - 新增 read_all_lines 单元测试（真实 git 输出片段、\r\n 混合、普通换行）
+
 ## [v0.2.1] - 2026-08-30
 
 ### 修复

@@ -174,7 +174,7 @@ fn install_npm_version(logger: &Arc<crate::core::logging::Logger>, version: &str
                 return;
             }
             use std::sync::atomic::Ordering;
-            let s = (step.load(Ordering::Relaxed) + 5).min(90);
+            let s = (step.load(Ordering::Relaxed) + 2).min(90);
             step.store(s, Ordering::Relaxed);
             logger.progress("npm", crate::core::events::InstallPhase::Install, s, line.to_string());
         })
