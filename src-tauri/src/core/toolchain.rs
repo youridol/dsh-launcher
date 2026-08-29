@@ -5,10 +5,10 @@
 //! - Git：官方安装包（.exe），需提权 → 由 commands 层 spawn runas
 //! - 镜像源：通过 AppConfig 注入下载 URL 前缀
 
+use crate::core::command;
 use crate::core::config::AppConfig;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// 工具链根目录：%LOCALAPPDATA%\dsh-launcher\toolchain
 pub fn toolchain_dir() -> PathBuf {
@@ -41,8 +41,9 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
         url.replace('\'', "''"),
         dest.to_string_lossy().replace('\'', "''")
     );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps])
+    let mut cmd = command::hidden("powershell");
+    cmd.args(["-NoProfile", "-Command", &ps]);
+    let out = cmd
         .output()
         .map_err(|e| format!("启动 PowerShell 下载失败: {e}"))?;
     if !out.status.success() {
@@ -62,8 +63,9 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
         zip.to_string_lossy().replace('\'', "''"),
         dest.to_string_lossy().replace('\'', "''")
     );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps])
+    let mut cmd = command::hidden("powershell");
+    cmd.args(["-NoProfile", "-Command", &ps]);
+    let out = cmd
         .output()
         .map_err(|e| format!("启动 PowerShell 解压失败: {e}"))?;
     if !out.status.success() {
@@ -132,9 +134,9 @@ pub fn user_node_available() -> bool {
 
 /// 检查 Git 是否已安装（系统 PATH）
 pub fn system_git_available() -> bool {
-    Command::new("git")
-        .arg("--version")
-        .output()
+    let mut cmd = command::hidden("git");
+    cmd.arg("--version");
+    cmd.output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }

@@ -7,9 +7,9 @@
 //! - Git：官方安装包，需提权 → spawn runas（Q22）
 //! - pnpm：npm i -g
 
+use crate::core::command;
 use crate::core::toolchain as core_toolchain;
 use serde::Serialize;
-use std::process::Command;
 
 /// 工具链项
 #[derive(Debug, Clone, Serialize)]
@@ -49,7 +49,9 @@ fn detect_node() -> ToolchainItem {
     let ver = run_cmd("node", &["--version"]).or_else(|| {
         let exe = core_toolchain::node_dir().join("node.exe");
         if exe.exists() {
-            Command::new(&exe).arg("--version").output().ok().and_then(|o| {
+            let mut c = command::hidden(&exe);
+            c.arg("--version");
+            c.output().ok().and_then(|o| {
                 if o.status.success() {
                     String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
                 } else {
@@ -110,7 +112,9 @@ fn detect_python() -> ToolchainItem {
 
 /// 运行命令取 stdout（首行）
 fn run_cmd(bin: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(bin).args(args).output().ok()?;
+    let mut c = command::hidden(bin);
+    c.args(args);
+    let out = c.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -138,8 +142,9 @@ fn install_git() -> Result<String, String> {
         "Start-Process -FilePath '{}' -ArgumentList '/VERYSILENT','/NORESTART' -Verb RunAs",
         dest.to_string_lossy().replace('\'', "''")
     );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps])
+    let mut c = command::hidden("powershell");
+    c.args(["-NoProfile", "-Command", &ps]);
+    let out = c
         .output()
         .map_err(|e| format!("启动 Git 安装失败: {e}"))?;
     if !out.status.success() {
@@ -164,8 +169,9 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
         url.replace('\'', "''"),
         dest.to_string_lossy().replace('\'', "''")
     );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps])
+    let mut c = command::hidden("powershell");
+    c.args(["-NoProfile", "-Command", &ps]);
+    let out = c
         .output()
         .map_err(|e| format!("启动 PowerShell 下载失败: {e}"))?;
     if !out.status.success() {
@@ -179,8 +185,9 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
 
 /// 安装 pnpm：npm i -g pnpm
 fn install_pnpm() -> Result<String, String> {
-    let out = Command::new("npm")
-        .args(["i", "-g", "pnpm"])
+    let mut c = command::hidden("npm");
+    c.args(["i", "-g", "pnpm"]);
+    let out = c
         .output()
         .map_err(|e| format!("npm 执行失败: {e}"))?;
     if out.status.success() {

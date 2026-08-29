@@ -6,10 +6,11 @@
 //! - 重启：停止后同配置重启
 //! - 状态：事件驱动（进程退出回调）+ 端口探活兜底
 
+use crate::core::command;
 use crate::core::logging::{LogLevel, LogSource, Logger};
 use crate::core::port;
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -83,7 +84,7 @@ impl ProcessManager {
             return Err(format!("端口 {port} 已被占用，请在设置中修改端口后重试"));
         }
 
-        let mut cmd = Command::new("dsh");
+        let mut cmd = command::hidden("dsh");
         cmd.args(["web", "--port", &port.to_string()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -144,7 +145,8 @@ impl ProcessManager {
         );
 
         // Windows 下用 taskkill /PID <pid> /T 模拟 SIGTERM（优雅排空）
-        let sigterm = Command::new("taskkill")
+        let mut sigterm = command::hidden("taskkill");
+        let sigterm = sigterm
             .args(["/PID", &pid.to_string(), "/T"])
             .output();
 
@@ -176,9 +178,11 @@ impl ProcessManager {
                 LogLevel::Warn,
                 &format!("dsh (pid={pid}) 5 秒内未优雅退出，强制终止…"),
             );
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .output();
+            let _ = {
+                let mut c = command::hidden("taskkill");
+                c.args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output()
+            };
         }
 
         match sigterm {

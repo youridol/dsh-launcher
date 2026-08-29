@@ -1,5 +1,6 @@
 //! 核心逻辑模块：进程、端口、配置、日志
 
+pub mod command;
 pub mod config;
 pub mod github;
 pub mod logging;

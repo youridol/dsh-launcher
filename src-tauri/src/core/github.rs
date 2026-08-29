@@ -4,10 +4,10 @@
 //! 全局单版本（ADR-0003）：当前激活版本 = 最近一次安装的版本。
 //! 构建产物放 `%LOCALAPPDATA%\dsh-launcher\github-dsh\<version>\`，dsh bin 由 npm 全局链接。
 
+use crate::core::command;
 use crate::core::config::AppConfig;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// GitHub 仓库
 const REPO: &str = "deepseek-ai/deepseek-harness";
@@ -31,8 +31,9 @@ pub fn list_releases() -> Result<Vec<String>, String> {
         // 镜像前缀（如 ghproxy）通常代理 api.github.com
         format!("{}/{}", cfg.github_mirror.trim_end_matches('/'), "https://api.github.com/repos/".to_string() + REPO + "/releases?per_page=50")
     };
-    let out = Command::new("curl")
-        .args(["-s", "-H", "User-Agent: dsh-launcher", &api_base])
+    let mut cmd = command::hidden("curl");
+    cmd.args(["-s", "-H", "User-Agent: dsh-launcher", &api_base]);
+    let out = cmd
         .output()
         .map_err(|e| format!("curl 执行失败: {e}"))?;
     if !out.status.success() {
@@ -81,25 +82,37 @@ pub fn install_version(version: &str) -> Result<String, String> {
     };
 
     run_output(
-        Command::new("git").args([
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            &tag,
-            &clone_url,
-            &dest.to_string_lossy(),
-        ]),
+        {
+            let mut c = command::hidden("git");
+            c.args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                &tag,
+                &clone_url,
+                &dest.to_string_lossy(),
+            ]);
+            c
+        },
         "git clone 失败",
     )?;
 
     // pnpm install + build（在源码目录内）
     run_output(
-        Command::new("pnpm").args(["install"]).current_dir(&dest),
+        {
+            let mut c = command::hidden("pnpm");
+            c.arg("install").current_dir(&dest);
+            c
+        },
         "pnpm install 失败",
     )?;
     run_output(
-        Command::new("pnpm").args(["run", "build"]).current_dir(&dest),
+        {
+            let mut c = command::hidden("pnpm");
+            c.args(["run", "build"]).current_dir(&dest);
+            c
+        },
         "pnpm build 失败",
     )?;
 
@@ -107,7 +120,7 @@ pub fn install_version(version: &str) -> Result<String, String> {
 }
 
 /// 运行命令并检查退出码
-fn run_output(cmd: &mut Command, err_prefix: &str) -> Result<(), String> {
+fn run_output(mut cmd: std::process::Command, err_prefix: &str) -> Result<(), String> {
     let out = cmd
         .output()
         .map_err(|e| format!("{err_prefix}: {e}"))?;

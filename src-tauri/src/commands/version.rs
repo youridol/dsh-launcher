@@ -5,9 +5,9 @@
 //! - GitHub 通道：v0.1.2-alpha.1 及更新源码 tag（core/github.rs）
 //! 全局单版本（ADR-0003）：切换 = 先卸载再装
 
+use crate::core::command;
 use crate::core::github as core_github;
 use serde::Serialize;
-use std::process::Command;
 
 /// 通道枚举
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -38,8 +38,9 @@ pub fn list_versions(channel: String) -> Result<Vec<DshVersion>, String> {
 /// 已安装的 dsh 版本（全局单版本）
 #[tauri::command]
 pub fn get_installed_version() -> Result<Option<String>, String> {
-    let out = Command::new("dsh")
-        .arg("--version")
+    let mut c = command::hidden("dsh");
+    c.arg("--version");
+    let out = c
         .output()
         .map_err(|e| format!("dsh 未安装或不可用: {e}"))?;
     if !out.status.success() {
@@ -65,9 +66,11 @@ pub fn install_version(channel: String, version: String) -> Result<String, Strin
 #[tauri::command]
 pub fn uninstall() -> Result<String, String> {
     // 1. 卸载 npm 全局包
-    let _ = Command::new("npm")
-        .args(["uninstall", "-g", "@deepseek-ai/dsh"])
-        .output();
+    let _ = {
+        let mut c = command::hidden("npm");
+        c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
+        c.output()
+    };
     // 2. 清理 GitHub 通道目录
     let gh_dir = core_github::github_dsh_dir();
     if gh_dir.exists() {
@@ -77,8 +80,9 @@ pub fn uninstall() -> Result<String, String> {
 }
 
 fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
-    let out = Command::new("npm")
-        .args(["view", "@deepseek-ai/dsh", "versions", "--json"])
+    let mut c = command::hidden("npm");
+    c.args(["view", "@deepseek-ai/dsh", "versions", "--json"]);
+    let out = c
         .output()
         .map_err(|e| format!("npm view 执行失败: {e}"))?;
     if !out.status.success() {
@@ -111,8 +115,9 @@ fn list_github_versions() -> Result<Vec<DshVersion>, String> {
 
 fn install_npm_version(version: &str) -> Result<String, String> {
     let spec = format!("@deepseek-ai/dsh@{version}");
-    let out = Command::new("npm")
-        .args(["install", "-g", &spec])
+    let mut c = command::hidden("npm");
+    c.args(["install", "-g", &spec]);
+    let out = c
         .output()
         .map_err(|e| format!("npm 执行失败: {e}"))?;
     if out.status.success() {

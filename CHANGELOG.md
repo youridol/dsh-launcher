@@ -1,5 +1,18 @@
 # Changelog
 
+## [v0.1.2] - 2026-08-29
+
+### 新增
+
+- 图标统一替换：所有图标（14 个 PNG + icon.ico 多尺寸）由 `src-tauri/icons/ico.png` 生成
+- 新增 `scripts/generate-icons.ps1` 图标生成脚本（可重复执行）
+
+### 变更
+
+- 所有子进程（dsh/npm/git/pnpm/curl/taskkill/powershell）统一应用 `CREATE_NO_WINDOW + DETACHED_PROCESS`，
+  不再弹出黑色命令提示符窗口（新增 `core/command.rs` 统一封装）
+- `tauri.conf.json` 图标配置移除 `icon.icns`（Windows 项目不需要 macOS 格式）
+
 ## [v0.1.1] - 2026-08-29
 
 ### 新增
