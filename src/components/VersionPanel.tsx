@@ -26,13 +26,15 @@ import {
   type InstallProgress,
 } from "@/lib/install";
 import { toast } from "sonner";
-import { Package } from "lucide-react";
+import { Package, RefreshCw } from "lucide-react";
 
 export default function VersionPanel() {
   const [npmVersions, setNpmVersions] = useState<DshVersion[]>([]);
   const [ghVersions, setGhVersions] = useState<DshVersion[]>([]);
   const [installed, setInstalled] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 正在刷新版本的通道（npm / github / null）
+  const [refreshing, setRefreshing] = useState<"npm" | "github" | null>(null);
   // 安装进度（当前安装任务）
   const [progress, setProgress] = useState<InstallProgress | null>(null);
 
@@ -64,6 +66,21 @@ export default function VersionPanel() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // 单独刷新某通道版本列表（npm / github 独立按钮）
+  const refreshChannel = useCallback(async (channel: "npm" | "github") => {
+    setRefreshing(channel);
+    try {
+      const versions = await listVersions(channel);
+      if (channel === "npm") setNpmVersions(versions);
+      else setGhVersions(versions);
+    } catch (e) {
+      console.error(`刷新 ${channel} 版本失败`, e);
+      toast.error(`刷新 ${channel} 版本列表失败: ${e}`);
+    } finally {
+      setRefreshing(null);
+    }
+  }, []);
 
   // 订阅安装进度事件（Rust 端 install://progress）
   useEffect(() => {
@@ -147,7 +164,18 @@ export default function VersionPanel() {
           </div>
         )}
         <div>
-          <h3 className="mb-2 text-sm font-medium">npm 通道（registry 现有版本，最新置顶）</h3>
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-medium">npm 通道（registry 现有版本，最新置顶）</h3>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={refreshing !== null}
+              onClick={() => refreshChannel("npm")}
+              title="刷新 npm 版本列表"
+            >
+              <RefreshCw className={refreshing === "npm" ? "animate-spin" : ""} />
+            </Button>
+          </div>
           <div className="max-h-64 space-y-1 overflow-y-auto">
             {sortedNpm.map((v) => (
               <div
@@ -176,7 +204,18 @@ export default function VersionPanel() {
         <Separator />
 
         <div>
-          <h3 className="mb-2 text-sm font-medium">GitHub 通道（v0.1.2-alpha.1 及更新源码，最新置顶）</h3>
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-medium">GitHub 通道（v0.1.2-alpha.1 及更新源码，最新置顶）</h3>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={refreshing !== null}
+              onClick={() => refreshChannel("github")}
+              title="刷新 GitHub 版本列表"
+            >
+              <RefreshCw className={refreshing === "github" ? "animate-spin" : ""} />
+            </Button>
+          </div>
           <div className="max-h-64 space-y-1 overflow-y-auto">
             {sortedGh.map((v) => (
               <div
