@@ -13,7 +13,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   getDshStatus,
+  getConfig,
   restartDsh,
+  setPort as savePort,
   startDsh,
   stopDsh,
   type DshStatus as Status,
@@ -47,6 +49,10 @@ export default function StatusCard() {
 
   useEffect(() => {
     refresh();
+    // 读取配置端口
+    getConfig()
+      .then((c) => setPort(c.port.toString()))
+      .catch((e) => console.error("读取配置失败", e));
     // 5 秒轮询兜底（Q27）
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
@@ -55,6 +61,13 @@ export default function StatusCard() {
   async function handleStart() {
     setBusy(true);
     try {
+      // 先保存端口再启动
+      const p = Number(port);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        toast.error("端口不合法（1-65535）");
+        return;
+      }
+      await savePort(p);
       await startDsh();
       toast.success("dsh 已启动");
     } catch (e) {

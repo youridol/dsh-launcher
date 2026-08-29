@@ -1,5 +1,26 @@
 # Changelog
 
+## [v0.1.1] - 2026-08-29
+
+### 新增
+
+- 工具链真实安装：
+  - Node：官方 zip 解压到用户级目录（`%LOCALAPPDATA%\dsh-launcher\toolchain\node`），免管理员
+  - Git：官方安装包 + runas 提权（UAC）静默安装
+  - pnpm：npm i -g
+  - 支持镜像源（npm registry / GitHub 加速 / Node 二进制）
+- GitHub 通道真实实现：releases API 查询（含镜像）、clone + pnpm install + build、卸载清理
+- 系统托盘：菜单（打开主窗口 / 启动 / 停止 / 重启 / 退出），退出先优雅停止 dsh
+- 窗口行为：关闭按钮直接退出（含 dsh）/ 最小化到托盘 滑动开关
+- 配置联动：端口 / 镜像源 / 6 个滑动开关 持久化到 `%APPDATA%\dsh-launcher\config.json`
+- 设置面板（镜像源预设 + 滑动开关）与版本管理面板（双通道列表 + 安装/卸载）
+- 日志实时流式推送（Tauri event `log://line`，前端实时接收 + 自动滚动 + 导出）
+- 单元测试：日期算法（date_to_days / is_older_than / epoch_to_date）
+
+### 修复
+
+- 日期转天数算法偏移错误（JDN 未减 Unix 纪元偏移 2440588）
+
 ## [v0.1.0] - 2026-08-29
 
 ### 新增

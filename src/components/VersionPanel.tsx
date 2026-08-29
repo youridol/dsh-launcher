@@ -1,0 +1,161 @@
+// 版本管理面板：双通道版本列表 + 安装/卸载
+import { useCallback, useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import {
+  getInstalledVersion,
+  installVersion,
+  listVersions,
+  uninstallDsh,
+  type DshVersion,
+} from "@/lib/tauri";
+import { toast } from "sonner";
+import { Package } from "lucide-react";
+
+export default function VersionPanel() {
+  const [npmVersions, setNpmVersions] = useState<DshVersion[]>([]);
+  const [ghVersions, setGhVersions] = useState<DshVersion[]>([]);
+  const [installed, setInstalled] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setNpmVersions(await listVersions("npm"));
+    } catch (e) {
+      console.error("查询 npm 版本失败", e);
+    }
+    try {
+      setGhVersions(await listVersions("github"));
+    } catch (e) {
+      console.error("查询 GitHub 版本失败", e);
+    }
+    try {
+      setInstalled(await getInstalledVersion());
+    } catch {
+      setInstalled(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  async function handleInstall(channel: string, version: string) {
+    setBusy(true);
+    try {
+      const msg = await installVersion(channel, version);
+      toast.success(msg);
+      refresh();
+    } catch (e) {
+      toast.error(`安装失败: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUninstall() {
+    setBusy(true);
+    try {
+      const msg = await uninstallDsh();
+      toast.success(msg);
+      refresh();
+    } catch (e) {
+      toast.error(`卸载失败: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const channelBadge = (c: string) => (
+    <Badge variant={c === "npm" ? "secondary" : "outline"}>{c}</Badge>
+  );
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Package className="size-4" />
+          版本管理
+          <Badge variant="default">{installed ? `已安装 ${installed}` : "未安装"}</Badge>
+        </CardTitle>
+        <CardDescription>npm 通道 / GitHub 通道（全局单版本，切换先卸载再装）</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <h3 className="mb-2 text-sm font-medium">npm 通道（registry 现有版本）</h3>
+          <div className="max-h-48 space-y-1 overflow-y-auto">
+            {npmVersions.map((v) => (
+              <div
+                key={v.version}
+                className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
+              >
+                <span className="text-sm">
+                  {v.version} {channelBadge(v.channel)}
+                </span>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  disabled={busy || installed === v.version}
+                  onClick={() => handleInstall("npm", v.version)}
+                >
+                  {installed === v.version ? "当前版本" : "安装"}
+                </Button>
+              </div>
+            ))}
+            {npmVersions.length === 0 && (
+              <div className="text-xs text-muted-foreground">暂无版本（请检查 npm 网络/镜像）</div>
+            )}
+          </div>
+        </div>
+
+        <Separator />
+
+        <div>
+          <h3 className="mb-2 text-sm font-medium">GitHub 通道（v0.1.2-alpha.1 及更新源码）</h3>
+          <div className="max-h-48 space-y-1 overflow-y-auto">
+            {ghVersions.map((v) => (
+              <div
+                key={v.version}
+                className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
+              >
+                <span className="text-sm">
+                  {v.version} {channelBadge(v.channel)}
+                </span>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  disabled={busy || installed === v.version}
+                  onClick={() => handleInstall("github", v.version)}
+                >
+                  {installed === v.version ? "当前版本" : "安装"}
+                </Button>
+              </div>
+            ))}
+            {ghVersions.length === 0 && (
+              <div className="text-xs text-muted-foreground">暂无版本（请检查 GitHub 网络/镜像）</div>
+            )}
+          </div>
+        </div>
+
+        <Separator />
+
+        <div className="flex items-center gap-2">
+          <Button variant="destructive" disabled={busy || !installed} onClick={handleUninstall}>
+            卸载 dsh
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            卸载后 dsh 代码被移除；DSH_HOME 用户数据默认保留
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}

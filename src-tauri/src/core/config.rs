@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub npm_registry: String,
     /// GitHub 加速镜像（clone / release 下载，空 = 官方源）
     pub github_mirror: String,
+    /// Node 二进制下载镜像（空 = 官方 nodejs.org）
+    pub node_mirror: String,
     /// 主窗口关闭按钮行为：true = 直接退出（含 dsh），false = 最小化到托盘
     pub close_exits: bool,
     /// 最小化到托盘

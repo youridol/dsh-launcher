@@ -10,6 +10,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tauri::Emitter;
+
+/// 前端日志流事件名
+pub const LOG_EVENT: &str = "log://line";
 
 /// 单文件大小上限：10MB
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
@@ -57,13 +61,26 @@ impl LogLevel {
 /// 全局日志写入器（线程安全）
 pub struct Logger {
     inner: Mutex<LoggerInner>,
+    /// Tauri AppHandle（用于向前端推送日志流；None 表示尚未关联）
+    emitter: Mutex<Option<tauri::AppHandle>>,
 }
 
+/// 日志文件状态
 struct LoggerInner {
     dir: PathBuf,
     current_date: String,
     current_index: u32,
     current_size: u64,
+}
+
+/// 推送给前端的一条日志行
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogLine {
+    pub timestamp: String,
+    pub source: &'static str,
+    pub level: &'static str,
+    pub message: String,
 }
 
 impl Logger {
@@ -78,41 +95,66 @@ impl Logger {
                 current_index: 0,
                 current_size: 0,
             }),
+            emitter: Mutex::new(None),
         };
         logger.cleanup_old();
         Ok(logger)
     }
 
+    /// 关联 Tauri AppHandle（启动时调用一次）
+    pub fn set_emitter(&self, app: tauri::AppHandle) {
+        if let Ok(mut e) = self.emitter.lock() {
+            *e = Some(app);
+        }
+    }
+
     /// 写入一条日志
     pub fn log(&self, source: LogSource, level: LogLevel, msg: &str) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
+        let timestamp = {
+            let Ok(mut inner) = self.inner.lock() else {
+                return;
+            };
+            let now = chrono_now();
+            let date = now.date;
+            // 日期变化 → 切换新文件
+            if inner.current_date != date {
+                inner.current_date = date.clone();
+                inner.current_index = 0;
+                inner.current_size = 0;
+            }
+            let path = inner.dir.join(format!("{date}.log"));
+            let line = format!(
+                "[{}] [{}] [{}] {}\n",
+                now.timestamp,
+                source.as_str(),
+                level.as_str(),
+                msg
+            );
+            // 超限切割
+            if inner.current_size + line.len() as u64 > MAX_FILE_SIZE {
+                rotate(&path, inner.current_index);
+                inner.current_index += 1;
+                inner.current_size = 0;
+            }
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+                if f.write_all(line.as_bytes()).is_ok() {
+                    inner.current_size += line.len() as u64;
+                }
+            }
+            now.timestamp
         };
-        let now = chrono_now();
-        let date = now.date;
-        // 日期变化 → 切换新文件
-        if inner.current_date != date {
-            inner.current_date = date.clone();
-            inner.current_index = 0;
-            inner.current_size = 0;
-        }
-        let path = inner.dir.join(format!("{date}.log"));
-        let line = format!(
-            "[{}] [{}] [{}] {}\n",
-            now.timestamp,
-            source.as_str(),
-            level.as_str(),
-            msg
-        );
-        // 超限切割
-        if inner.current_size + line.len() as u64 > MAX_FILE_SIZE {
-            rotate(&path, inner.current_index);
-            inner.current_index += 1;
-            inner.current_size = 0;
-        }
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
-            if f.write_all(line.as_bytes()).is_ok() {
-                inner.current_size += line.len() as u64;
+        // 锁外推送前端（避免死锁）
+        if let Ok(emitter) = self.emitter.lock() {
+            if let Some(app) = emitter.as_ref() {
+                let _ = app.emit(
+                    LOG_EVENT,
+                    LogLine {
+                        timestamp: timestamp.clone(),
+                        source: source.as_str(),
+                        level: level.as_str(),
+                        message: msg.to_string(),
+                    },
+                );
             }
         }
     }
@@ -160,8 +202,9 @@ fn date_to_days(date: &str) -> Option<i64> {
     let a = (14 - m as i64) / 12;
     let y2 = y + 4800 - a;
     let m2 = m as i64 + 12 * a - 3;
-    let days = d as i64 + (153 * m2 + 2) / 5 + 365 * y2 + y2 / 4 - y2 / 100 + y2 / 400 - 32045;
-    Some(days)
+    // 公历转儒略日数（JDN），再减去 Unix 纪元偏移 2440588 得到自 1970-01-01 的天数
+    let jdn = d as i64 + (153 * m2 + 2) / 5 + 365 * y2 + y2 / 4 - y2 / 100 + y2 / 400 - 32045;
+    Some(jdn - 2440588)
 }
 
 /// 当前时间快照
@@ -240,4 +283,36 @@ fn rotate(path: &Path, index: u32) {
     }
     let new = path.with_extension(format!("log.{}", index));
     let _ = fs::rename(path, &new);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_date_to_days() {
+        // 1970-01-01 = day 0
+        assert_eq!(date_to_days("1970-01-01"), Some(0));
+        // 1970-01-02 = day 1
+        assert_eq!(date_to_days("1970-01-02"), Some(1));
+        // 2024-01-01 应在合理范围（约 19723 天）
+        let d = date_to_days("2024-01-01").unwrap();
+        assert!(d > 19700 && d < 19740, "2024-01-01 = {d}");
+    }
+
+    #[test]
+    fn test_is_older_than() {
+        // 今天 2026-08-29，31 天前应判定为旧
+        assert!(is_older_than("2026-07-28", "2026-08-29", 30));
+        // 30 天内不算旧
+        assert!(!is_older_than("2026-08-01", "2026-08-29", 30));
+        // 非法日期不判定为旧
+        assert!(!is_older_than("bad-date", "2026-08-29", 30));
+    }
+
+    #[test]
+    fn test_epoch_to_date_roundtrip() {
+        let s = epoch_to_date(19723);
+        assert!(s.starts_with("2024-"), "19723 天 = {s}");
+    }
 }

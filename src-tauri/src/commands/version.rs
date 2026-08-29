@@ -2,10 +2,12 @@
 //!
 //! 双通道模型（ADR-0001）：
 //! - npm 通道：registry 现有版本（当前最新 0.1.1-rc.2）
-//! - GitHub 通道：v0.1.2-alpha.1 及更新源码 tag
+//! - GitHub 通道：v0.1.2-alpha.1 及更新源码 tag（core/github.rs）
 //! 全局单版本（ADR-0003）：切换 = 先卸载再装
 
+use crate::core::github as core_github;
 use serde::Serialize;
+use std::process::Command;
 
 /// 通道枚举
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -33,10 +35,10 @@ pub fn list_versions(channel: String) -> Result<Vec<DshVersion>, String> {
     }
 }
 
-/// 已安装的 dsh 版本（全局单版本，探测 npm 全局包）
+/// 已安装的 dsh 版本（全局单版本）
 #[tauri::command]
 pub fn get_installed_version() -> Result<Option<String>, String> {
-    let out = std::process::Command::new("dsh")
+    let out = Command::new("dsh")
         .arg("--version")
         .output()
         .map_err(|e| format!("dsh 未安装或不可用: {e}"))?;
@@ -49,36 +51,33 @@ pub fn get_installed_version() -> Result<Option<String>, String> {
         .filter(|s| !s.is_empty()))
 }
 
-/// 安装指定版本（npm 通道：npm i -g @deepseek-ai/dsh@<version>）
+/// 安装指定版本（npm 通道：npm i -g；GitHub 通道：clone + build）
 #[tauri::command]
 pub fn install_version(channel: String, version: String) -> Result<String, String> {
     match channel.as_str() {
         "npm" => install_npm_version(&version),
-        "github" => Err("GitHub 通道安装尚未实现（clone + pnpm build）".to_string()),
+        "github" => install_github_version(&version),
         other => Err(format!("未知通道: {other}")),
     }
 }
 
-/// 卸载 dsh（全局）
+/// 卸载 dsh（npm 全局 + GitHub 通道目录）
 #[tauri::command]
 pub fn uninstall() -> Result<String, String> {
-    let out = std::process::Command::new("npm")
+    // 1. 卸载 npm 全局包
+    let _ = Command::new("npm")
         .args(["uninstall", "-g", "@deepseek-ai/dsh"])
-        .output()
-        .map_err(|e| format!("npm 执行失败: {e}"))?;
-    if out.status.success() {
-        Ok("dsh 已卸载".to_string())
-    } else {
-        Err(format!(
-            "卸载失败: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))
+        .output();
+    // 2. 清理 GitHub 通道目录
+    let gh_dir = core_github::github_dsh_dir();
+    if gh_dir.exists() {
+        std::fs::remove_dir_all(&gh_dir).map_err(|e| e.to_string())?;
     }
+    Ok("dsh 已卸载（npm 全局包 + GitHub 源码目录）".to_string())
 }
 
 fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
-    // 通过 npm view 获取（避免依赖网络库）
-    let out = std::process::Command::new("npm")
+    let out = Command::new("npm")
         .args(["view", "@deepseek-ai/dsh", "versions", "--json"])
         .output()
         .map_err(|e| format!("npm view 执行失败: {e}"))?;
@@ -100,25 +99,32 @@ fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
 }
 
 fn list_github_versions() -> Result<Vec<DshVersion>, String> {
-    // 通过 GitHub Releases API 获取（占位：API 限流时需镜像）
-    // 实际实现应走配置的 github_mirror
-    Err(
-        "GitHub 通道版本查询暂不可用（API 限流），请配置 GitHub 镜像源后重试".to_string(),
-    )
+    let versions = core_github::list_releases()?;
+    Ok(versions
+        .into_iter()
+        .map(|v| DshVersion {
+            version: v,
+            channel: Channel::Github,
+        })
+        .collect())
 }
 
 fn install_npm_version(version: &str) -> Result<String, String> {
     let spec = format!("@deepseek-ai/dsh@{version}");
-    let out = std::process::Command::new("npm")
+    let out = Command::new("npm")
         .args(["install", "-g", &spec])
         .output()
         .map_err(|e| format!("npm 执行失败: {e}"))?;
     if out.status.success() {
-        Ok(format!("已安装 dsh {version}"))
+        Ok(format!("已安装 dsh {version}（npm 通道）"))
     } else {
         Err(format!(
             "安装失败: {}",
             String::from_utf8_lossy(&out.stderr)
         ))
     }
+}
+
+fn install_github_version(version: &str) -> Result<String, String> {
+    core_github::install_version(version)
 }

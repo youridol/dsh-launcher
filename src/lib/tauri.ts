@@ -77,6 +77,56 @@ export interface LogFile {
   modified: number;
 }
 
+/** 应用配置（对应 Rust ConfigView） */
+export interface AppConfig {
+  port: number;
+  npmRegistry: string;
+  githubMirror: string;
+  nodeMirror: string;
+  closeExits: boolean;
+  minimizeToTray: boolean;
+  keepDshOnExit: boolean;
+  keepDshHomeOnUninstall: boolean;
+  autoStartDsh: boolean;
+  autoOpenBrowser: boolean;
+}
+
+/** 读取配置 */
+export function getConfig(): Promise<AppConfig> {
+  return invoke("get_config");
+}
+
+/** 保存端口 */
+export function setPort(port: number): Promise<void> {
+  return invoke("set_port", { port });
+}
+
+/** 保存镜像源 */
+export function setMirrors(opts: {
+  npmRegistry: string;
+  githubMirror: string;
+  nodeMirror: string;
+}): Promise<void> {
+  return invoke("set_mirrors", {
+    npmRegistry: opts.npmRegistry,
+    githubMirror: opts.githubMirror,
+    nodeMirror: opts.nodeMirror,
+  });
+}
+
+/** 保存滑动开关 */
+export function setSwitches(opts: {
+  closeExits: boolean;
+  minimizeToTray: boolean;
+  keepDshOnExit: boolean;
+  keepDshHomeOnUninstall: boolean;
+  autoStartDsh: boolean;
+  autoOpenBrowser: boolean;
+}): Promise<void> {
+  return invoke("set_switches", opts);
+}
+
+
 /** 列出日志文件 */
 export function listLogs(): Promise<LogFile[]> {
   return invoke("list_logs");
