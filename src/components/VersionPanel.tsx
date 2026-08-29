@@ -1,4 +1,5 @@
 // 版本管理面板：双通道版本列表 + 安装/卸载（最新版本置顶）
+// v0.1.7：安装过程显示进度条（订阅 install://progress 事件）
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Progress } from "@/components/ui/progress";
 import { versionSortDesc } from "@/lib/version";
 import {
   getInstalledVersion,
@@ -18,6 +20,11 @@ import {
   uninstallDsh,
   type DshVersion,
 } from "@/lib/tauri";
+import {
+  listenProgress,
+  PHASE_LABELS,
+  type InstallProgress,
+} from "@/lib/install";
 import { toast } from "sonner";
 import { Package } from "lucide-react";
 
@@ -26,6 +33,8 @@ export default function VersionPanel() {
   const [ghVersions, setGhVersions] = useState<DshVersion[]>([]);
   const [installed, setInstalled] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 安装进度（当前安装任务）
+  const [progress, setProgress] = useState<InstallProgress | null>(null);
 
   // 最新版本置顶（npm 原始顺序是旧→新，需反转；GitHub 已是降序但统一处理）
   const sortedNpm = useMemo(
@@ -56,16 +65,38 @@ export default function VersionPanel() {
     refresh();
   }, [refresh]);
 
+  // 订阅安装进度事件（Rust 端 install://progress）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        unlisten = await listenProgress((p) => {
+          setProgress(p);
+        });
+      } catch (e) {
+        console.error("订阅安装进度事件失败", e);
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   async function handleInstall(channel: string, version: string) {
     setBusy(true);
+    setProgress({ channel, phase: "prepare", percent: 0, message: "准备中…" });
     try {
       const msg = await installVersion(channel, version);
+      setProgress({ channel, phase: "done", percent: 100, message: "安装完成" });
       toast.success(msg);
       refresh();
     } catch (e) {
+      setProgress(null);
       toast.error(`安装失败: ${e}`);
     } finally {
       setBusy(false);
+      // 完成后延迟清除进度条（让用户看到 100%）
+      setTimeout(() => setProgress((p) => (p?.phase === "done" ? null : p)), 2500);
     }
   }
 
@@ -97,6 +128,24 @@ export default function VersionPanel() {
         <CardDescription>npm 通道 / GitHub 通道（全局单版本，切换先卸载再装）</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* 安装进度条（busy 或 done 时显示） */}
+        {progress && (
+          <div className="rounded-md border bg-muted/30 p-3">
+            <div className="mb-2 flex items-center justify-between text-xs">
+              <span className="font-medium">
+                {PHASE_LABELS[progress.phase] ?? progress.phase}
+              </span>
+              <span className="tabular-nums text-muted-foreground">
+                {progress.percent}%
+              </span>
+            </div>
+            {/* 进度条：value 驱动 indicator 宽度 */}
+            <Progress value={progress.percent} />
+            <p className="mt-2 truncate text-xs text-muted-foreground">
+              {progress.message}
+            </p>
+          </div>
+        )}
         <div>
           <h3 className="mb-2 text-sm font-medium">npm 通道（registry 现有版本，最新置顶）</h3>
           <div className="max-h-64 space-y-1 overflow-y-auto">

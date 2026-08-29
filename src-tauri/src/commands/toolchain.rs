@@ -11,9 +11,12 @@
 //! 互不阻塞（各占独立后台线程）。
 
 use crate::core::command;
+use crate::core::events::InstallPhase;
+use crate::core::logging::Logger;
 use crate::core::toolchain as core_toolchain;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 
 /// 工具链项
 #[derive(Debug, Clone, Serialize)]
@@ -41,13 +44,18 @@ pub async fn detect_toolchain() -> Vec<ToolchainItem> {
     .unwrap_or_default()
 }
 
-/// 一键安装指定工具链（异步：下载/安装放后台）
+/// 安装指定工具链（异步：下载/安装放后台）
+/// v0.1.7：流式日志 + 进度事件（logger 来自 AppState）
 #[tauri::command]
-pub async fn install_toolchain(name: String) -> Result<String, String> {
+pub async fn install_toolchain(
+    state: tauri::State<'_, crate::AppState>,
+    name: String,
+) -> Result<String, String> {
+    let logger = Arc::clone(&state.logger);
     tauri::async_runtime::spawn_blocking(move || match name.as_str() {
-        "node" => install_node(),
-        "git" => install_git(),
-        "pnpm" => install_pnpm(),
+        "node" => install_node(&logger),
+        "git" => install_git(&logger),
+        "pnpm" => install_pnpm(&logger),
         other => Err(format!("不支持的工具链: {other}")),
     })
     .await
@@ -144,19 +152,24 @@ fn run_cmd(bin: &str, args: &[&str]) -> Option<String> {
 }
 
 /// 安装 Node：官方 zip 解压到用户级目录（免管理员）
-fn install_node() -> Result<String, String> {
-    core_toolchain::install_node()
+fn install_node(logger: &Arc<Logger>) -> Result<String, String> {
+    core_toolchain::install_node(logger)
 }
 
 /// 安装 Git：官方安装包，需提权（runas）
-fn install_git() -> Result<String, String> {
+fn install_git(logger: &Arc<Logger>) -> Result<String, String> {
     // 下载 Git 官方安装包到本地
     let url = "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/Git-2.47.1-64-bit.exe";
     let dest = core_toolchain::toolchain_dir().join("Git-2.47.1-64-bit.exe");
     // 下载（用户级，无需提权）
-    download_file(url, &dest)?;
+    logger.info(&format!("开始下载 Git 安装包…（{url}）"));
+    logger.progress("toolchain", InstallPhase::Download, 0, "下载 Git 安装包…");
+    download_file(logger, url, &dest)?;
+    logger.progress("toolchain", InstallPhase::Download, 100, "Git 安装包下载完成");
     // 提权运行安装包（静默安装到 Program Files）
     // runas 需要管理员；通过 PowerShell Start-Process -Verb RunAs 触发 UAC
+    logger.info("启动 Git 静默安装（请在弹出的 UAC 中确认）…");
+    logger.progress("toolchain", InstallPhase::Install, 0, "等待 UAC 确认…");
     let ps = format!(
         "Start-Process -FilePath '{}' -ArgumentList '/VERYSILENT','/NORESTART' -Verb RunAs",
         dest.to_string_lossy().replace('\'', "''")
@@ -172,17 +185,19 @@ fn install_git() -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    logger.progress("toolchain", InstallPhase::Done, 100, "Git 安装已启动");
     Ok(format!(
         "Git 安装程序已启动（UAC 确认后完成），安装包位于 {}",
         dest.display()
     ))
 }
 
-/// 下载文件到本地（复用 PowerShell）
-fn download_file(url: &str, dest: &Path) -> Result<(), String> {
+/// 下载文件到本地（复用 PowerShell，无行输出 → 仅日志 + 阶段进度）
+fn download_file(logger: &Arc<Logger>, url: &str, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    logger.info(&format!("下载 {url} → {}", dest.display()));
     let ps = format!(
         "Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
         url.replace('\'', "''"),
@@ -202,19 +217,20 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 安装 pnpm：npm i -g pnpm
-fn install_pnpm() -> Result<String, String> {
+/// 安装 pnpm：npm i -g pnpm（流式 + 进度）
+fn install_pnpm(logger: &Arc<Logger>) -> Result<String, String> {
+    logger.info("开始安装 pnpm（npm i -g pnpm）…");
+    logger.progress("toolchain", InstallPhase::Install, 0, "安装 pnpm…");
     let mut c = command::hidden_cmd("npm");
     c.args(["i", "-g", "pnpm"]);
-    let out = c
-        .output()
-        .map_err(|e| format!("npm 执行失败: {e}"))?;
-    if out.status.success() {
-        Ok("pnpm 安装成功".to_string())
-    } else {
-        Err(format!(
-            "pnpm 安装失败: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
+    crate::core::stream::run_streamed(
+        logger,
+        c,
+        crate::core::logging::LogLevel::Info,
+        crate::core::logging::LogLevel::Warn,
+        None,
+    )
+    .map_err(|e| format!("pnpm 安装失败: {e}"))?;
+    logger.progress("toolchain", InstallPhase::Done, 100, "pnpm 安装完成");
+    Ok("pnpm 安装成功".to_string())
 }

@@ -2,9 +2,11 @@
 
 pub mod command;
 pub mod config;
+pub mod events;
 pub mod github;
 pub mod logging;
 pub mod port;
 pub mod process;
+pub mod stream;
 pub mod toolchain;
 pub mod tray;

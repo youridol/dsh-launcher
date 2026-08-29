@@ -3,11 +3,21 @@
 //! 双通道模型（ADR-0001）：GitHub 通道装 v0.1.2-alpha.1 及更新的源码 tag。
 //! 全局单版本（ADR-0003）：当前激活版本 = 最近一次安装的版本。
 //! 构建产物放 `%LOCALAPPDATA%\dsh-launcher\github-dsh\<version>\`，dsh bin 由 npm 全局链接。
+//!
+//! v0.1.7 修复：
+//! - `hidden_cmd("")` 空命令 bug（`cmd /D /C ""` 退出码 0 但什么都不执行）
+//!   → pnpm install/build 从未真正运行 → 安装"假成功/无响应"；改为 `hidden_cmd("pnpm")`
+//! - clone/install/build 改用流式执行（core/stream.rs）：逐行写日志 + 推前端实时流
+//!   + 进度事件（core/events.rs）
 
 use crate::core::command;
 use crate::core::config::AppConfig;
+use crate::core::events::InstallPhase;
+use crate::core::logging::{LogLevel, Logger};
+use crate::core::stream;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// GitHub 仓库
 const REPO: &str = "deepseek-ai/deepseek-harness";
@@ -58,7 +68,11 @@ pub fn list_releases() -> Result<Vec<String>, String> {
 
 /// 安装指定版本：clone 源码 + pnpm install + build
 /// 返回安装到的目录
-pub fn install_version(version: &str) -> Result<String, String> {
+/// 调用方需提供 Logger（用于日志流 + 进度事件）
+pub fn install_version(
+    version: &str,
+    logger: &Arc<Logger>,
+) -> Result<String, String> {
     let cfg = AppConfig::load();
     // 注意：GitHub release tag 命名形如 `dsh-v0.1.2-alpha.1`（带 dsh- 前缀）。
     // list_releases 返回的 tag_name 即为完整 tag，这里必须原样使用，
@@ -70,6 +84,8 @@ pub fn install_version(version: &str) -> Result<String, String> {
     let dest = github_dsh_dir().join(&tag);
 
     // 已存在则先清理（全局单版本：覆盖旧版本目录）
+    logger.info(&format!("清理旧目录 {}", dest.display()));
+    logger.progress("github", InstallPhase::Prepare, 0, "准备安装目录…");
     if dest.exists() {
         fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
     }
@@ -82,58 +98,89 @@ pub fn install_version(version: &str) -> Result<String, String> {
         format!("{}/{}.git", cfg.github_mirror.trim_end_matches('/'), REPO)
     };
 
-    run_output(
-        {
-            let mut c = command::hidden("git");
-            c.args([
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                &tag,
-                &clone_url,
-                &dest.to_string_lossy(),
-            ]);
-            c
-        },
-        "git clone 失败",
-    )?;
+    logger.info(&format!("开始克隆 {clone_url} (tag={tag})…"));
+    logger.progress("github", InstallPhase::Download, 0, "git clone 开始…");
+    let cb: Arc<stream::LineCallback> = {
+        let logger = Arc::clone(logger);
+        Arc::new(move |_lvl, line| {
+            // 解析 git clone 的接收进度：Receiving objects:  45%
+            if let Some(p) = parse_git_percent(line) {
+                logger.progress("github", InstallPhase::Download, p, "正在克隆源码…");
+            }
+        })
+    };
+    {
+        let mut c = command::hidden("git");
+        c.args([
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            &tag,
+            "--progress",
+            &clone_url,
+            &dest.to_string_lossy(),
+        ]);
+        stream::run_streamed(logger, c, LogLevel::Info, LogLevel::Warn, Some(cb))
+            .map_err(|e| format!("git clone 失败: {e}"))?;
+    }
+    logger.progress("github", InstallPhase::Download, 100, "源码克隆完成");
 
     // pnpm install + build（在源码目录内）
-    run_output(
-        {
-            let mut c = command::hidden_cmd("");
-            c.arg("install").current_dir(&dest);
-            c
-        },
-        "pnpm install 失败",
-    )?;
-    run_output(
-        {
-            let mut c = command::hidden_cmd("");
-            c.args(["run", "build"]).current_dir(&dest);
-            c
-        },
-        "pnpm build 失败",
-    )?;
+    // v0.1.7 修复：此前 hidden_cmd("") 是空命令（cmd /D /C "" 退出码 0 但什么都不做），
+    // pnpm 从未执行 → 安装假成功。改为 hidden_cmd("pnpm")。
+    logger.progress("github", InstallPhase::Install, 0, "pnpm install 开始…");
+    logger.info("开始 pnpm install（安装依赖）…");
+    stream::run_cmd_script(logger, "pnpm", &["install".to_string()], Some(&dest), LogLevel::Info, None)
+        .map_err(|e| format!("pnpm install 失败: {e}"))?;
+    logger.progress("github", InstallPhase::Install, 100, "依赖安装完成");
+
+    logger.progress("github", InstallPhase::Build, 0, "pnpm build 开始…");
+    logger.info("开始 pnpm build（构建产物）…");
+    stream::run_cmd_script(
+        logger,
+        "pnpm",
+        &["run".to_string(), "build".to_string()],
+        Some(&dest),
+        LogLevel::Info,
+        None,
+    )
+    .map_err(|e| format!("pnpm build 失败: {e}"))?;
+    logger.progress("github", InstallPhase::Build, 100, "构建完成");
+    logger.progress("github", InstallPhase::Done, 100, "安装完成");
 
     Ok(format!("GitHub 通道 {version} 构建完成，位于 {}", dest.display()))
 }
 
-/// 运行命令并检查退出码
-fn run_output(mut cmd: std::process::Command, err_prefix: &str) -> Result<(), String> {
-    let out = cmd
-        .output()
-        .map_err(|e| format!("{err_prefix}: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let msg = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
-        } else {
-            stdout.trim().to_string()
-        };
-        return Err(format!("{err_prefix}: {msg}"));
+/// 从 git clone 输出行解析接收百分比（Receiving objects: 45%）
+fn parse_git_percent(line: &str) -> Option<u8> {
+    let p = line.find('%')?;
+    // 往前找数字段
+    let before = &line[..p];
+    let digits_start = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map(|(i, _)| i + 1)
+        .unwrap_or(0);
+    let num: u32 = before[digits_start..].trim().parse().ok()?;
+    Some(num.min(100) as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_git_percent;
+
+    #[test]
+    fn test_parse_git_percent() {
+        // 标准 git clone 进度行（含大小/速率）
+        assert_eq!(parse_git_percent("Receiving objects:  45% (45/100)"), Some(45));
+        assert_eq!(parse_git_percent("Receiving objects: 100% (100/100)"), Some(100));
+        assert_eq!(parse_git_percent("Receiving objects: 12%, 3.4 MiB | 1.2 MiB/s"), Some(12));
+        // 非进度行不解析
+        assert_eq!(parse_git_percent("Cloning into 'foo'..."), None);
+        assert_eq!(parse_git_percent("remote: Enumerating objects: 5"), None);
+        // 超 100 封顶
+        assert_eq!(parse_git_percent("Receiving objects: 105%"), Some(100));
     }
-    Ok(())
 }

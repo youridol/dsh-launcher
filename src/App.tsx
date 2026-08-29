@@ -1,6 +1,7 @@
 // dsh-launcher 主界面：dark 主题
 // 两列布局：左列（状态控制 / 工具链 / Web GUI），右列（版本管理 / 设置 / 日志）
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import StatusCard from "@/components/StatusCard";
 import ToolchainPanel from "@/components/ToolchainPanel";
 import WebViewPanel from "@/components/WebViewPanel";
@@ -16,6 +17,14 @@ export default function App() {
     document.documentElement.classList.add("dark");
   }, []);
 
+  // 应用版本号（来自 tauri.conf.json，构建时注入）
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    getVersion()
+      .then((v) => setVersion(`v${v}`))
+      .catch(() => setVersion(""));
+  }, []);
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto max-w-7xl p-4">
@@ -27,7 +36,7 @@ export default function App() {
               deepseek-harness 启动器与运行环境管理器
             </p>
           </div>
-          <div className="text-xs text-muted-foreground">v0.1.5</div>
+          <div className="text-xs text-muted-foreground">{version}</div>
         </header>
 
         {/* 两列布局：左列 3 区块 + 右列 3 区块 */}

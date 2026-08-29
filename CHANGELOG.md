@@ -1,5 +1,33 @@
 # Changelog
 
+## [v0.1.7] - 2026-08-30
+
+### 修复
+
+- 修复 GitHub 通道 v0.1.2-alpha.1 安装无响应/假成功：
+  - 根因：pnpm install/build 误用 `hidden_cmd("")`（`cmd /D /C ""` 退出码 0 但什么都不执行），
+    dsh 依赖从未安装、从未构建 → 安装"成功"但 dsh 不可用
+  - 修复：改为 `hidden_cmd("pnpm")`，真实执行 pnpm install + pnpm run build
+- 修复日志无实时流式输出：
+  - process.rs 此前"先读完全部 stdout 再读 stderr"，若 stdout 长期无数据且进程存活，
+    stderr 输出永远不会被读取 → dsh 日志缺失；改为双线程并行读取 stdout/stderr
+  - 日志面板自动滚动失效（滚动容器是 ScrollArea viewport，非内层 div）；
+    ScrollArea 增加 viewportRef 透传，实时流新行自动滚动到底
+- 修复安装过程无日志：安装（npm/GitHub 通道、工具链）改用流式执行（core/stream.rs），
+  每行输出实时写日志（落盘 + 前端 `log://line` 事件）
+
+### 新增
+
+- 安装进度条：新增 `install://progress` 进度事件（core/events.rs），
+  版本管理面板显示阶段（准备/下载/安装依赖/构建）+ 百分比 + 消息；
+  git clone 解析真实下载百分比，npm/pnpm 按输出行数阶段估算
+- 新增 core/stream.rs 流式命令执行器（双线程读管道、逐行写日志、行回调推进度）
+
+### 变更
+
+- 工具链安装（Node/Git/pnpm）同步接入日志流与进度事件
+- 流式输出清理行尾 `\r`（git/pnpm 进度行的回车符不再污染日志）
+
 ## [v0.1.6] - 2026-08-29
 
 ### 修复

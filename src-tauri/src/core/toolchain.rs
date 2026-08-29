@@ -7,8 +7,10 @@
 
 use crate::core::command;
 use crate::core::config::AppConfig;
+use crate::core::logging::Logger;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// 工具链根目录：%LOCALAPPDATA%\dsh-launcher\toolchain
 pub fn toolchain_dir() -> PathBuf {
@@ -31,10 +33,12 @@ pub fn dir_exists(p: &Path) -> bool {
 
 /// 下载文件到本地
 /// base_url 可为镜像源；返回下载后本地路径
-fn download(url: &str, dest: &Path) -> Result<(), String> {
+/// v0.1.7：加日志输出（PowerShell 无行输出，仅记录开始/结束）
+fn download(logger: &Arc<Logger>, url: &str, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    logger.info(&format!("下载 {url} → {}", dest.display()));
     // 用 PowerShell 的 Invoke-WebRequest 下载（Windows 自带，无需额外依赖）
     let ps = format!(
         "Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
@@ -52,12 +56,14 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    logger.info(&format!("下载完成：{}（{} 字节）", dest.display(), dest.metadata().map(|m| m.len()).unwrap_or(0)));
     Ok(())
 }
 
 /// 解压 zip 到目标目录（PowerShell Expand-Archive）
-fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
+fn unzip(logger: &Arc<Logger>, zip: &Path, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    logger.info(&format!("解压 {} → {}", zip.display(), dest.display()));
     let ps = format!(
         "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
         zip.to_string_lossy().replace('\'', "''"),
@@ -74,11 +80,13 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    logger.info(&format!("解压完成：{}", dest.display()));
     Ok(())
 }
 
 /// 下载 Node zip 并解压到 node_dir（用户级，免管理员）
-pub fn install_node() -> Result<String, String> {
+/// v0.1.7：接受 logger，输出日志 + 进度事件
+pub fn install_node(logger: &Arc<Logger>) -> Result<String, String> {
     let cfg = AppConfig::load();
     // Node 官方 zip 地址；镜像源可通过配置覆盖
     let version = "v22.19.0"; // 满足 dsh 要求 22.19+；后续可做成可选项
@@ -91,11 +99,14 @@ pub fn install_node() -> Result<String, String> {
     let url = format!("{base}/{file}");
 
     let zip_path = toolchain_dir().join(&file);
-    download(&url, &zip_path)?;
+    logger.progress("toolchain", crate::core::events::InstallPhase::Download, 0, "下载 Node…");
+    download(logger, &url, &zip_path)?;
+    logger.progress("toolchain", crate::core::events::InstallPhase::Download, 50, "Node 下载完成，解压中…");
 
     // 解压到临时目录，再把 node 目录提取出来
     let tmp_dir = toolchain_dir().join("tmp-node");
-    unzip(&zip_path, &tmp_dir)?;
+    unzip(logger, &zip_path, &tmp_dir)?;
+    logger.progress("toolchain", crate::core::events::InstallPhase::Install, 75, "Node 解压完成，部署中…");
 
     // 解压后结构：tmp/node-v22.19.0-win-x64/...
     let extracted = tmp_dir.join(format!("node-{version}-win-x64"));
@@ -123,6 +134,7 @@ pub fn install_node() -> Result<String, String> {
     }
     let _ = fs::remove_dir_all(&tmp_dir);
     let _ = fs::remove_file(&zip_path);
+    logger.progress("toolchain", crate::core::events::InstallPhase::Done, 100, "Node 安装完成");
 
     Ok(format!("Node {version} 已安装到 {}", node_install.display()))
 }

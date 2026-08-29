@@ -255,19 +255,35 @@ impl ProcessManager {
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
 
-            // 读 stdout 写日志（INFO）
-            if let Some(stdout) = stdout {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines().map_while(Result::ok) {
-                    logger.log(LogSource::Dsh, LogLevel::Info, &line);
-                }
+            // 两个独立线程并行读取 stdout/stderr，避免管道互堵：
+            // 原实现"先读完全部 stdout 再读 stderr"，若 stdout 长期无数据且进程存活，
+            // stderr 输出永远不会被读取 → 日志流缺失（v0.1.7 修复）。
+            let logger_out = Arc::clone(&logger);
+            let logger_err = Arc::clone(&logger);
+            let t_out = stdout.map(|pipe| {
+                thread::spawn(move || {
+                    let reader = BufReader::new(pipe);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let line = line.trim_end_matches('\r').to_string();
+                        logger_out.log(LogSource::Dsh, LogLevel::Info, &line);
+                    }
+                })
+            });
+            let t_err = stderr.map(|pipe| {
+                thread::spawn(move || {
+                    let reader = BufReader::new(pipe);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let line = line.trim_end_matches('\r').to_string();
+                        logger_err.log(LogSource::Dsh, LogLevel::Warn, &line);
+                    }
+                })
+            });
+            // 等待两个读取线程收尾（stdout/stderr 管道 EOF 后返回）
+            if let Some(t) = t_out {
+                let _ = t.join();
             }
-            // 读 stderr 写日志（WARN）
-            if let Some(stderr) = stderr {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    logger.log(LogSource::Dsh, LogLevel::Warn, &line);
-                }
+            if let Some(t) = t_err {
+                let _ = t.join();
             }
 
             // 进程退出后：回收子进程

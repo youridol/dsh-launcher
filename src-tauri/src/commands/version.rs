@@ -6,10 +6,17 @@
 //! 全局单版本（ADR-0003）：切换 = 先卸载再装
 //!
 //! 并发策略：所有命令 async + spawn_blocking（npm/git 是网络/磁盘 IO，不占 IPC 线程）
+//! v0.1.7：安装改为流式执行（core/stream.rs）+ 进度事件（core/events.rs），
+//! 输出实时写日志并推前端，避免"无响应"。
 
 use crate::core::command;
 use crate::core::github as core_github;
+use crate::core::logging::LogLevel;
+use crate::core::stream;
+use crate::AppState;
 use serde::Serialize;
+use std::sync::Arc;
+use tauri::State;
 
 /// 通道枚举
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -59,11 +66,17 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
 }
 
 /// 安装指定版本（npm 通道：npm i -g；GitHub 通道：clone + build）
+/// v0.1.7：流式执行 + 进度事件 + 日志实时输出
 #[tauri::command]
-pub async fn install_version(channel: String, version: String) -> Result<String, String> {
+pub async fn install_version(
+    state: State<'_, AppState>,
+    channel: String,
+    version: String,
+) -> Result<String, String> {
+    let logger = Arc::clone(&state.logger);
     tauri::async_runtime::spawn_blocking(move || match channel.as_str() {
-        "npm" => install_npm_version(&version),
-        "github" => install_github_version(&version),
+        "npm" => install_npm_version(&logger, &version),
+        "github" => core_github::install_version(&version, &logger),
         other => Err(format!("未知通道: {other}")),
     })
     .await
@@ -125,23 +138,36 @@ fn list_github_versions() -> Result<Vec<DshVersion>, String> {
         .collect())
 }
 
-fn install_npm_version(version: &str) -> Result<String, String> {
+/// npm 通道安装：流式执行 npm install -g，输出写日志 + 进度事件
+fn install_npm_version(logger: &Arc<crate::core::logging::Logger>, version: &str) -> Result<String, String> {
     let spec = format!("@deepseek-ai/dsh@{version}");
+    logger.info(&format!("开始 npm 安装 {spec} …"));
+    // npm 在非 TTY 下无逐字节进度，采用阶段估算：
+    // 每收到一行输出步进 5%，到 90% 封顶，完成时置 100。
+    // Fn 闭包需 Send+Sync，用 Arc<AtomicU8> 保存步进状态
+    let step = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let cb: Arc<stream::LineCallback> = {
+        let logger = Arc::clone(logger);
+        let step = Arc::clone(&step);
+        Arc::new(move |_lvl, line| {
+            if line.starts_with("npm warn") || line.starts_with("npm error") || line.starts_with("npm ERR") {
+                return;
+            }
+            use std::sync::atomic::Ordering;
+            let s = (step.load(Ordering::Relaxed) + 5).min(90);
+            step.store(s, Ordering::Relaxed);
+            logger.progress("npm", crate::core::events::InstallPhase::Install, s, line.to_string());
+        })
+    };
     let mut c = command::hidden_cmd("npm");
     c.args(["install", "-g", &spec]);
-    let out = c
-        .output()
-        .map_err(|e| format!("npm 执行失败: {e}"))?;
-    if out.status.success() {
-        Ok(format!("已安装 dsh {version}（npm 通道）"))
-    } else {
-        Err(format!(
-            "安装失败: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
-}
-
-fn install_github_version(version: &str) -> Result<String, String> {
-    core_github::install_version(version)
+    stream::run_streamed(logger, c, LogLevel::Info, LogLevel::Warn, Some(cb))
+        .map_err(|e| format!("npm 安装失败: {e}"))?;
+    logger.progress(
+        "npm",
+        crate::core::events::InstallPhase::Done,
+        100,
+        "安装完成",
+    );
+    Ok(format!("已安装 dsh {version}（npm 通道）"))
 }

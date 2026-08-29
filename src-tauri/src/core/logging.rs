@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::Emitter;
 
+use crate::core::events::{self, InstallPhase};
+
 /// 前端日志流事件名
 pub const LOG_EVENT: &str = "log://line";
 
@@ -108,6 +110,21 @@ impl Logger {
         }
     }
 
+    /// 便捷方法：启动器自身 INFO 日志（source 固定 Launcher）
+    pub fn info(&self, msg: &str) {
+        self.log(LogSource::Launcher, LogLevel::Info, msg);
+    }
+
+    /// 便捷方法：启动器自身 WARN 日志
+    pub fn warn(&self, msg: &str) {
+        self.log(LogSource::Launcher, LogLevel::Warn, msg);
+    }
+
+    /// 便捷方法：启动器自身 ERROR 日志
+    pub fn error(&self, msg: &str) {
+        self.log(LogSource::Launcher, LogLevel::Error, msg);
+    }
+
     /// 写入一条日志
     pub fn log(&self, source: LogSource, level: LogLevel, msg: &str) {
         let timestamp = {
@@ -144,17 +161,38 @@ impl Logger {
             now.timestamp
         };
         // 锁外推送前端（避免死锁）
+        self.emit_line(timestamp, source, level, msg);
+    }
+
+    /// 推送到前端一条日志行（内部使用，写入文件后调用）
+    fn emit_line(&self, timestamp: String, source: LogSource, level: LogLevel, msg: &str) {
         if let Ok(emitter) = self.emitter.lock() {
             if let Some(app) = emitter.as_ref() {
                 let _ = app.emit(
                     LOG_EVENT,
                     LogLine {
-                        timestamp: timestamp.clone(),
+                        timestamp,
                         source: source.as_str(),
                         level: level.as_str(),
                         message: msg.to_string(),
                     },
                 );
+            }
+        }
+    }
+
+    /// 推送到前端一条安装进度事件（安装流程在后台线程调用）
+    pub fn progress(
+        &self,
+        channel: &str,
+        phase: InstallPhase,
+        percent: u8,
+        message: impl Into<String>,
+    ) {
+        let payload = events::progress(channel, phase, percent, message);
+        if let Ok(emitter) = self.emitter.lock() {
+            if let Some(app) = emitter.as_ref() {
+                events::emit(app, &payload);
             }
         }
     }

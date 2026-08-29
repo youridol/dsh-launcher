@@ -35,7 +35,7 @@ export default function LogPanel() {
   const [streamLines, setStreamLines] = useState<LogLine[]>([]);
   // 是否为"实时流"视图
   const [liveMode, setLiveMode] = useState(true);
-  // 内容容器引用（自动滚动）
+  // 内容容器引用（自动滚动；指向 ScrollArea 的 viewport，即真正的滚动容器）
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // 订阅 Rust 日志事件（实时流）
@@ -62,7 +62,7 @@ export default function LogPanel() {
     };
   }, []);
 
-  // 自动滚动到底部
+  // 自动滚动到底部（滚动容器是 ScrollArea 的 viewport）
   useEffect(() => {
     if (liveMode && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -169,17 +169,15 @@ export default function LogPanel() {
           </div>
         )}
         {/* 日志内容 */}
-        <ScrollArea className="flex-1 rounded-md border bg-muted/30 p-2 font-mono text-xs">
-          <div
-            ref={scrollRef}
-            className="h-full overflow-auto"
-          >
-            <pre className="whitespace-pre-wrap">
-              {liveMode
-                ? streamText || "等待日志…"
-                : content || "暂无日志"}
-            </pre>
-          </div>
+        <ScrollArea
+          viewportRef={scrollRef}
+          className="min-h-64 flex-1 rounded-md border bg-muted/30 p-2 font-mono text-xs"
+        >
+          <pre className="whitespace-pre-wrap">
+            {liveMode
+              ? streamText || "等待日志…"
+              : content || "暂无日志"}
+          </pre>
         </ScrollArea>
       </CardContent>
     </Card>
