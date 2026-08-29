@@ -67,7 +67,7 @@ pub fn install_version(channel: String, version: String) -> Result<String, Strin
 pub fn uninstall() -> Result<String, String> {
     // 1. 卸载 npm 全局包
     let _ = {
-        let mut c = command::hidden("npm");
+        let mut c = command::hidden_cmd("");
         c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
         c.output()
     };
@@ -80,7 +80,7 @@ pub fn uninstall() -> Result<String, String> {
 }
 
 fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
-    let mut c = command::hidden("npm");
+    let mut c = command::hidden_cmd("");
     c.args(["view", "@deepseek-ai/dsh", "versions", "--json"]);
     let out = c
         .output()
@@ -115,7 +115,7 @@ fn list_github_versions() -> Result<Vec<DshVersion>, String> {
 
 fn install_npm_version(version: &str) -> Result<String, String> {
     let spec = format!("@deepseek-ai/dsh@{version}");
-    let mut c = command::hidden("npm");
+    let mut c = command::hidden_cmd("");
     c.args(["install", "-g", &spec]);
     let out = c
         .output()

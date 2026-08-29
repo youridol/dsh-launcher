@@ -1,6 +1,6 @@
 // dsh-launcher 主界面：dark 主题
 // 布局：Tabs（总览 / 版本管理 / 设置）
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import StatusCard from "@/components/StatusCard";
 import ToolchainPanel from "@/components/ToolchainPanel";
 import WebViewPanel from "@/components/WebViewPanel";
@@ -16,8 +16,6 @@ export default function App() {
     document.documentElement.classList.add("dark");
   }, []);
 
-  const [tab, setTab] = useState("overview");
-
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto max-w-6xl space-y-4 p-4">
@@ -31,7 +29,8 @@ export default function App() {
           <div className="text-xs text-muted-foreground">v0.1.0</div>
         </header>
 
-        <Tabs value={tab} onValueChange={setTab}>
+        {/* 非受控 Tabs（base-ui 官方推荐模式，避免受控 value 状态竞争导致切换无响应） */}
+        <Tabs defaultValue="overview">
           <TabsList>
             <TabsTrigger value="overview">总览</TabsTrigger>
             <TabsTrigger value="versions">版本管理</TabsTrigger>

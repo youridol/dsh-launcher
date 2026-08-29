@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.1.3] - 2026-08-29
+
+### 修复
+
+- 修复版本管理无法列出 deepseek-harness 版本、无法安装 dsh 的 bug：
+  - 根因：`DETACHED_PROCESS` 标志导致 npm.cmd（batch 脚本）的子进程输出管道失效，
+    `npm view` / `npm install` 成功退出但 stdout 为空；且 `Command::new("npm")` 在
+    Windows 上找不到 .cmd 可执行文件
+  - 方案：`command::hidden` 移除 `DETACHED_PROCESS`（仅保留 `CREATE_NO_WINDOW`）；
+    npm/pnpm 统一经 `cmd.exe /D /C` 包装（`command::hidden_cmd`），按 PATHEXT 正确解析 .cmd
+- 修复 总览/版本管理/设置 Tabs 来回切换未响应的 bug：
+  - 根因：base-ui Tabs 受控模式（value + onValueChange）的 React state 竞争
+  - 方案：改为非受控 `defaultValue`（官方推荐模式）
+
+### 新增
+
+- 集成测试 tests/npm_versions_test.rs：验证 npm view / npm install 在无窗口 flags 下输出正常
+- Edge headless CDP 冒烟测试脚本验证 Tabs 切换（临时脚本，未入库）
+
 ## [v0.1.2] - 2026-08-29
 
 ### 新增

@@ -111,8 +111,14 @@ fn detect_python() -> ToolchainItem {
 }
 
 /// 运行命令取 stdout（首行）
+/// npm/pnpm 是 .cmd（batch），需用 cmd.exe 包装；其余 .exe 直接执行
 fn run_cmd(bin: &str, args: &[&str]) -> Option<String> {
-    let mut c = command::hidden(bin);
+    let is_cmd_script = matches!(bin, "npm" | "pnpm");
+    let mut c = if is_cmd_script {
+        command::hidden_cmd(bin)
+    } else {
+        command::hidden(bin)
+    };
     c.args(args);
     let out = c.output().ok()?;
     if !out.status.success() {
@@ -185,7 +191,7 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
 
 /// 安装 pnpm：npm i -g pnpm
 fn install_pnpm() -> Result<String, String> {
-    let mut c = command::hidden("npm");
+    let mut c = command::hidden_cmd("");
     c.args(["i", "-g", "pnpm"]);
     let out = c
         .output()

@@ -101,7 +101,7 @@ pub fn install_version(version: &str) -> Result<String, String> {
     // pnpm install + build（在源码目录内）
     run_output(
         {
-            let mut c = command::hidden("pnpm");
+            let mut c = command::hidden_cmd("");
             c.arg("install").current_dir(&dest);
             c
         },
@@ -109,7 +109,7 @@ pub fn install_version(version: &str) -> Result<String, String> {
     )?;
     run_output(
         {
-            let mut c = command::hidden("pnpm");
+            let mut c = command::hidden_cmd("");
             c.args(["run", "build"]).current_dir(&dest);
             c
         },
