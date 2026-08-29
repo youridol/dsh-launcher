@@ -68,6 +68,7 @@ pub fn run() {
             commands::version::list_versions,
             commands::version::get_installed_version,
             commands::version::install_version,
+            commands::version::get_install_paths,
             commands::version::uninstall,
             commands::logs::list_logs,
             commands::logs::read_log,

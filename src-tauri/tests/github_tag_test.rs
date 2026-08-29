@@ -34,5 +34,12 @@ fn test_list_releases_format() {
     // 这里验证 github_dsh_dir 路径构造不含多余前缀
     let dir = github::github_dsh_dir();
     assert!(dir.to_string_lossy().contains("github-dsh"), "目录路径异常: {dir:?}");
+    // v0.2.3：克隆目录固定为 deepseek-harness（不再按版本号命名）
+    let clone = github::github_clone_dir();
+    assert!(
+        clone.to_string_lossy().ends_with("deepseek-harness"),
+        "克隆目录应固定为 deepseek-harness: {clone:?}"
+    );
     println!("✅ github_dsh_dir: {}", dir.display());
+    println!("✅ github_clone_dir: {}", clone.display());
 }

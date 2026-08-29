@@ -15,10 +15,12 @@ import { Progress } from "@/components/ui/progress";
 import { versionSortDesc } from "@/lib/version";
 import {
   getInstalledVersion,
+  getInstallPaths,
   installVersion,
   listVersions,
   uninstallDsh,
   type DshVersion,
+  type InstallPaths,
 } from "@/lib/tauri";
 import {
   listenProgress,
@@ -32,6 +34,10 @@ export default function VersionPanel() {
   const [npmVersions, setNpmVersions] = useState<DshVersion[]>([]);
   const [ghVersions, setGhVersions] = useState<DshVersion[]>([]);
   const [installed, setInstalled] = useState<string | null>(null);
+  // 安装路径（显示 harness 下载/安装目录）
+  const [paths, setPaths] = useState<InstallPaths | null>(null);
+  // 刷新安装状态中
+  const [refreshingInstalled, setRefreshingInstalled] = useState(false);
   const [busy, setBusy] = useState(false);
   // 正在刷新版本的通道（npm / github / null）
   const [refreshing, setRefreshing] = useState<"npm" | "github" | null>(null);
@@ -49,11 +55,12 @@ export default function VersionPanel() {
   );
 
   const refresh = useCallback(async () => {
-    // 并发拉取（互不阻塞）：npm 版本 + GitHub 版本 + 已安装版本
-    const [npm, gh, installed] = await Promise.allSettled([
+    // 并发拉取（互不阻塞）：npm 版本 + GitHub 版本 + 已安装版本 + 安装路径
+    const [npm, gh, installed, paths] = await Promise.allSettled([
       listVersions("npm"),
       listVersions("github"),
       getInstalledVersion(),
+      getInstallPaths(),
     ]);
     if (npm.status === "fulfilled") setNpmVersions(npm.value);
     else console.error("查询 npm 版本失败", npm.reason);
@@ -61,6 +68,27 @@ export default function VersionPanel() {
     else console.error("查询 GitHub 版本失败", gh.reason);
     if (installed.status === "fulfilled") setInstalled(installed.value);
     else setInstalled(null);
+    if (paths.status === "fulfilled") setPaths(paths.value);
+    else console.error("查询安装路径失败", paths.reason);
+  }, []);
+
+  // 单独刷新安装状态（不重新拉版本列表）
+  const refreshInstalled = useCallback(async () => {
+    setRefreshingInstalled(true);
+    try {
+      const [inst, paths] = await Promise.allSettled([
+        getInstalledVersion(),
+        getInstallPaths(),
+      ]);
+      if (inst.status === "fulfilled") setInstalled(inst.value);
+      else setInstalled(null);
+      if (paths.status === "fulfilled") setPaths(paths.value);
+    } catch (e) {
+      console.error("刷新安装状态失败", e);
+      toast.error(`刷新安装状态失败: ${e}`);
+    } finally {
+      setRefreshingInstalled(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -134,17 +162,63 @@ export default function VersionPanel() {
     <Badge variant={c === "npm" ? "secondary" : "outline"}>{c}</Badge>
   );
 
+  // 安装状态显示：github:x.y.z / npm:x.y.z → 去掉前缀
+  const installedLabel = (() => {
+    if (!installed) return null;
+    const idx = installed.indexOf(":");
+    if (idx === -1) return installed;
+    const ch = installed.slice(0, idx);
+    const ver = installed.slice(idx + 1);
+    return `${ch === "github" ? "GitHub" : "npm"} ${ver}`;
+  })();
+
+  // 判断某通道某版本是否为当前安装版本（installed 前缀 + 版本匹配）
+  const isCurrent = (channel: string, version: string) => {
+    if (!installed) return false;
+    const idx = installed.indexOf(":");
+    const ch = idx === -1 ? "" : installed.slice(0, idx);
+    const ver = idx === -1 ? installed : installed.slice(idx + 1);
+    // GitHub 列表 tag 形如 dsh-v0.1.2-alpha.1，package.json version 为 0.1.2-alpha.1
+    const ver2 = version.replace(/^dsh-v/, "");
+    return ch === channel && (ver === version || ver === ver2);
+  };
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Package className="size-4" />
           版本管理
-          <Badge variant="default">{installed ? `已安装 ${installed}` : "未安装"}</Badge>
+          <Badge variant="default">{installedLabel ?? "未安装"}</Badge>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            disabled={refreshingInstalled}
+            onClick={refreshInstalled}
+            title="刷新安装状态"
+          >
+            <RefreshCw className={refreshingInstalled ? "animate-spin" : ""} />
+          </Button>
         </CardTitle>
         <CardDescription>npm 通道 / GitHub 通道（全局单版本，切换先卸载再装）</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* 安装/下载目录（任务：显示 harness 下载和安装目录） */}
+        {paths && (
+          <div className="space-y-1 rounded-md border bg-muted/30 p-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-medium">GitHub 安装目录</span>
+              <Badge variant={paths.githubInstalled ? "default" : "outline"}>
+                {paths.githubInstalled ? "已安装" : "未安装"}
+              </Badge>
+            </div>
+            <code className="block break-all text-muted-foreground">{paths.githubDir}</code>
+            <Separator className="my-2" />
+            <span className="font-medium">npm 全局目录</span>
+            <code className="block break-all text-muted-foreground">{paths.npmGlobalDir}</code>
+            <code className="block break-all text-muted-foreground">↳ bin: {paths.npmBinDir}</code>
+          </div>
+        )}
         {/* 安装进度条（busy 或 done 时显示） */}
         {progress && (
           <div className="rounded-md border bg-muted/30 p-3">
@@ -188,10 +262,10 @@ export default function VersionPanel() {
                 <Button
                   size="xs"
                   variant="secondary"
-                  disabled={busy || installed === v.version}
+                  disabled={busy || isCurrent("npm", v.version)}
                   onClick={() => handleInstall("npm", v.version)}
                 >
-                  {installed === v.version ? "当前版本" : "安装"}
+                  {isCurrent("npm", v.version) ? "当前版本" : "安装"}
                 </Button>
               </div>
             ))}
@@ -228,10 +302,10 @@ export default function VersionPanel() {
                 <Button
                   size="xs"
                   variant="secondary"
-                  disabled={busy || installed === v.version}
+                  disabled={busy || isCurrent("github", v.version)}
                   onClick={() => handleInstall("github", v.version)}
                 >
-                  {installed === v.version ? "当前版本" : "安装"}
+                  {isCurrent("github", v.version) ? "当前版本" : "安装"}
                 </Button>
               </div>
             ))}

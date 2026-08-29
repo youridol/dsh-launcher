@@ -1,5 +1,27 @@
 # Changelog
 
+## [v0.2.3] - 2026-08-30
+
+### 修复
+
+- 修复安装完成后启动失败 `program not found`：
+  - 根因：GitHub 通道安装仅 clone + build，dsh 从未加入全局 PATH → 启动器 `dsh web` 找不到命令
+  - 修复：启动逻辑优先 PATH 的 dsh，找不到时改用安装目录内 `pnpm dsh web --port <p>`
+    （cwd=安装目录，与手动流程一致）；安装完成后在 npm 全局目录创建 dsh.cmd shim，
+    `dsh` 命令全局可用
+- 修复安装完成后安装状态不实时更新：
+  - 根因：`get_installed_version` 依赖 `dsh --version`（PATH 查找），GitHub 安装后 dsh 不在 PATH → 恒为未安装
+  - 修复：优先检测 GitHub 安装目录（本地文件系统），再尝试 PATH 的 dsh --version；
+    GitHub 目录返回 `github:<version>`，npm 返回 `npm:<version>`
+
+### 变更
+
+- GitHub 克隆目录固定为 `%LOCALAPPDATA%\dsh-launcher\github-dsh\deepseek-harness`
+  （不再按版本号命名，全局单版本覆盖同一目录）
+- 界面改三列布局：左列（状态控制/工具链）、中列（版本管理/Web GUI）、右列（设置/日志）
+- 版本管理面板新增：安装状态独立刷新按钮 + harness 下载/安装目录显示
+  （GitHub 目录 + npm 全局目录）
+
 ## [v0.2.2] - 2026-08-30
 
 ### 修复

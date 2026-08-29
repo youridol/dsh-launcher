@@ -95,11 +95,49 @@ impl ProcessManager {
             return Err(format!("端口 {port} 已被占用，请在设置中修改端口后重试"));
         }
 
+        // 启动命令：优先 PATH 中的 dsh（npm 全局）；
+        // 找不到则用 GitHub 安装目录内的 `pnpm dsh web`（cwd=安装目录），
+        // 修复 v0.2.3：GitHub 安装后 dsh 不在 PATH → program not found。
         let mut cmd = command::hidden("dsh");
         cmd.args(["web", "--port", &port.to_string()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
+
+        // 探测 PATH 中的 dsh 是否存在；不存在则改用安装目录内 pnpm dsh
+        let dsh_in_path = command::hidden("dsh")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let github_dir = crate::core::github::github_clone_dir();
+        if !dsh_in_path && github_dir.join("package.json").exists() {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Info,
+                &format!("PATH 中无 dsh，改用安装目录启动: {}", github_dir.display()),
+            );
+            // pnpm dsh web --port <p>，cwd = 安装目录（pnpm 脚本: node --import tsx/esm apps/cli/src/bin.ts）
+            let mut c = command::hidden_cmd("pnpm");
+            c.args(["dsh", "web", "--port", &port.to_string()])
+                .current_dir(&github_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null());
+            cmd = c;
+        } else if dsh_in_path {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Info,
+                "使用 PATH 中的 dsh 启动",
+            );
+        } else {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                "PATH 中无 dsh 且未找到 GitHub 安装目录",
+            );
+        }
 
         let child = cmd.spawn().map_err(|e| {
             self.logger.log(
@@ -107,7 +145,7 @@ impl ProcessManager {
                 LogLevel::Error,
                 &format!("spawn dsh 失败: {e}"),
             );
-            format!("启动 dsh 失败: {e}（请确认 dsh 已安装并在 PATH 中）")
+            format!("启动 dsh 失败: {e}（请确认 dsh 已安装并在 PATH 中，或已通过版本管理安装 GitHub 通道）")
         })?;
 
         self.logger.log(

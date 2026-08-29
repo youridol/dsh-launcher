@@ -15,6 +15,7 @@ use crate::core::logging::LogLevel;
 use crate::core::stream;
 use crate::AppState;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
 
@@ -66,10 +67,26 @@ pub async fn list_versions(
     .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
-/// 已安装的 dsh 版本（全局单版本；dsh --version 是进程调用，放后台）
+/// 已安装的 dsh 版本（全局单版本）
+/// v0.2.3：优先检测 GitHub 安装目录（github-dsh\deepseek-harness），
+/// 再尝试 PATH 中的 dsh --version（npm 全局）。修复 GitHub 安装后状态不更新。
 #[tauri::command]
 pub async fn get_installed_version() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
+        // 1. GitHub 安装目录存在 → 返回目录中 package.json 版本（或标记 github）
+        if crate::core::github::github_installed() {
+            let dir = crate::core::github::github_clone_dir();
+            let pkg = dir.join("package.json");
+            if let Ok(content) = std::fs::read_to_string(&pkg) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(v) = json.get("version").and_then(|v| v.as_str()) {
+                        return Ok(Some(format!("github:{v}")));
+                    }
+                }
+            }
+            return Ok(Some("github:已安装".to_string()));
+        }
+        // 2. PATH 中的 dsh --version（npm 全局）
         let mut c = command::hidden("dsh");
         c.arg("--version");
         let out = c.output().map_err(|e| format!("dsh 未安装或不可用: {e}"))?;
@@ -79,7 +96,8 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
         Ok(String::from_utf8(out.stdout)
             .ok()
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()))
+            .filter(|s| !s.is_empty())
+            .map(|v| format!("npm:{v}")))
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
@@ -113,12 +131,17 @@ pub async fn uninstall() -> Result<String, String> {
             c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
             c.output()
         };
-        // 2. 清理 GitHub 通道目录
-        let gh_dir = core_github::github_dsh_dir();
+        // 2. 清理 GitHub 通道克隆目录（固定 deepseek-harness）
+        let gh_dir = core_github::github_clone_dir();
         if gh_dir.exists() {
             std::fs::remove_dir_all(&gh_dir).map_err(|e| e.to_string())?;
         }
-        Ok::<_, String>("dsh 已卸载（npm 全局包 + GitHub 源码目录）".to_string())
+        // 3. 清理全局 dsh.cmd shim（GitHub 安装时创建的）
+        let shim = crate::core::github::global_shim_path();
+        if let Some(p) = shim {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok::<_, String>("dsh 已卸载（npm 全局包 + GitHub 源码目录 + 全局命令）".to_string())
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
@@ -156,6 +179,58 @@ fn list_github_versions() -> Result<Vec<DshVersion>, String> {
             channel: Channel::Github,
         })
         .collect())
+}
+
+/// 安装路径信息（任务：显示 harness 下载/安装目录）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPaths {
+    /// GitHub 通道克隆/构建目录
+    pub github_dir: String,
+    /// GitHub 已安装
+    pub github_installed: bool,
+    /// npm 全局包目录（npm prefix -g）
+    pub npm_global_dir: String,
+    /// npm 全局 bin 目录
+    pub npm_bin_dir: String,
+}
+
+/// 获取 harness 下载/安装目录（本地文件系统，无网络）
+#[tauri::command]
+pub async fn get_install_paths() -> InstallPaths {
+    tauri::async_runtime::spawn_blocking(|| {
+        let github_dir = crate::core::github::github_clone_dir();
+        let npm_prefix = npm_prefix_dir();
+        InstallPaths {
+            github_dir: github_dir.to_string_lossy().to_string(),
+            github_installed: crate::core::github::github_installed(),
+            npm_global_dir: npm_prefix.to_string_lossy().to_string(),
+            // Windows：npm 全局命令目录 = prefix 本身（PATH 条目即 prefix）
+            npm_bin_dir: npm_prefix.to_string_lossy().to_string(),
+        }
+    })
+    .await
+    .unwrap_or(InstallPaths {
+        github_dir: String::new(),
+        github_installed: false,
+        npm_global_dir: String::new(),
+        npm_bin_dir: String::new(),
+    })
+}
+
+/// npm 全局 prefix 目录
+fn npm_prefix_dir() -> PathBuf {
+    let mut c = command::hidden_cmd("npm");
+    c.args(["prefix", "-g"]);
+    if let Ok(out) = c.output() {
+        if out.status.success() {
+            let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !prefix.is_empty() {
+                return std::path::PathBuf::from(prefix);
+            }
+        }
+    }
+    std::path::PathBuf::from(".")
 }
 
 /// npm 通道安装：流式执行 npm install -g，输出写日志 + 进度事件

@@ -22,13 +22,29 @@ use std::sync::Arc;
 /// GitHub 仓库
 const REPO: &str = "deepseek-ai/deepseek-harness";
 
-/// GitHub 通道源码目录：%LOCALAPPDATA%\dsh-launcher\github-dsh\<version>
+/// GitHub 通道源码目录根：%LOCALAPPDATA%\dsh-launcher\github-dsh
 pub fn github_dsh_dir() -> PathBuf {
     std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("dsh-launcher")
         .join("github-dsh")
+}
+
+/// 克隆目录固定名（v0.2.3：不再按版本号命名，统一为 deepseek-harness）
+const CLONE_DIR: &str = "deepseek-harness";
+
+/// GitHub 通道克隆/构建目录：%LOCALAPPDATA%\dsh-launcher\github-dsh\deepseek-harness
+pub fn github_clone_dir() -> PathBuf {
+    github_dsh_dir().join(CLONE_DIR)
+}
+
+/// GitHub 通道已安装（克隆目录存在且有内容）
+pub fn github_installed() -> bool {
+    let dir = github_clone_dir();
+    dir.is_dir()
+        && dir.join("package.json").exists()
+        && dir.join("apps").is_dir()
 }
 
 /// 查询 GitHub 可用版本（tags）
@@ -114,9 +130,11 @@ pub fn install_version(
     if tag.is_empty() {
         return Err("版本号为空".to_string());
     }
-    let dest = github_dsh_dir().join(&tag);
+    // v0.2.3：克隆目录固定为 github-dsh\deepseek-harness（不再按版本号命名），
+    // 全局单版本语义保留（每次安装覆盖同一目录）
+    let dest = github_clone_dir();
 
-    // 已存在则先清理（全局单版本：覆盖旧版本目录）
+    // 已存在则先清理（全局单版本：覆盖旧目录）
     logger.info(&format!("清理旧目录 {}", dest.display()));
     logger.progress("github", InstallPhase::Prepare, 0, "准备安装目录…");
     if dest.exists() {
@@ -217,9 +235,73 @@ pub fn install_version(
     )
     .map_err(|e| format!("pnpm build 失败: {e}"))?;
     logger.progress("github", InstallPhase::Build, 100, "构建完成");
+
+    // v0.2.3：创建全局 dsh shim（加入 npm 全局 bin 目录），
+    // 使 `dsh` 命令全局可用并指向本安装目录（否则启动报 program not found）
+    install_global_shim(logger)?;
+
     logger.progress("github", InstallPhase::Done, 100, "安装完成");
 
     Ok(format!("GitHub 通道 {version} 构建完成，位于 {}", dest.display()))
+}
+
+/// 在 npm 全局 bin 目录创建 dsh.cmd shim，指向 GitHub 安装目录内的 `pnpm dsh`。
+/// 目标：`dsh` 命令在任意目录可用（PATH 无需额外配置）。
+fn install_global_shim(logger: &Arc<Logger>) -> Result<(), String> {
+    let dest = github_clone_dir();
+    let bin_dir = npm_global_bin_dir();
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("创建全局 bin 目录失败: {e}"))?;
+
+    // dsh.cmd：cd 到安装目录后执行 pnpm dsh，透传参数
+    let shim = format!(
+        "@echo off\r\ncd /d \"{}\"\r\npnpm dsh %*\r\n",
+        dest.to_string_lossy().replace('"', "\"")
+    );
+    let shim_path = bin_dir.join("dsh.cmd");
+    fs::write(&shim_path, shim).map_err(|e| format!("写入 dsh.cmd 失败: {e}"))?;
+    logger.info(&format!("已创建全局 dsh 命令: {} → 安装目录", shim_path.display()));
+    Ok(())
+}
+
+/// 全局 dsh.cmd shim 路径（卸载时清理用）
+pub fn global_shim_path() -> Option<PathBuf> {
+    let p = npm_global_bin_dir().join("dsh.cmd");
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// 定位 npm 全局 bin 目录（Windows：npm 把 .cmd 直接放 prefix 目录，PATH 条目即 prefix）
+fn npm_global_bin_dir() -> PathBuf {
+    let prefix = npm_prefix();
+    prefix
+}
+
+/// npm 全局 prefix 目录（`npm prefix -g`；失败回退常见位置）
+fn npm_prefix() -> PathBuf {
+    let mut c = command::hidden_cmd("npm");
+    c.args(["prefix", "-g"]);
+    if let Ok(out) = c.output() {
+        if out.status.success() {
+            let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !prefix.is_empty() {
+                return PathBuf::from(prefix);
+            }
+        }
+    }
+    // 回退：pnpm 全局目录
+    std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("pnpm")
+}
+
+/// 定位 npm 全局 bin 目录（非 Windows 平台：prefix/bin 惯例；当前项目仅 Windows）
+#[allow(dead_code)]
+fn npm_global_bin_dir_unix() -> PathBuf {
+    npm_prefix().join("bin")
 }
 
 /// 从 git clone 输出行解析接收百分比（Receiving objects: 45%）

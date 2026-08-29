@@ -1,5 +1,5 @@
 // dsh-launcher 主界面：dark 主题
-// 两列布局：左列（状态控制 / 工具链 / Web GUI），右列（版本管理 / 设置 / 日志）
+// 三列布局：左列（状态控制 / 工具链）、中列（版本管理 / Web GUI）、右列（设置 / 日志）
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import StatusCard from "@/components/StatusCard";
@@ -39,21 +39,24 @@ export default function App() {
           <div className="text-xs text-muted-foreground">{version}</div>
         </header>
 
-        {/* 两列布局：左列 3 区块 + 右列 3 区块 */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          {/* 左列 */}
+        {/* 三列布局：日志独立第三列 */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          {/* 左列：状态控制 + 工具链 */}
           <div className="space-y-0">
             <StatusCard />
             <Separator className="my-5" />
             <ToolchainPanel />
+          </div>
+
+          {/* 中列：版本管理 + Web GUI */}
+          <div className="space-y-0">
+            <VersionPanel />
             <Separator className="my-5" />
             <WebViewPanel />
           </div>
 
-          {/* 右列 */}
+          {/* 右列：设置 + 日志（第三列） */}
           <div className="space-y-0">
-            <VersionPanel />
-            <Separator className="my-5" />
             <SettingsPanel />
             <Separator className="my-5" />
             <LogPanel />

@@ -60,6 +60,19 @@ export function getInstalledVersion(): Promise<string | null> {
   return invoke("get_installed_version");
 }
 
+/** 安装路径信息 */
+export interface InstallPaths {
+  githubDir: string;
+  githubInstalled: boolean;
+  npmGlobalDir: string;
+  npmBinDir: string;
+}
+
+/** 获取 harness 下载/安装目录 */
+export function getInstallPaths(): Promise<InstallPaths> {
+  return invoke("get_install_paths");
+}
+
 /** 安装指定版本 */
 export function installVersion(channel: string, version: string): Promise<string> {
   return invoke("install_version", { channel, version });
