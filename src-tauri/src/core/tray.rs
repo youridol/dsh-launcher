@@ -60,31 +60,46 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
                     }
                 }
                 MENU_START => {
-                    if let Err(e) = process.start(AppConfig::load().port) {
-                        logger.log(
-                            LogSource::Launcher,
-                            LogLevel::Error,
-                            &format!("托盘启动 dsh 失败: {e}"),
-                        );
-                    }
+                    // 异步启动：不阻塞托盘事件循环
+                    let p = Arc::clone(&process);
+                    let logger = Arc::clone(&logger);
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = p.start(AppConfig::load().port) {
+                            logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Error,
+                                &format!("托盘启动 dsh 失败: {e}"),
+                            );
+                        }
+                    });
                 }
                 MENU_STOP => {
-                    if let Err(e) = process.stop() {
-                        logger.log(
-                            LogSource::Launcher,
-                            LogLevel::Error,
-                            &format!("托盘停止 dsh 失败: {e}"),
-                        );
-                    }
+                    // 异步停止：stop 内部有 ≤5s 等待，必须放后台避免卡托盘
+                    let p = Arc::clone(&process);
+                    let logger = Arc::clone(&logger);
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = p.stop() {
+                            logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Error,
+                                &format!("托盘停止 dsh 失败: {e}"),
+                            );
+                        }
+                    });
                 }
                 MENU_RESTART => {
-                    if let Err(e) = process.restart() {
-                        logger.log(
-                            LogSource::Launcher,
-                            LogLevel::Error,
-                            &format!("托盘重启 dsh 失败: {e}"),
-                        );
-                    }
+                    // 异步重启：内部含 stop(≤5s) + start
+                    let p = Arc::clone(&process);
+                    let logger = Arc::clone(&logger);
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = p.restart() {
+                            logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Error,
+                                &format!("托盘重启 dsh 失败: {e}"),
+                            );
+                        }
+                    });
                 }
                 MENU_QUIT => {
                     quit_app(app, process.clone());
@@ -97,12 +112,20 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
 }
 
 /// 退出应用：先优雅停止 dsh（除非配置"退出时驻留"），再退出
+/// 异步执行：停止任务放后台线程，完成后退出应用（避免卡主线程）
 pub fn quit_app(app: &AppHandle, process: Arc<ProcessManager>) {
     let cfg = AppConfig::load();
-    if !cfg.keep_dsh_on_exit {
-        let _ = process.stop();
+    if cfg.keep_dsh_on_exit {
+        // 驻留 dsh，直接退出
+        app.exit(0);
+        return;
     }
-    app.exit(0);
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = process.stop();
+        // 停止完成后退出应用
+        app_handle.exit(0);
+    });
 }
 
 /// 窗口事件处理：关闭/最小化按滑动开关行为
@@ -116,12 +139,18 @@ pub fn handle_window_event(
     match event {
         WindowEvent::CloseRequested { api, .. } => {
             if cfg.close_exits {
-                // 开关 1 开：直接退出（含 dsh）
+                // 开关 1 开：直接退出（含 dsh）——异步停止后退出，不卡窗口事件
                 logger.log(LogSource::Launcher, LogLevel::Info, "关闭按钮 → 直接退出");
-                let _ = process.stop();
-                // 不阻止默认关闭，应用退出
-                // 但需在退出前停止 dsh；此处先停止，窗口继续关闭
-                // 应用退出由 Tauri 默认行为处理
+                api.prevent_close();
+                let win = window.clone();
+                // 预先 clone AppHandle（引用不能跨线程）
+                let app_handle = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = process.stop();
+                    // 停止完成后退出应用（退出应用会关闭所有窗口）
+                    let _ = win.destroy();
+                    app_handle.exit(0);
+                });
             } else {
                 // 开关 1 关：拦截关闭，最小化到托盘
                 logger.log(

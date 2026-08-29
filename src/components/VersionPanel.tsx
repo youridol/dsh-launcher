@@ -27,21 +27,18 @@ export default function VersionPanel() {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    try {
-      setNpmVersions(await listVersions("npm"));
-    } catch (e) {
-      console.error("查询 npm 版本失败", e);
-    }
-    try {
-      setGhVersions(await listVersions("github"));
-    } catch (e) {
-      console.error("查询 GitHub 版本失败", e);
-    }
-    try {
-      setInstalled(await getInstalledVersion());
-    } catch {
-      setInstalled(null);
-    }
+    // 并发拉取（互不阻塞）：npm 版本 + GitHub 版本 + 已安装版本
+    const [npm, gh, installed] = await Promise.allSettled([
+      listVersions("npm"),
+      listVersions("github"),
+      getInstalledVersion(),
+    ]);
+    if (npm.status === "fulfilled") setNpmVersions(npm.value);
+    else console.error("查询 npm 版本失败", npm.reason);
+    if (gh.status === "fulfilled") setGhVersions(gh.value);
+    else console.error("查询 GitHub 版本失败", gh.reason);
+    if (installed.status === "fulfilled") setInstalled(installed.value);
+    else setInstalled(null);
   }, []);
 
   useEffect(() => {

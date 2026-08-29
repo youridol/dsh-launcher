@@ -1,5 +1,23 @@
 # Changelog
 
+## [v0.1.4] - 2026-08-29
+
+### 变更（并发架构）
+
+- 所有阻塞型 IPC 命令改为 async + `spawn_blocking`（不占 Tauri IPC 线程，互不阻塞）：
+  - `commands/dsh.rs`：启动/停止/重启
+  - `commands/version.rs`：版本列表/已装版本/安装/卸载
+  - `commands/toolchain.rs`：工具链检测/一键安装
+- `ProcessManager` 增加 `op_lock` 生命周期操作互斥锁，防止并发双 start/双 stop 竞态；
+  restart 改为无锁版内部调用（避免重入死锁）
+- 托盘菜单启动/停止/重启改为异步 spawn（原同步 stop 的 ≤5s 等待会卡托盘事件循环）
+- 窗口关闭（直接退出模式）与托盘退出改为异步：先后台停止 dsh，完成后再退出应用
+- 前端 VersionPanel 改 `Promise.allSettled` 并发拉取（npm/GitHub/已装版本互不阻塞）
+
+### 新增
+
+- 并发回归测试 tests/concurrency_test.rs：验证 3×300ms 长任务并发执行（实测 300ms，串行应 900ms）
+
 ## [v0.1.3] - 2026-08-29
 
 ### 修复

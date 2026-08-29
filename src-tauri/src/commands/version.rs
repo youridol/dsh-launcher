@@ -4,6 +4,8 @@
 //! - npm 通道：registry 现有版本（当前最新 0.1.1-rc.2）
 //! - GitHub 通道：v0.1.2-alpha.1 及更新源码 tag（core/github.rs）
 //! 全局单版本（ADR-0003）：切换 = 先卸载再装
+//!
+//! 并发策略：所有命令 async + spawn_blocking（npm/git 是网络/磁盘 IO，不占 IPC 线程）
 
 use crate::core::command;
 use crate::core::github as core_github;
@@ -25,62 +27,72 @@ pub struct DshVersion {
     pub channel: Channel,
 }
 
-/// 获取某通道的可用版本列表
+/// 获取某通道的可用版本列表（异步）
 #[tauri::command]
-pub fn list_versions(channel: String) -> Result<Vec<DshVersion>, String> {
-    match channel.as_str() {
+pub async fn list_versions(channel: String) -> Result<Vec<DshVersion>, String> {
+    tauri::async_runtime::spawn_blocking(move || match channel.as_str() {
         "npm" => list_npm_versions(),
         "github" => list_github_versions(),
         other => Err(format!("未知通道: {other}")),
-    }
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
-/// 已安装的 dsh 版本（全局单版本）
+/// 已安装的 dsh 版本（全局单版本；dsh --version 是进程调用，放后台）
 #[tauri::command]
-pub fn get_installed_version() -> Result<Option<String>, String> {
-    let mut c = command::hidden("dsh");
-    c.arg("--version");
-    let out = c
-        .output()
-        .map_err(|e| format!("dsh 未安装或不可用: {e}"))?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    Ok(String::from_utf8(out.stdout)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty()))
+pub async fn get_installed_version() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut c = command::hidden("dsh");
+        c.arg("--version");
+        let out = c.output().map_err(|e| format!("dsh 未安装或不可用: {e}"))?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(String::from_utf8(out.stdout)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
 /// 安装指定版本（npm 通道：npm i -g；GitHub 通道：clone + build）
 #[tauri::command]
-pub fn install_version(channel: String, version: String) -> Result<String, String> {
-    match channel.as_str() {
+pub async fn install_version(channel: String, version: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || match channel.as_str() {
         "npm" => install_npm_version(&version),
         "github" => install_github_version(&version),
         other => Err(format!("未知通道: {other}")),
-    }
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
 /// 卸载 dsh（npm 全局 + GitHub 通道目录）
 #[tauri::command]
-pub fn uninstall() -> Result<String, String> {
-    // 1. 卸载 npm 全局包
-    let _ = {
-        let mut c = command::hidden_cmd("");
-        c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
-        c.output()
-    };
-    // 2. 清理 GitHub 通道目录
-    let gh_dir = core_github::github_dsh_dir();
-    if gh_dir.exists() {
-        std::fs::remove_dir_all(&gh_dir).map_err(|e| e.to_string())?;
-    }
-    Ok("dsh 已卸载（npm 全局包 + GitHub 源码目录）".to_string())
+pub async fn uninstall() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // 1. 卸载 npm 全局包
+        let _ = {
+            let mut c = command::hidden_cmd("npm");
+            c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
+            c.output()
+        };
+        // 2. 清理 GitHub 通道目录
+        let gh_dir = core_github::github_dsh_dir();
+        if gh_dir.exists() {
+            std::fs::remove_dir_all(&gh_dir).map_err(|e| e.to_string())?;
+        }
+        Ok::<_, String>("dsh 已卸载（npm 全局包 + GitHub 源码目录）".to_string())
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
 fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
-    let mut c = command::hidden_cmd("");
+    let mut c = command::hidden_cmd("npm");
     c.args(["view", "@deepseek-ai/dsh", "versions", "--json"]);
     let out = c
         .output()
@@ -115,7 +127,7 @@ fn list_github_versions() -> Result<Vec<DshVersion>, String> {
 
 fn install_npm_version(version: &str) -> Result<String, String> {
     let spec = format!("@deepseek-ai/dsh@{version}");
-    let mut c = command::hidden_cmd("");
+    let mut c = command::hidden_cmd("npm");
     c.args(["install", "-g", &spec]);
     let out = c
         .output()

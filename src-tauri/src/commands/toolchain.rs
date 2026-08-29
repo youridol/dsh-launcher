@@ -6,10 +6,14 @@
 //! - Node：官方 zip 解压到用户级目录（免管理员，见 core/toolchain.rs）
 //! - Git：官方安装包，需提权 → spawn runas（Q22）
 //! - pnpm：npm i -g
+//!
+//! 并发策略：detect/install 都是多进程调用 + 网络下载，全部 async + spawn_blocking，
+//! 互不阻塞（各占独立后台线程）。
 
 use crate::core::command;
 use crate::core::toolchain as core_toolchain;
 use serde::Serialize;
+use std::path::Path;
 
 /// 工具链项
 #[derive(Debug, Clone, Serialize)]
@@ -21,27 +25,33 @@ pub struct ToolchainItem {
     pub state: &'static str,
 }
 
-/// 检测所有工具链
+/// 检测所有工具链（异步：多进程版本探测放后台）
 #[tauri::command]
-pub fn detect_toolchain() -> Vec<ToolchainItem> {
-    vec![
-        detect_node(),
-        detect_npm(),
-        detect_pnpm(),
-        detect_git(),
-        detect_python(),
-    ]
+pub async fn detect_toolchain() -> Vec<ToolchainItem> {
+    tauri::async_runtime::spawn_blocking(|| {
+        vec![
+            detect_node(),
+            detect_npm(),
+            detect_pnpm(),
+            detect_git(),
+            detect_python(),
+        ]
+    })
+    .await
+    .unwrap_or_default()
 }
 
-/// 一键安装指定工具链（走官方通道）
+/// 一键安装指定工具链（异步：下载/安装放后台）
 #[tauri::command]
-pub fn install_toolchain(name: String) -> Result<String, String> {
-    match name.as_str() {
+pub async fn install_toolchain(name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || match name.as_str() {
         "node" => install_node(),
         "git" => install_git(),
         "pnpm" => install_pnpm(),
         other => Err(format!("不支持的工具链: {other}")),
-    }
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
 fn detect_node() -> ToolchainItem {
@@ -53,7 +63,10 @@ fn detect_node() -> ToolchainItem {
             c.arg("--version");
             c.output().ok().and_then(|o| {
                 if o.status.success() {
-                    String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                    String::from_utf8(o.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
                 } else {
                     None
                 }
@@ -166,7 +179,7 @@ fn install_git() -> Result<String, String> {
 }
 
 /// 下载文件到本地（复用 PowerShell）
-fn download_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
+fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -191,7 +204,7 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
 
 /// 安装 pnpm：npm i -g pnpm
 fn install_pnpm() -> Result<String, String> {
-    let mut c = command::hidden_cmd("");
+    let mut c = command::hidden_cmd("npm");
     c.args(["i", "-g", "pnpm"]);
     let out = c
         .output()

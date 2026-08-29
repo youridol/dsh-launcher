@@ -46,6 +46,9 @@ pub struct ProcessManager {
     logger: Arc<Logger>,
     /// 是否正在停止（避免重复触发）
     stopping: AtomicBool,
+    /// 生命周期操作互斥锁：保证同一时刻只有一个 start/stop/restart 在执行
+    /// （防止多线程并发调用导致双进程/双杀竞态）
+    op_lock: Mutex<()>,
 }
 
 impl ProcessManager {
@@ -56,6 +59,7 @@ impl ProcessManager {
             port: Arc::new(Mutex::new(0)),
             logger,
             stopping: AtomicBool::new(false),
+            op_lock: Mutex::new(()),
         }
     }
 
@@ -71,6 +75,13 @@ impl ProcessManager {
 
     /// 启动 dsh web（阻塞等待 spawn 结果）
     pub fn start(&self, port: u16) -> Result<(), String> {
+        // 生命周期操作互斥：避免并发双 start
+        let _op = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.start_locked(port)
+    }
+
+    /// 无锁版 start（调用方必须已持有 op_lock）
+    fn start_locked(&self, port: u16) -> Result<(), String> {
         if matches!(
             self.status(),
             DshStatus::Running | DshStatus::Starting | DshStatus::Stopping
@@ -120,6 +131,13 @@ impl ProcessManager {
 
     /// 停止 dsh（SIGTERM → 等待 ≤5s → 强杀）
     pub fn stop(&self) -> Result<(), String> {
+        // 生命周期操作互斥：避免并发双 stop
+        let _op = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.stop_locked()
+    }
+
+    /// 无锁版 stop（调用方必须已持有 op_lock）
+    fn stop_locked(&self) -> Result<(), String> {
         if self.stopping.swap(true, Ordering::SeqCst) {
             return Ok(()); // 已在停止中
         }
@@ -210,13 +228,15 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// 重启：停止后同配置重启
+    /// 重启：停止后同配置重启（拿一次 op_lock，内部调用无锁版本避免重入死锁）
     pub fn restart(&self) -> Result<(), String> {
+        // 生命周期操作互斥：避免与 start/stop 并发
+        let _op = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
         let port = self.current_port();
-        self.stop()?;
+        self.stop_locked()?;
         // 等待端口释放
         thread::sleep(Duration::from_millis(500));
-        self.start(port)
+        self.start_locked(port)
     }
 
     /// 后台监视线程：读输出写日志 + 进程退出时更新状态
