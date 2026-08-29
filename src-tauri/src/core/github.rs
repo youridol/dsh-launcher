@@ -42,21 +42,56 @@ pub fn list_releases() -> Result<Vec<String>, String> {
         format!("{}/{}", cfg.github_mirror.trim_end_matches('/'), "https://api.github.com/repos/".to_string() + REPO + "/releases?per_page=50")
     };
     let mut cmd = command::hidden("curl");
-    cmd.args(["-s", "-H", "User-Agent: dsh-launcher", &api_base]);
+    // -f：HTTP 4xx/5xx 时 curl 返回非零退出码（否则 -s 静默吞掉错误响应）
+    // -L：跟随 307/308 重定向（镜像可能跳转）
+    // -w：把 HTTP 状态码追加到 stdout，便于诊断
+    cmd.args([
+        "-sS",
+        "-fL",
+        "-w",
+        "\\n__HTTP_CODE__:%{http_code}",
+        "-H",
+        "User-Agent: dsh-launcher",
+        &api_base,
+    ]);
     let out = cmd
         .output()
         .map_err(|e| format!("curl 执行失败: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
-            "查询 GitHub releases 失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // -f 失败时 curl 会把响应体输出到 stdout（限流/错误信息），尝试提取 message
+        let text = String::from_utf8_lossy(&out.stdout);
+        let hint = extract_api_error_message(&text).unwrap_or_else(|| {
+            if stderr.is_empty() {
+                format!("HTTP 请求失败（退出码 {})", out.status.code().unwrap_or(-1))
+            } else {
+                stderr
+            }
+        });
+        return Err(format!("查询 GitHub releases 失败: {hint}"));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-        format!("解析 GitHub API 响应失败: {e}（可能是限流或网络问题）")
+    // 去掉 -w 追加的状态码标记行
+    let text = text
+        .rsplit_once("__HTTP_CODE__:")
+        .map(|(body, _)| body)
+        .unwrap_or(&text);
+    let json: serde_json::Value = serde_json::from_str(text.trim()).map_err(|e| {
+        format!(
+            "解析 GitHub API 响应失败: {e}（响应可能不是 JSON，请检查镜像源/网络）"
+        )
     })?;
-    let arr = json.as_array().ok_or("GitHub API 返回非数组")?;
+    // GitHub API 错误返回 JSON 对象（如限流 message）；数组才是正常 releases
+    let arr = match json.as_array() {
+        Some(arr) => arr,
+        None => {
+            // 尝试提取 API 返回的错误信息，给出可操作的提示
+            let hint = extract_api_error_message(&text).unwrap_or_else(|| {
+                "响应不是版本列表数组（请检查 GitHub 网络/镜像源/是否限流）".to_string()
+            });
+            return Err(format!("查询 GitHub releases 失败: {hint}"));
+        }
+    };
     let mut versions: Vec<String> = arr
         .iter()
         .filter_map(|v| v.get("tag_name")?.as_str().map(|s| s.to_string()))
@@ -64,6 +99,19 @@ pub fn list_releases() -> Result<Vec<String>, String> {
     // 按 tag 名降序（最新在前）；alpha 版本自然排序即可
     versions.sort_by(|a, b| b.cmp(a));
     Ok(versions)
+}
+
+/// 从 GitHub API 错误响应中提取 message 字段（限流/仓库不存在等）
+fn extract_api_error_message(text: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let msg = json.get("message")?.as_str()?.to_string();
+    // 附带限流提示，便于用户理解
+    let hint = if msg.to_lowercase().contains("rate limit") {
+        format!("{msg}（GitHub API 未认证限流 60 次/小时，稍后再试或配置镜像源）")
+    } else {
+        msg
+    };
+    Some(hint)
 }
 
 /// 安装指定版本：clone 源码 + pnpm install + build
@@ -170,6 +218,7 @@ fn parse_git_percent(line: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::parse_git_percent;
+    use super::extract_api_error_message;
 
     #[test]
     fn test_parse_git_percent() {
@@ -182,5 +231,25 @@ mod tests {
         assert_eq!(parse_git_percent("remote: Enumerating objects: 5"), None);
         // 超 100 封顶
         assert_eq!(parse_git_percent("Receiving objects: 105%"), Some(100));
+    }
+
+    #[test]
+    fn test_extract_api_error_message() {
+        // GitHub API 限流响应（对象 + message）
+        let rate = r#"{"message":"API rate limit exceeded for 1.2.3.4.","documentation_url":"https://docs.github.com/rest"}"#;
+        let hint = extract_api_error_message(rate).unwrap();
+        assert!(hint.contains("rate limit"), "应含限流提示: {hint}");
+        assert!(hint.contains("限流"), "应含中文限流说明: {hint}");
+
+        // 仓库不存在响应
+        let not_found = r#"{"message":"Not Found"}"#;
+        assert_eq!(extract_api_error_message(not_found).as_deref(), Some("Not Found"));
+
+        // 非 JSON（如镜像返回 HTML）→ None，由调用方给出通用提示
+        assert_eq!(extract_api_error_message("<html>502 Bad Gateway</html>"), None);
+        assert_eq!(extract_api_error_message(""), None);
+
+        // 正常数组响应 → None（不需要错误信息）
+        assert_eq!(extract_api_error_message(r#"[{"tag_name":"dsh-v0.1.2-alpha.1"}]"#), None);
     }
 }

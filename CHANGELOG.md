@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.2.0] - 2026-08-30
+
+### 修复
+
+- 修复刷新 GitHub 版本列表报"GitHub API 返回非数组"：
+  - 根因：curl `-s` 不检查 HTTP 状态码，GitHub API 限流（403）时响应是
+    `{"message":"API rate limit exceeded..."}` 对象而非数组，JSON 解析成功但
+    `as_array()` 失败 → 报笼统的"返回非数组"
+  - 修复：curl 改用 `-sS -fL`（HTTP 4xx/5xx 即失败）+ 追加 HTTP 状态码；
+    失败/非数组时提取响应体 `message` 字段给出可操作原因
+    （限流提示 60 次/小时、可配置镜像源），不再笼统报错
+
+### 新增
+
+- `extract_api_error_message`：从 GitHub API 错误响应提取 message（含限流中文提示），
+  配套单元测试
+
 ## [v0.1.9] - 2026-08-30
 
 ### 变更
