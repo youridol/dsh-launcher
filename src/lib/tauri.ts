@@ -95,6 +95,7 @@ export interface AppConfig {
   port: number;
   npmRegistry: string;
   githubMirror: string;
+  githubToken: string;
   nodeMirror: string;
   closeExits: boolean;
   minimizeToTray: boolean;
@@ -125,6 +126,11 @@ export function setMirrors(opts: {
     githubMirror: opts.githubMirror,
     nodeMirror: opts.nodeMirror,
   });
+}
+
+/** 保存 GitHub Token（防 API 限流 / git 认证增强） */
+export function setGithubToken(token: string): Promise<void> {
+  return invoke("set_github_token", { token });
 }
 
 /** 保存滑动开关 */

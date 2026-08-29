@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getDshStatus,
   getConfig,
@@ -117,15 +118,15 @@ export default function StatusCard() {
 
   const running = status === "running" || status === "starting";
 
-  // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器
+  // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器（opener 插件）
   async function openWebGui() {
     const label = "dsh-web-gui";
-    const existing = await WebviewWindow.getByLabel(label);
-    if (existing) {
-      await existing.setFocus();
-      return;
-    }
     try {
+      const existing = await WebviewWindow.getByLabel(label);
+      if (existing) {
+        await existing.setFocus();
+        return;
+      }
       await new WebviewWindow(label, {
         url: `http://127.0.0.1:${port}`,
         title: "deepseek-harness Web UI",
@@ -133,13 +134,19 @@ export default function StatusCard() {
         height: 750,
       });
     } catch (e) {
-      console.error("打开 Web GUI 失败", e);
-      toast.error(`打开 Web GUI 失败: ${e}`);
+      console.error("打开内嵌 Web GUI 失败", e);
+      toast.error(`打开内嵌 Web GUI 失败: ${e}`);
     }
   }
 
-  function openExternal() {
-    window.open(`http://127.0.0.1:${port}`, "_blank");
+  async function openExternal() {
+    try {
+      // 用 opener 插件打开系统浏览器（window.open 在 Tauri 沙箱内被拦截 → 无反应）
+      await openUrl(`http://127.0.0.1:${port}`);
+    } catch (e) {
+      console.error("打开外部浏览器失败", e);
+      toast.error(`打开外部浏览器失败: ${e}`);
+    }
   }
 
   return (

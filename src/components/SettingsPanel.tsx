@@ -16,6 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import {
   getConfig,
   getInstalledVersion,
+  setGithubToken,
   setMirrors,
   setSwitches,
 } from "@/lib/tauri";
@@ -46,6 +47,8 @@ export default function SettingsPanel() {
   const [npmRegistry, setNpmRegistry] = useState("");
   const [githubMirror, setGithubMirror] = useState("");
   const [nodeMirror, setNodeMirror] = useState("");
+  // GitHub Token（防限流）
+  const [githubToken, setGithubTokenState] = useState("");
 
   // 滑动开关
   const [switches, setSwitchesState] = useState({
@@ -63,6 +66,7 @@ export default function SettingsPanel() {
       setNpmRegistry(c.npmRegistry);
       setGithubMirror(c.githubMirror);
       setNodeMirror(c.nodeMirror);
+      setGithubTokenState(c.githubToken);
       setSwitchesState({
         closeExits: c.closeExits,
         minimizeToTray: c.minimizeToTray,
@@ -89,6 +93,15 @@ export default function SettingsPanel() {
     try {
       await setMirrors({ npmRegistry, githubMirror, nodeMirror });
       toast.success("镜像源已保存（仅影响后续安装/更新）");
+    } catch (e) {
+      toast.error(`保存失败: ${e}`);
+    }
+  }
+
+  async function saveToken() {
+    try {
+      await setGithubToken(githubToken);
+      toast.success("GitHub Token 已保存");
     } catch (e) {
       toast.error(`保存失败: ${e}`);
     }
@@ -190,6 +203,28 @@ export default function SettingsPanel() {
             </div>
             <Button variant="secondary" size="sm" onClick={saveMirrors}>
               保存镜像源
+            </Button>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* GitHub Token：防 API 限流 / git 认证增强 */}
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium">GitHub Token</h3>
+          <div className="grid gap-1.5">
+            <Input
+              type="password"
+              value={githubToken}
+              onChange={(e) => setGithubTokenState(e.target.value)}
+              placeholder="ghp_xxx（Personal Access Token，可选）"
+              className="text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              用于 git 认证增强，避免 GitHub API/克隆限流；留空为匿名访问
+            </p>
+            <Button variant="secondary" size="sm" onClick={saveToken}>
+              保存 Token
             </Button>
           </div>
         </div>

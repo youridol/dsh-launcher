@@ -38,6 +38,8 @@ pub enum DshStatus {
 pub struct ProcessManager {
     /// 当前 dsh 子进程句柄（监视线程持有所有权，这里保留引用用于 try_wait）
     child: Arc<Mutex<Option<Child>>>,
+    /// 当前实际 PID（v0.2.5：独立记录，监视线程 take 走 child 后 stop 仍可用）
+    pid: Arc<Mutex<u32>>,
     /// 当前状态
     status: Arc<Mutex<DshStatus>>,
     /// 当前实际端口
@@ -55,6 +57,7 @@ impl ProcessManager {
     pub fn new(logger: Arc<Logger>) -> Self {
         Self {
             child: Arc::new(Mutex::new(None)),
+            pid: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(DshStatus::Stopped)),
             port: Arc::new(Mutex::new(0)),
             logger,
@@ -154,13 +157,14 @@ impl ProcessManager {
             &format!("dsh 已启动 (pid={}, port={})", child.id(), port),
         );
 
+        *self.pid.lock().unwrap() = child.id();
         *self.port.lock().unwrap() = port;
         *self.status.lock().unwrap() = DshStatus::Starting;
         self.stopping.store(false, Ordering::SeqCst);
 
         // 子进程放入共享句柄，监视线程取走所有权
         *self.child.lock().unwrap() = Some(child);
-        let pid = self.child.lock().unwrap().as_ref().map(|c| c.id()).unwrap_or(0);
+        let pid = self.pid.lock().unwrap().clone();
 
         self.spawn_monitor(pid);
 
@@ -187,8 +191,9 @@ impl ProcessManager {
         *status = DshStatus::Stopping;
         drop(status);
 
-        let pid = self.child.lock().unwrap().as_ref().map(|c| c.id());
-        let Some(pid) = pid else {
+        // 用记录的 PID（v0.2.5：child 句柄被监视线程 take 走，stop 依赖 pid 字段）
+        let pid = self.pid.lock().unwrap().clone();
+        if pid == 0 {
             self.stopping.store(false, Ordering::SeqCst);
             *self.status.lock().unwrap() = DshStatus::Stopped;
             return Ok(());
@@ -262,6 +267,8 @@ impl ProcessManager {
         }
 
         *self.status.lock().unwrap() = DshStatus::Stopped;
+        *self.pid.lock().unwrap() = 0;
+        *self.port.lock().unwrap() = 0;
         self.stopping.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -283,6 +290,7 @@ impl ProcessManager {
         let child_arc = Arc::clone(&self.child);
         let status_arc = Arc::clone(&self.status);
         let port_arc = Arc::clone(&self.port);
+        let self_pid = Arc::clone(&self.pid);
 
         thread::spawn(move || {
             // 从共享句柄取走所有权（stop 通过 try_wait 探测，取走前 stop 已可能拿到引用）
@@ -339,6 +347,10 @@ impl ProcessManager {
             drop(s);
             let mut p = port_arc.lock().unwrap();
             *p = 0;
+            let mut pid_slot = self_pid.lock().unwrap();
+            if *pid_slot == pid {
+                *pid_slot = 0;
+            }
         });
     }
 }

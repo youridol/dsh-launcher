@@ -22,6 +22,20 @@ use std::sync::Arc;
 /// GitHub 仓库
 const REPO: &str = "deepseek-ai/deepseek-harness";
 
+/// 若配置了 GitHub Token，返回注入 git 的 `-c http.extraheader=AUTHORIZATION: bearer <token>`
+/// 参数（避免 token 出现在 URL / 日志中）；未配置返回空 vec。
+fn git_auth_args() -> Vec<String> {
+    let cfg = AppConfig::load();
+    let token = cfg.github_token.trim();
+    if token.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        "-c".to_string(),
+        format!("http.extraheader=AUTHORIZATION: bearer {token}"),
+    ]
+}
+
 /// GitHub 通道源码目录根：%LOCALAPPDATA%\dsh-launcher\github-dsh
 pub fn github_dsh_dir() -> PathBuf {
     std::env::var("LOCALAPPDATA")
@@ -64,7 +78,10 @@ pub fn list_releases() -> Result<Vec<String>, String> {
     };
 
     // 主路径：git ls-remote --tags（不受 GitHub API 限流影响）
+    // 配置了 Token 时注入认证头（防限流 / 私有仓库）
     let mut cmd = command::hidden("git");
+    let auth = git_auth_args();
+    cmd.args(&auth);
     cmd.args(["ls-remote", "--tags", &repo_url]);
     let out = cmd
         .output()
@@ -162,6 +179,8 @@ pub fn install_version(
     };
     {
         let mut c = command::hidden("git");
+        let auth = git_auth_args();
+        c.args(&auth);
         c.args([
             "clone",
             "--depth",

@@ -12,6 +12,7 @@ pub struct ConfigView {
     pub port: u16,
     pub npm_registry: String,
     pub github_mirror: String,
+    pub github_token: String,
     pub node_mirror: String,
     pub close_exits: bool,
     pub minimize_to_tray: bool,
@@ -27,6 +28,7 @@ impl From<AppConfig> for ConfigView {
             port: c.port,
             npm_registry: c.npm_registry,
             github_mirror: c.github_mirror,
+            github_token: c.github_token,
             node_mirror: c.node_mirror,
             close_exits: c.close_exits,
             minimize_to_tray: c.minimize_to_tray,
@@ -52,6 +54,14 @@ pub fn set_port(port: u16) -> Result<(), String> {
     }
     let mut cfg = AppConfig::load();
     cfg.port = port;
+    cfg.save()
+}
+
+/// 保存 GitHub Token（防 API 限流 / git 认证增强）
+#[tauri::command]
+pub fn set_github_token(token: String) -> Result<(), String> {
+    let mut cfg = AppConfig::load();
+    cfg.github_token = token.trim().to_string();
     cfg.save()
 }
 

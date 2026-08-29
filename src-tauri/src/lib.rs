@@ -62,6 +62,7 @@ pub fn run() {
             commands::config::get_config,
             commands::config::set_port,
             commands::config::set_mirrors,
+            commands::config::set_github_token,
             commands::config::set_switches,
             commands::toolchain::detect_toolchain,
             commands::toolchain::install_toolchain,

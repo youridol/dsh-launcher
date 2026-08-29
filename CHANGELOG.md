@@ -1,5 +1,29 @@
 # Changelog
 
+## [v0.2.5] - 2026-08-30
+
+### 新增
+
+- 自定义 GitHub API Key（Settings → GitHub Token）：
+  - 配置 GitHub Personal Access Token，git ls-remote / git clone 通过
+    `http.extraheader` 注入认证头（token 不进 URL/日志），避免 GitHub 限流
+  - 新增 `set_github_token` IPC
+
+### 修复
+
+- 修复停止/重启 dsh 无效：
+  - 根因：监视线程 `take()` 移走 Child 句柄后，stop 依赖 `self.child` 取 PID →
+    恒为 None → 不执行 taskkill，dsh 继续运行；重启因端口残留占用而失败
+  - 修复：ProcessManager 独立记录 PID（`pid` 字段），stop 用 PID + `taskkill /T`
+    杀进程树（实测可杀掉 node 长驻进程）；重启时清理 PID/端口再启动
+- 修复内嵌原生窗口按钮实际打开外部浏览器：
+  - 根因：capability 缺少 `core:webview:allow-create-webview-window` 等权限，
+    WebviewWindow 创建被拒
+  - 修复：capabilities 增加 webview/window 创建、显示、聚焦等权限
+- 修复外部浏览器按钮无反应：
+  - 根因：`window.open` 在 Tauri 沙箱内被拦截
+  - 修复：改用 `@tauri-apps/plugin-opener` 的 `openUrl`（opener:default 权限）
+
 ## [v0.2.4] - 2026-08-30
 
 ### 变更

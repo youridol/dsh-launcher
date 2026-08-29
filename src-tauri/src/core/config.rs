@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub npm_registry: String,
     /// GitHub 加速镜像（clone / release 下载，空 = 官方源）
     pub github_mirror: String,
+    /// GitHub Personal Access Token（防 API 限流；git 认证增强，空 = 匿名）
+    pub github_token: String,
     /// Node 二进制下载镜像（空 = 官方 nodejs.org）
     pub node_mirror: String,
     /// 主窗口关闭按钮行为：true = 直接退出（含 dsh），false = 最小化到托盘
@@ -40,6 +42,7 @@ impl Default for AppConfig {
             port: Self::DEFAULT_PORT,
             npm_registry: String::new(),
             github_mirror: String::new(),
+            github_token: String::new(),
             node_mirror: String::new(),
             close_exits: false,
             minimize_to_tray: true,
