@@ -123,11 +123,17 @@ export default function LogPanel({
     .join("\n");
 
   return (
-    <div className={cn("flex h-full flex-col", className)}>
-      {/* 侧边栏标题栏（非卡片容器） */}
-      <div className="mb-2 flex items-center justify-between gap-2">
+    // 子窗口外观：独立边框 + 背景 + 圆角，标题栏与内容区分离
+    <div
+      className={cn(
+        "flex h-full flex-col overflow-hidden rounded-lg border bg-card text-card-foreground shadow-sm",
+        className
+      )}
+    >
+      {/* 标题栏（子窗口标题条） */}
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b bg-muted/40 px-3 py-2">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">日志</span>
+          <span className="text-sm font-semibold">日志</span>
           <Button
             variant={liveMode ? "default" : "ghost"}
             size="xs"
@@ -154,7 +160,8 @@ export default function LogPanel({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 gap-3">
+      {/* 内容区 */}
+      <div className="flex min-h-0 flex-1 gap-3 p-2">
         {/* 日志文件列表（非实时流时显示） */}
         {!liveMode && (
           <div className="w-36 shrink-0 space-y-1">

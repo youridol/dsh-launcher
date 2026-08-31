@@ -64,16 +64,17 @@ export default function App() {
           </div>
         </div>
 
-        {/* 日志边栏：贯穿右侧全高（从窗口顶到底，含标题栏区域），可展开收起 */}
+        {/* 日志边栏：贯穿右侧全高；展开为子窗口外观，收起为贯穿窄条 */}
         {logOpen ? (
-          <div className="-my-4 -mr-4 w-[340px] shrink-0 border-l pl-4">
+          <div className="-my-4 -mr-4 w-[340px] shrink-0 p-4 pl-0">
             <LogPanel
-              className="h-[calc(100vh)]"
+              className="h-full"
               onClose={() => setLogOpen(false)}
             />
           </div>
         ) : (
-          <div className="-my-4 -mr-4 flex shrink-0 flex-col items-center justify-center gap-2">
+          <div className="-my-4 -mr-4 flex shrink-0 flex-col items-center gap-3 border-l bg-muted/20 py-4">
+            {/* 贯穿窄条：顶部展开按钮 + 竖排标签 */}
             <Button
               variant="outline"
               size="icon"
