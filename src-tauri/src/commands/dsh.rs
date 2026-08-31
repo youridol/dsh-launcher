@@ -15,6 +15,12 @@ pub fn get_status(state: State<'_, AppState>) -> DshStatus {
     state.process.status()
 }
 
+/// 获取 dsh web 完整访问 URL（含 token，供内嵌/外部打开免认证）
+#[tauri::command]
+pub fn get_web_url(state: State<'_, AppState>) -> String {
+    state.process.web_url()
+}
+
 /// 启动 dsh web（端口取自配置；阻塞操作放后台线程）
 #[tauri::command]
 pub async fn start_dsh(state: State<'_, AppState>) -> Result<String, String> {

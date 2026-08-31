@@ -40,6 +40,8 @@ pub struct ProcessManager {
     child: Arc<Mutex<Option<Child>>>,
     /// 当前实际 PID（v0.2.5：独立记录，监视线程 take 走 child 后 stop 仍可用）
     pid: Arc<Mutex<u32>>,
+    /// dsh web 完整访问 URL（含 token，从 stdout 捕获；空 = 尚未捕获）
+    web_url: Arc<Mutex<String>>,
     /// 当前状态
     status: Arc<Mutex<DshStatus>>,
     /// 当前实际端口
@@ -58,6 +60,7 @@ impl ProcessManager {
         Self {
             child: Arc::new(Mutex::new(None)),
             pid: Arc::new(Mutex::new(0)),
+            web_url: Arc::new(Mutex::new(String::new())),
             status: Arc::new(Mutex::new(DshStatus::Stopped)),
             port: Arc::new(Mutex::new(0)),
             logger,
@@ -74,6 +77,11 @@ impl ProcessManager {
     /// 当前实际端口
     pub fn current_port(&self) -> u16 {
         self.port.lock().map(|p| *p).unwrap_or(0)
+    }
+
+    /// dsh web 完整访问 URL（含 token；未捕获时为空）
+    pub fn web_url(&self) -> String {
+        self.web_url.lock().map(|u| u.clone()).unwrap_or_default()
     }
 
     /// 启动 dsh web（阻塞等待 spawn 结果）
@@ -272,6 +280,7 @@ impl ProcessManager {
         *self.status.lock().unwrap() = DshStatus::Stopped;
         *self.pid.lock().unwrap() = 0;
         *self.port.lock().unwrap() = 0;
+        *self.web_url.lock().unwrap() = String::new();
         self.stopping.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -421,6 +430,8 @@ impl ProcessManager {
         let status_arc = Arc::clone(&self.status);
         let port_arc = Arc::clone(&self.port);
         let self_pid = Arc::clone(&self.pid);
+        let self_url = Arc::clone(&self.web_url);
+        let cleanup_url = Arc::clone(&self.web_url);
 
         thread::spawn(move || {
             // 从共享句柄取走所有权（stop 通过 try_wait 探测，取走前 stop 已可能拿到引用）
@@ -441,6 +452,12 @@ impl ProcessManager {
                     let reader = BufReader::new(pipe);
                     for line in reader.lines().map_while(Result::ok) {
                         let line = line.trim_end_matches('\r').to_string();
+                        // 捕获 dsh web 完整 URL（含 token），供内嵌/外部打开免认证
+                        if let Some(url) = extract_web_url(&line) {
+                            if let Ok(mut u) = self_url.lock() {
+                                *u = url;
+                            }
+                        }
                         logger_out.log(LogSource::Dsh, LogLevel::Info, &line);
                     }
                 })
@@ -481,6 +498,46 @@ impl ProcessManager {
             if *pid_slot == pid {
                 *pid_slot = 0;
             }
+            let mut url_slot = cleanup_url.lock().unwrap();
+            *url_slot = String::new();
         });
+    }
+}
+
+/// 从 dsh 输出行提取 web URL（形如 http://127.0.0.1:<port>/?token=xxx）
+fn extract_web_url(line: &str) -> Option<String> {
+    let start = line.find("http://127.0.0.1:")?;
+    let rest = &line[start..];
+    // 取到空白/控制符为止
+    let end = rest
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(rest.len());
+    let url = &rest[..end];
+    if url.contains("token=") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_web_url;
+
+    #[test]
+    fn test_extract_web_url() {
+        // 真实 dsh 启动输出（含 token）
+        let line = "dsh web: http://127.0.0.1:3080/?token=abc123def456\n";
+        assert_eq!(
+            extract_web_url(line).as_deref(),
+            Some("http://127.0.0.1:3080/?token=abc123def456")
+        );
+        // 行内有后续文字（空格分隔）
+        let line2 = "dsh web: http://127.0.0.1:3080/?token=x y";
+        assert_eq!(extract_web_url(line2).as_deref(), Some("http://127.0.0.1:3080/?token=x"));
+        // 无 token 的裸 URL 不捕获（避免误存）
+        assert_eq!(extract_web_url("listening on http://127.0.0.1:3080"), None);
+        // 无关行不捕获
+        assert_eq!(extract_web_url("random log line"), None);
     }
 }

@@ -17,6 +17,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getDshStatus,
   getConfig,
+  getWebUrl,
   restartDsh,
   setPort as savePort,
   startDsh,
@@ -119,6 +120,18 @@ export default function StatusCard() {
   const running = status === "running" || status === "starting";
 
   // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器（opener 插件）
+  // 用带 token 的完整 URL 打开（dsh web 要求认证，裸 URL 会 401）
+  async function resolveWebUrl(): Promise<string> {
+    // 优先取启动器捕获的完整 URL（含 token）
+    try {
+      const full = await getWebUrl();
+      if (full) return full;
+    } catch {
+      // 忽略，退回裸 URL
+    }
+    return `http://127.0.0.1:${port}`;
+  }
+
   async function openWebGui() {
     const label = "dsh-web-gui";
     try {
@@ -127,8 +140,9 @@ export default function StatusCard() {
         await existing.setFocus();
         return;
       }
+      const url = await resolveWebUrl();
       await new WebviewWindow(label, {
-        url: `http://127.0.0.1:${port}`,
+        url,
         title: "deepseek-harness Web UI",
         width: 1600,
         height: 900,
@@ -142,7 +156,8 @@ export default function StatusCard() {
   async function openExternal() {
     try {
       // 用 opener 插件打开系统浏览器（window.open 在 Tauri 沙箱内被拦截 → 无反应）
-      await openUrl(`http://127.0.0.1:${port}`);
+      const url = await resolveWebUrl();
+      await openUrl(url);
     } catch (e) {
       console.error("打开外部浏览器失败", e);
       toast.error(`打开外部浏览器失败: ${e}`);

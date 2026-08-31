@@ -1,5 +1,20 @@
 # Changelog
 
+## [v0.2.8] - 2026-08-31
+
+### 修复
+
+- 修复内嵌 Web GUI 打开报 `dsh web authentication required`：
+  - 根因：dsh web 采用启动 token 认证（URL 带 `?token=`），内嵌窗口用裸 URL
+    访问 → 401
+  - 修复：启动器从 dsh stdout 捕获带 token 的完整 URL（`get_web_url` IPC），
+    内嵌窗口与外部浏览器均用完整 URL 打开；新增 extract_web_url 单元测试
+
+### 变更
+
+- 日志卡片改为右侧边栏：可展开/收起（收起时右侧显示窄条展开按钮），
+  展开时固定宽度内部滚动，主区两列布局
+
 ## [v0.2.7] - 2026-08-31
 
 ### 新增

@@ -25,6 +25,11 @@ export function getDshStatus(): Promise<DshStatus> {
   return invoke("get_status");
 }
 
+/** 获取 dsh web 完整访问 URL（含 token，免认证） */
+export function getWebUrl(): Promise<string> {
+  return invoke("get_web_url");
+}
+
 /** 启动 dsh web */
 export function startDsh(): Promise<string> {
   return invoke("start_dsh");
