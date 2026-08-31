@@ -137,33 +137,20 @@ export default function StatusCard() {
   }
 
   async function openWebGui() {
-    const label = "dsh-web-gui";
     try {
-      // 修复：窗口关闭后 getByLabel 可能返回残留对象，setFocus 失败则重建
-      const existing = await WebviewWindow.getByLabel(label);
-      if (existing) {
-        try {
-          await existing.setFocus();
-          return;
-        } catch {
-          // 窗口已关闭/销毁 → 清理残留后重建
-          try {
-            await existing.destroy();
-          } catch {
-            // 忽略销毁失败
-          }
-        }
-      }
       const url = await resolveWebUrl();
-      const win = await new WebviewWindow(label, {
+      // 每次使用唯一 label 创建（修复：窗口关闭后 getByLabel 残留导致无法重建）
+      const label = `dsh-web-gui-${Date.now()}`;
+      const win = new WebviewWindow(label, {
         url,
         title: "deepseek-harness Web UI",
         width: 1600,
         height: 900,
       });
-      // 监听窗口销毁事件：关闭后再次打开时能正常重建（避免 label 残留）
-      win.once("tauri://destroyed", () => {
-        // 无需额外处理：下一次 openWebGui 的 getByLabel 会返回 null 或失败重建
+      // 创建失败提示（Tauri 2 创建错误通过 tauri://error 事件上报）
+      win.once("tauri://error", (e) => {
+        console.error("内嵌窗口创建失败", e);
+        toast.error(`打开内嵌 Web GUI 失败: ${e.payload}`);
       });
     } catch (e) {
       console.error("打开内嵌 Web GUI 失败", e);

@@ -18,6 +18,26 @@ pub struct AppState {
     pub process: Arc<ProcessManager>,
 }
 
+/// 打开内嵌 Web GUI 窗口（桌面快捷方式 --web-gui 触发时调用）
+/// URL 从日志兜底提取（含 token 认证）；dsh 未运行时窗口加载会 401（可提示用户先启动）
+fn open_web_gui_window(app: &tauri::AppHandle) {
+    // 从最新日志提取带 token 的 web URL，失败回退裸 URL
+    let url = crate::core::logging::extract_latest_web_url()
+        .unwrap_or_else(|| "http://127.0.0.1:3080".to_string());
+    let parsed = url.parse().unwrap_or_else(|_| "http://127.0.0.1:3080".parse().unwrap());
+    let label = format!(
+        "dsh-web-gui-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let _ = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(parsed))
+        .title("deepseek-harness Web UI")
+        .inner_size(1600.0, 900.0)
+        .build();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let logger = Arc::new(Logger::init().expect("初始化日志失败"));
@@ -44,6 +64,10 @@ pub fn run() {
                 }
                 // 创建系统托盘
                 core::tray::setup_tray(app.handle(), process, logger);
+                // v0.3.2：桌面快捷方式（--web-gui 参数）→ 启动即打开内嵌 Web GUI 窗口
+                if std::env::args().any(|a| a == "--web-gui") {
+                    open_web_gui_window(app.handle());
+                }
                 Ok(())
             }
         })
