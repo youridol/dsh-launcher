@@ -138,6 +138,11 @@ pub fn quit_app(app: &AppHandle, process: Arc<ProcessManager>) {
 }
 
 /// 窗口事件处理：关闭/最小化按滑动开关行为
+/// 主窗口 label（tauri.conf.json 未显式指定时 Tauri 默认 "main"，lib.rs 中亦用此 label）
+const MAIN_WINDOW_LABEL: &str = "main";
+
+/// 窗口事件处理：关闭/最小化按滑动开关行为
+/// 仅主窗口应用关闭/最小化策略；内嵌 Web GUI 窗口（关闭/最小化）与启动器互不干涉
 pub fn handle_window_event(
     window: &tauri::Window,
     event: &WindowEvent,
@@ -145,8 +150,19 @@ pub fn handle_window_event(
     logger: Arc<Logger>,
 ) {
     let cfg = AppConfig::load();
+    // 非主窗口（内嵌 Web GUI 等）：关闭/最小化一律放行，不触发退出、不隐藏到托盘
+    let is_main = window.label() == MAIN_WINDOW_LABEL;
     match event {
         WindowEvent::CloseRequested { api, .. } => {
+            if !is_main {
+                // 内嵌窗口关闭：与启动器互不干涉，放行默认关闭（销毁窗口），不退出应用
+                logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Info,
+                    &format!("内嵌窗口 ({}) 关闭 → 放行（与启动器互不干涉）", window.label()),
+                );
+                return;
+            }
             if cfg.close_exits {
                 // 开关 1 开：直接退出（含 dsh）——异步停止后退出，不卡窗口事件
                 logger.log(LogSource::Launcher, LogLevel::Info, "关闭按钮 → 直接退出");
@@ -172,7 +188,10 @@ pub fn handle_window_event(
             }
         }
         WindowEvent::Resized(_) => {
-            // 最小化到托盘（开关 2）
+            // 仅主窗口：最小化到托盘（开关 2）；内嵌窗口最小化不受影响
+            if !is_main {
+                return;
+            }
             if cfg.minimize_to_tray && window.is_minimized().unwrap_or(false) {
                 logger.log(
                     LogSource::Launcher,
