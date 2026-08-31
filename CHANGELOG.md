@@ -1,5 +1,26 @@
 # Changelog
 
+## [v0.2.7] - 2026-08-31
+
+### 新增
+
+- 启动探活与自动修复：dsh 启动后端口监听 → 状态转为运行中；
+  若进程启动即退出（端口未监听），自动检测并卸载不兼容插件（dshmarket 与
+  dsh-settings API 不兼容导致 alpha.2 无法启动），日志记录修复过程
+
+### 修复
+
+- 修复安装 dsh-v0.1.2-alpha.2 后无法启动：
+  - 根因：web profile 的 dshmarket@1.36.0 插件引用 `@deepseek-ai/dsh-settings` 已移除的
+    `installSettingsSection` 导出 → dsh web 启动即崩溃
+  - 修复：启动器启动后探活，检测到启动即崩时自动执行
+    `dsh plugin --profile web uninstall dshmarket` 修复并提示重试
+
+### 变更
+
+- 日志面板：实时流最新条目排最上（自动滚动到顶部）；日志卡片为独立滚动容器
+  （自带滚动条，不随页面滚动）
+
 ## [v0.2.6] - 2026-08-30
 
 ### 变更

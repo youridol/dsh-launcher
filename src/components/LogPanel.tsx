@@ -39,17 +39,18 @@ export default function LogPanel({ className }: { className?: string }) {
   // 内容容器引用（自动滚动；指向 ScrollArea 的 viewport，即真正的滚动容器）
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 订阅 Rust 日志事件（实时流）
+  // 订阅 Rust 日志事件（实时流，最新条目在最前）
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
         unlisten = await listen<LogLine>("log://line", (event) => {
           setStreamLines((prev) => {
-            const next = [...prev, event.payload];
-            // 超过缓冲上限则丢弃最旧的
+            // 最新条目插到最前（最新在上）
+            const next = [event.payload, ...prev];
+            // 超过缓冲上限则丢弃最旧的（末尾）
             if (next.length > MAX_STREAM_LINES) {
-              return next.slice(next.length - MAX_STREAM_LINES);
+              return next.slice(0, MAX_STREAM_LINES);
             }
             return next;
           });
@@ -63,10 +64,10 @@ export default function LogPanel({ className }: { className?: string }) {
     };
   }, []);
 
-  // 自动滚动到底部（滚动容器是 ScrollArea 的 viewport）
+  // 最新在上 → 自动滚动到顶部（滚动容器是 ScrollArea 的 viewport）
   useEffect(() => {
     if (liveMode && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      scrollRef.current.scrollTop = 0;
     }
   }, [streamLines, liveMode]);
 

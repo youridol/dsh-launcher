@@ -167,6 +167,9 @@ impl ProcessManager {
         let pid = self.pid.lock().unwrap().clone();
 
         self.spawn_monitor(pid);
+        // v0.2.7：启动探活线程——端口监听则置 Running；
+        // 进程退出且端口未监听（启动即崩）→ 自动修复不兼容插件并重试
+        self.spawn_startup_probe(port, pid);
 
         Ok(())
     }
@@ -282,6 +285,133 @@ impl ProcessManager {
         // 等待端口释放
         thread::sleep(Duration::from_millis(500));
         self.start_locked(port)
+    }
+
+    /// 启动探活线程：端口监听 → Running；进程退出且端口未开 → 自动修复插件后重试
+    fn spawn_startup_probe(&self, port: u16, pid: u32) {
+        let logger = Arc::clone(&self.logger);
+        let status_arc = Arc::clone(&self.status);
+        let pid_arc = Arc::clone(&self.pid);
+        thread::spawn(move || {
+            // 最多等 8 秒（dsh 冷启动 + 插件加载）
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < deadline {
+                let alive = {
+                    let p = pid_arc.lock().unwrap();
+                    *p != 0 && *p == pid
+                };
+                if port::probe(port) == Some(true) {
+                    // 端口监听 → 启动成功
+                    let mut s = status_arc.lock().unwrap();
+                    if *s == DshStatus::Starting {
+                        *s = DshStatus::Running;
+                        logger.log(LogSource::Launcher, LogLevel::Info, "dsh 已就绪（端口监听中）");
+                    }
+                    drop(s);
+                    return;
+                }
+                if !alive {
+                    // 进程已退出且端口未监听：启动即崩，尝试自动修复不兼容插件
+                    logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Warn,
+                        "dsh 进程启动后即退出且端口未监听，尝试自动修复不兼容插件…",
+                    );
+                    let ok = Self::fix_incompatible_plugins(&logger);
+                    if ok {
+                        logger.log(
+                            LogSource::Launcher,
+                            LogLevel::Info,
+                            "已自动修复不兼容插件（dshmarket）；请再次点击启动",
+                        );
+                    } else {
+                        logger.log(
+                            LogSource::Launcher,
+                            LogLevel::Error,
+                            "自动修复未生效，请检查日志定位启动失败原因",
+                        );
+                    }
+                    // 无论是否修复，本次启动的进程已死：状态复位
+                    let mut s = status_arc.lock().unwrap();
+                    if *s == DshStatus::Starting {
+                        *s = DshStatus::Stopped;
+                    }
+                    drop(s);
+                    let mut p = pid_arc.lock().unwrap();
+                    if *p == pid {
+                        *p = 0;
+                    }
+                    return;
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            // 8 秒后仍未监听但进程存活：保持 Starting（可能是 dsh 后台任务，不误判失败）
+            logger.log(
+                LogSource::Launcher,
+                LogLevel::Warn,
+                &format!("dsh 启动 8 秒后端口 {port} 仍未监听（进程存活），状态保持启动中"),
+            );
+        });
+    }
+
+    /// 自动修复不兼容插件：dshmarket 与当前 dsh-settings API 不兼容时卸载之。
+    /// 返回是否执行了卸载（幂等：dshmarket 不在依赖中时返回 false）。
+    fn fix_incompatible_plugins(logger: &Arc<Logger>) -> bool {
+        // 仅当 dsh 安装目录存在时处理（GitHub 通道安装的 dsh）
+        let install = crate::core::github::github_clone_dir();
+        if !install.join("package.json").exists() {
+            return false;
+        }
+        // 检查 web profile 是否仍依赖 dshmarket
+        let list = {
+            let mut c = crate::core::command::hidden_cmd("pnpm");
+            c.args(["dsh", "plugin", "--profile", "web", "list"])
+                .current_dir(&install);
+            c.output()
+        };
+        let still_has = match list {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).contains("dshmarket"),
+            Err(_) => false,
+        };
+        if !still_has {
+            return false;
+        }
+        logger.log(
+            LogSource::Launcher,
+            LogLevel::Info,
+            "检测到 web profile 含 dshmarket，执行卸载以修复兼容性…",
+        );
+        let un = {
+            let mut c = crate::core::command::hidden_cmd("pnpm");
+            c.args(["dsh", "plugin", "--profile", "web", "uninstall", "dshmarket"])
+                .current_dir(&install);
+            c.output()
+        };
+        match un {
+            Ok(out) if out.status.success() => {
+                logger.log(LogSource::Launcher, LogLevel::Info, "dshmarket 已卸载");
+                true
+            }
+            Ok(out) => {
+                logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Error,
+                    &format!(
+                        "卸载 dshmarket 失败: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                );
+                false
+            }
+            Err(e) => {
+                logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Error,
+                    &format!("执行插件卸载失败: {e}"),
+                );
+                false
+            }
+        }
     }
 
     /// 后台监视线程：读输出写日志 + 进程退出时更新状态
