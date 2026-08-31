@@ -84,6 +84,40 @@ impl ProcessManager {
         self.web_url.lock().map(|u| u.clone()).unwrap_or_default()
     }
 
+    /// 启动时收养已在运行的 dsh（v0.3.5：退出驻留后重开启动器，
+    /// 探测到端口监听则恢复 Running 状态，使停止/重启可用）
+    pub fn adopt_running(&self, port: u16) {
+        let mut st = self.status.lock().unwrap();
+        *st = DshStatus::Running;
+        drop(st);
+        *self.port.lock().unwrap() = port;
+        // pid 未知（外部进程），保持 0；停止时按端口查 PID
+        // 恢复 web_url（从日志兜底提取带 token 的 URL）
+        if let Some(url) = crate::core::logging::extract_latest_web_url() {
+            *self.web_url.lock().unwrap() = url;
+        }
+        self.logger.log(
+            LogSource::Launcher,
+            LogLevel::Info,
+            &format!("检测到 dsh 已在运行（端口 {port}），恢复运行状态"),
+        );
+    }
+
+    /// 按端口查找监听进程 PID（Windows Get-NetTCPConnection）
+    fn pid_by_port(port: u16) -> Option<u32> {
+        let ps = format!(
+            "(Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -First 1 -ExpandProperty OwningProcess)"
+        );
+        let mut c = crate::core::command::hidden("powershell");
+        c.args(["-NoProfile", "-Command", &ps]);
+        let out = c.output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        text.parse().ok()
+    }
+
     /// 启动 dsh web（阻塞等待 spawn 结果）
     pub fn start(&self, port: u16) -> Result<(), String> {
         // 生命周期操作互斥：避免并发双 start
@@ -202,8 +236,22 @@ impl ProcessManager {
         *status = DshStatus::Stopping;
         drop(status);
 
-        // 用记录的 PID（v0.2.5：child 句柄被监视线程 take 走，stop 依赖 pid 字段）
-        let pid = self.pid.lock().unwrap().clone();
+        // 用记录的 PID（v0.2.5：child 句柄被监视线程 take 走，stop 依赖 pid 字段）；
+        // v0.3.5：pid 为 0 但端口在监听（收养的外部 dsh）→ 按端口查 PID
+        let mut pid = self.pid.lock().unwrap().clone();
+        if pid == 0 {
+            let port = self.port.lock().unwrap().clone();
+            if port != 0 && port::is_port_in_use(port) {
+                pid = Self::pid_by_port(port).unwrap_or(0);
+                if pid != 0 {
+                    self.logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Info,
+                        &format!("按端口 {port} 找到 dsh 进程 pid={pid}"),
+                    );
+                }
+            }
+        }
         if pid == 0 {
             self.stopping.store(false, Ordering::SeqCst);
             *self.status.lock().unwrap() = DshStatus::Stopped;
@@ -222,33 +270,27 @@ impl ProcessManager {
             .args(["/PID", &pid.to_string(), "/T"])
             .output();
 
-        // 等待优雅退出，最多 5 秒
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // 等待优雅退出，最多 1 秒（v0.3.5：child 句柄已被监视线程 take 走，
+        // 用 tasklist 探测进程存活；node/pnpm 进程树对无 /F 的 taskkill 常不响应，
+        // 快速升级强杀，避免退出/停止卡顿）
+        let deadline = Instant::now() + Duration::from_secs(1);
         let mut exited = false;
         loop {
-            {
-                let mut child_guard = self.child.lock().unwrap();
-                if let Some(child) = child_guard.as_mut() {
-                    if let Ok(Some(_)) = child.try_wait() {
-                        *child_guard = None;
-                        exited = true;
-                    }
-                }
-            }
-            if exited {
+            if !process_alive(pid) {
+                exited = true;
                 break;
             }
             if Instant::now() >= deadline {
                 break;
             }
-            thread::sleep(Duration::from_millis(200));
+            thread::sleep(Duration::from_millis(150));
         }
 
         if !exited {
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Warn,
-                &format!("dsh (pid={pid}) 5 秒内未优雅退出，强制终止…"),
+                &format!("dsh (pid={pid}) 1 秒内未优雅退出，强制终止…"),
             );
             let _ = {
                 let mut c = command::hidden("taskkill");
@@ -517,6 +559,23 @@ fn extract_web_url(line: &str) -> Option<String> {
         Some(url.to_string())
     } else {
         None
+    }
+}
+
+/// 检查指定 PID 的进程是否存活（tasklist 精确过滤）
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let mut c = crate::core::command::hidden("tasklist");
+    c.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
+    match c.output() {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // 输出包含 PID 行则存活（无匹配时输出 "INFO: No tasks"）
+            text.contains(&pid.to_string())
+        }
+        Err(_) => false,
     }
 }
 

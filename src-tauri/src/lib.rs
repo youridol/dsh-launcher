@@ -63,7 +63,12 @@ pub fn run() {
                     }
                 }
                 // 创建系统托盘
-                core::tray::setup_tray(app.handle(), process, logger);
+                core::tray::setup_tray(app.handle(), Arc::clone(&process), Arc::clone(&logger));
+                // v0.3.5：启动时探测配置端口——dsh 已在运行（上次退出驻留）则恢复状态
+                let cfg = crate::core::config::AppConfig::load();
+                if cfg.port != 0 && crate::core::port::is_port_in_use(cfg.port) {
+                    process.adopt_running(cfg.port);
+                }
                 // v0.3.2：桌面快捷方式（--web-gui 参数）→ 启动即打开内嵌 Web GUI 窗口
                 if std::env::args().any(|a| a == "--web-gui") {
                     open_web_gui_window(app.handle());

@@ -1,5 +1,21 @@
 # Changelog
 
+## [v0.3.5] - 2026-08-31
+
+### 修复
+
+- 优化退出/关闭窗口太慢：
+  - 根因：stop 等待循环依赖 child 句柄 try_wait，但句柄已被监视线程 take 走
+    → 恒不退出 → 总是等满超时；且 node/pnpm 进程树对无 /F 的 taskkill 不响应
+  - 修复：改用 tasklist 探测进程存活（process_alive），优雅等待缩短到 1 秒，
+    未退出立即升级 /F 强杀；实测停止耗时 6.1s → 1.8s
+- 修复退出驻留 dsh 后重开启动器无法管理（停止/重启）：
+  - 根因：ProcessManager 状态在内存，重开进程状态丢失（Stopped），
+    且 pid 未知无法停止
+  - 修复：启动时探测配置端口，若 dsh 在监听则 `adopt_running` 恢复 Running 状态
+    （端口/URL 一并恢复）；stop 时 pid 未知则按端口查 PID（Get-NetTCPConnection）
+    再终止
+
 ## [v0.3.4] - 2026-08-31
 
 ### 变更
