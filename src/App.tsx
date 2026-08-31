@@ -10,7 +10,7 @@ import SettingsPanel from "@/components/SettingsPanel";
 import { Toaster } from "@/components/ui/sonner";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
-import { PanelRightClose, PanelRightOpen, FileText } from "lucide-react";
+import { PanelRightOpen } from "lucide-react";
 
 export default function App() {
   // 强制黑暗主题
@@ -63,23 +63,13 @@ export default function App() {
             </div>
           </div>
 
-          {/* 日志边栏：展开显示日志卡片，收起显示窄条按钮 */}
+          {/* 日志边栏：固定在右侧（无卡片容器），展开显示日志，收起显示窄条按钮 */}
           {logOpen ? (
-            <div className="flex w-[340px] shrink-0 flex-col">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="flex items-center gap-1.5 text-sm font-medium">
-                  <FileText className="size-4" /> 日志
-                </span>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => setLogOpen(false)}
-                  title="收起日志"
-                >
-                  <PanelRightClose />
-                </Button>
-              </div>
-              <LogPanel className="h-[calc(100vh-170px)] min-h-[360px] flex-1" />
+            <div className="w-[340px] shrink-0 border-l pl-4">
+              <LogPanel
+                className="h-[calc(100vh-170px)] min-h-[360px]"
+                onClose={() => setLogOpen(false)}
+              />
             </div>
           ) : (
             <div className="flex shrink-0 flex-col items-center justify-center gap-2">

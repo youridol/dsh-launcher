@@ -16,9 +16,15 @@ pub fn get_status(state: State<'_, AppState>) -> DshStatus {
 }
 
 /// 获取 dsh web 完整访问 URL（含 token，供内嵌/外部打开免认证）
+/// 内存中未捕获时，从最新日志文件兜底提取（dsh stdout 已实时落盘）
 #[tauri::command]
 pub fn get_web_url(state: State<'_, AppState>) -> String {
-    state.process.web_url()
+    let mem = state.process.web_url();
+    if !mem.is_empty() {
+        return mem;
+    }
+    // 兜底：扫描最新日志文件，提取带 token 的 URL
+    crate::core::logging::extract_latest_web_url().unwrap_or_default()
 }
 
 /// 启动 dsh web（端口取自配置；阻塞操作放后台线程）

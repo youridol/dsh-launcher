@@ -122,12 +122,15 @@ export default function StatusCard() {
   // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器（opener 插件）
   // 用带 token 的完整 URL 打开（dsh web 要求认证，裸 URL 会 401）
   async function resolveWebUrl(): Promise<string> {
-    // 优先取启动器捕获的完整 URL（含 token）
-    try {
-      const full = await getWebUrl();
-      if (full) return full;
-    } catch {
-      // 忽略，退回裸 URL
+    // 优先取启动器捕获的完整 URL（含 token）；启动初期可能未捕获，轮询等待
+    for (let i = 0; i < 6; i++) {
+      try {
+        const full = await getWebUrl();
+        if (full) return full;
+      } catch {
+        // 忽略，继续重试
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
     return `http://127.0.0.1:${port}`;
   }

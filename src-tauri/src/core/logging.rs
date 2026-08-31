@@ -311,6 +311,39 @@ fn logs_dir() -> PathBuf {
         .join("logs")
 }
 
+/// 从最新日志文件中提取最近一次 dsh web 启动的完整 URL（含 token）
+/// 兜底方案：内存捕获失败时（如重启后）从落盘日志恢复。
+pub fn extract_latest_web_url() -> Option<String> {
+    let dir = logs_dir();
+    let today = chrono_now().date;
+    let path = dir.join(format!("{today}.log"));
+    let Ok(content) = fs::read_to_string(&path) else {
+        return None;
+    };
+    find_web_url_in_content(&content)
+}
+
+/// 从文本中提取最后出现的带 token 的 dsh web URL
+fn find_web_url_in_content(content: &str) -> Option<String> {
+    // 从后往前找 "dsh web: http://127.0.0.1:<port>/?token=" 行（最后出现的 URL）
+    content
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let start = line.find("http://127.0.0.1:")?;
+            let rest = &line[start..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '\r')
+                .unwrap_or(rest.len());
+            let url = &rest[..end];
+            if url.contains("token=") {
+                Some(url.to_string())
+            } else {
+                None
+            }
+        })
+}
+
 /// 文件切割：把 path 重命名为 path.index 形式
 fn rotate(path: &Path, index: u32) {
     if index >= MAX_ROTATED {
@@ -326,6 +359,22 @@ fn rotate(path: &Path, index: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_find_web_url_in_content() {
+        // 真实日志格式：[HH:MM:SS] [dsh] [INFO] dsh web: http://127.0.0.1:3080/?token=abc
+        let content = "[10:00:00] [launcher] [INFO] dsh 已启动\n[10:00:03] [dsh] [INFO] dsh web: http://127.0.0.1:3080/?token=abc123\n[10:00:03] [dsh] [INFO] dsh web: opening the default browser\n";
+        assert_eq!(
+            find_web_url_in_content(content).as_deref(),
+            Some("http://127.0.0.1:3080/?token=abc123")
+        );
+        // 多条时取最后一条
+        let multi = "[10:00:03] [dsh] [INFO] dsh web: http://127.0.0.1:3080/?token=one\n[11:00:03] [dsh] [INFO] dsh web: http://127.0.0.1:3080/?token=two\n";
+        assert_eq!(find_web_url_in_content(multi).as_deref(), Some("http://127.0.0.1:3080/?token=two"));
+        // 无 token 不提取
+        assert_eq!(find_web_url_in_content("listening on http://127.0.0.1:3080"), None);
+        assert_eq!(find_web_url_in_content(""), None);
+    }
 
     #[test]
     fn test_date_to_days() {

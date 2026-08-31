@@ -1,21 +1,13 @@
-// 日志面板：全域日志流式展示（dsh + 启动器）
+// 日志侧边栏：全域日志流式展示（dsh + 启动器），固定在右侧，无卡片容器
 // 实时流：Tauri event `log://line`（Rust logging.rs emit）
-// 兜底：文件列表 + 定期读取
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { listLogs, readLog, type LogFile } from "@/lib/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { FileText, Download, RefreshCw } from "lucide-react";
+import { Download, RefreshCw, X } from "lucide-react";
 
 // 日志行（对应 Rust LogLine）
 interface LogLine {
@@ -28,7 +20,13 @@ interface LogLine {
 // 实时流最大缓冲行数
 const MAX_STREAM_LINES = 2000;
 
-export default function LogPanel({ className }: { className?: string }) {
+export default function LogPanel({
+  className,
+  onClose,
+}: {
+  className?: string;
+  onClose?: () => void;
+}) {
   const [logs, setLogs] = useState<LogFile[]>([]);
   const [content, setContent] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -125,11 +123,14 @@ export default function LogPanel({ className }: { className?: string }) {
     .join("\n");
 
   return (
-    <Card className={cn("flex h-full flex-col", className)}>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <FileText className="size-4" />
-          日志
+    <div className={cn("flex h-full flex-col", className)}>
+      {/* 侧边栏标题栏（非卡片容器） */}
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">日志</span>
+          <span className="text-[11px] text-muted-foreground">
+            {liveMode ? "实时流" : "文件"}
+          </span>
           <Button
             variant={liveMode ? "default" : "ghost"}
             size="xs"
@@ -140,21 +141,26 @@ export default function LogPanel({ className }: { className?: string }) {
           >
             实时流
           </Button>
+        </div>
+        <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon-sm" onClick={refreshFiles} title="刷新文件列表">
             <RefreshCw />
           </Button>
           <Button variant="ghost" size="icon-sm" onClick={exportLog} title="导出日志">
             <Download />
           </Button>
-        </CardTitle>
-        <CardDescription>
-          全域日志（dsh + 启动器）{liveMode ? "· 实时流" : "· 文件"}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 gap-3">
+          {onClose && (
+            <Button variant="ghost" size="icon-sm" onClick={onClose} title="收起日志">
+              <X />
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="flex min-h-0 flex-1 gap-3">
         {/* 日志文件列表（非实时流时显示） */}
         {!liveMode && (
-          <div className="w-40 shrink-0 space-y-1">
+          <div className="w-36 shrink-0 space-y-1">
             {logs.map((f) => (
               <button
                 key={f.path}
@@ -181,7 +187,7 @@ export default function LogPanel({ className }: { className?: string }) {
               : content || "暂无日志"}
           </pre>
         </ScrollArea>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
