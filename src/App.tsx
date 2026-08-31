@@ -1,5 +1,6 @@
 // dsh-launcher 主界面：dark 主题
-// 布局：左侧主区两列（状态+Web GUI/工具链、版本管理/设置）+ 右侧日志边栏（可展开收起）
+// 布局：左侧主区两列（状态+Web GUI/工具链、版本管理）+ 右侧日志边栏（可展开收起）
+// 设置面板：标题栏"设置"按钮 → 弹出子窗口（Dialog）
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import StatusCard from "@/components/StatusCard";
@@ -10,7 +11,13 @@ import SettingsPanel from "@/components/SettingsPanel";
 import { Toaster } from "@/components/ui/sonner";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
-import { PanelRightOpen } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { PanelRightOpen, Settings as SettingsIcon } from "lucide-react";
 
 export default function App() {
   // 强制黑暗主题
@@ -28,6 +35,8 @@ export default function App() {
 
   // 日志边栏展开/收起
   const [logOpen, setLogOpen] = useState(true);
+  // 设置弹出子窗口开关
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -35,7 +44,7 @@ export default function App() {
       <div className="mx-auto flex max-w-[1560px] p-4">
         {/* 主区（头部 + 两列内容） */}
         <div className="min-w-0 flex-1 pr-6">
-          {/* 头部 */}
+          {/* 头部：左侧标题，右侧设置按钮 + 版本 */}
           <header className="flex items-center justify-between pb-4">
             <div>
               <h1 className="text-lg font-semibold">dsh-launcher</h1>
@@ -43,10 +52,20 @@ export default function App() {
                 deepseek-harness 启动器
               </p>
             </div>
-            <div className="text-xs text-muted-foreground">{version}</div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">{version}</span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setSettingsOpen(true)}
+                title="打开设置"
+              >
+                <SettingsIcon className="size-3.5" /> 设置
+              </Button>
+            </div>
           </header>
 
-          {/* 主区内容：两列（状态/工具链 + 版本/设置） */}
+          {/* 主区内容：两列（状态/工具链 + 版本管理） */}
           <div className="grid grid-cols-1 items-stretch gap-6 lg:grid-cols-2">
             {/* 左列 */}
             <div className="flex min-w-0 flex-col">
@@ -55,11 +74,9 @@ export default function App() {
               <ToolchainPanel />
             </div>
 
-            {/* 右列 */}
+            {/* 右列：版本管理（设置已移入弹出子窗口） */}
             <div className="flex min-w-0 flex-col">
               <VersionPanel />
-              <Separator className="my-4" />
-              <SettingsPanel />
             </div>
           </div>
         </div>
@@ -89,6 +106,16 @@ export default function App() {
           </div>
         )}
       </div>
+      {/* 设置弹出子窗口（Dialog） */}
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="max-h-[85vh] w-full max-w-lg overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>设置</DialogTitle>
+          </DialogHeader>
+          <SettingsPanel embedded />
+        </DialogContent>
+      </Dialog>
+
       <Toaster theme="dark" position="top-right" />
     </div>
   );

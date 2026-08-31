@@ -2,13 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -40,7 +34,12 @@ const PRESETS = {
   ],
 };
 
-export default function SettingsPanel() {
+export default function SettingsPanel({
+  embedded = false,
+}: {
+  // true = 在弹出子窗口/对话框内使用（无 Card 外壳与重复标题）
+  embedded?: boolean;
+}) {
   const [installedVersion, setInstalledVersion] = useState<string | null>(null);
 
   // 表单状态
@@ -120,18 +119,24 @@ export default function SettingsPanel() {
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Settings className="size-4" />
-          设置
-          <Badge variant="outline">
-            {installedVersion ? `dsh ${installedVersion}` : "dsh 未安装"}
-          </Badge>
-        </CardTitle>
-        <CardDescription>镜像源与运行行为</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <div className="space-y-4">
+      {!embedded && (
+        <CardHeader className="px-0 pt-0">
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="size-4" />
+            设置
+            <Badge variant="outline">
+              {installedVersion ? `dsh ${installedVersion}` : "dsh 未安装"}
+            </Badge>
+          </CardTitle>
+          <CardDescription>镜像源与运行行为</CardDescription>
+        </CardHeader>
+      )}
+      {embedded && installedVersion && (
+        <div className="text-xs text-muted-foreground">
+          dsh {installedVersion}
+        </div>
+      )}
         {/* 镜像源 */}
         <div className="space-y-2">
           <h3 className="text-sm font-medium">镜像源</h3>
@@ -256,7 +261,6 @@ export default function SettingsPanel() {
             ))}
           </div>
         </div>
-      </CardContent>
-    </Card>
+    </div>
   );
 }
