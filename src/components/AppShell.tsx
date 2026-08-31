@@ -1,22 +1,27 @@
 // 三栏布局骨架（复刻 pi-agent-desktop 布局架构；组件/视觉零改动，仅重组容器）
-// 结构：Left Sidebar | Main Content | Right Panel
+// 结构：主窗口标题栏（无边框自绘，与侧边栏融合）+ [左侧栏 | 主区] | 右侧日志面板（贯穿窗口顶）
 // - 宽度由 CSS 变量控制（--sidebar-width / --right-panel-width），与 open/close 状态分离
 // - 拖拽调整宽度（useResizablePanel：pointer → clamp → CSS 变量 → 持久化）
-// - 响应式：≥960px 三栏；641~959px 两栏（Right Panel 改 overlay 不参与 split）；
-//   ≤640px 移动端（Sidebar 改 drawer，Main 占满，Right Panel 全屏 overlay）
+// - 响应式：≥960px 三栏；641~959px 两栏（Right Panel 改 fixed overlay 不参与 split）；
+//   ≤640px 移动端（Sidebar 变 drawer，Main 占满，Right Panel 全屏 overlay）
+// 无边框主窗口：标题栏 data-tauri-drag-region 拖动窗口，双击空白处最大化/还原；
+// 右上角自绘窗口控制（最小化/最大化/关闭）+ 日志收起/展开按钮（关闭按钮右边）
 import {
   useCallback,
   useEffect,
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import StatusCard from "@/components/StatusCard";
 import ToolchainPanel from "@/components/ToolchainPanel";
 import VersionPanel from "@/components/VersionPanel";
 import LogPanel from "@/components/LogPanel";
+import WindowControls from "@/components/WindowControls";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import {
@@ -32,13 +37,13 @@ import {
 import {
   PanelLeftClose,
   PanelLeftOpen,
-  PanelRightClose,
   PanelRightOpen,
   Settings as SettingsIcon,
+  X,
 } from "lucide-react";
 
 interface AppShellProps {
-  /** 应用版本号（来自 tauri，如 "v0.3.9"） */
+  /** 应用版本号（来自 tauri，如 "v0.3.10"） */
   version: string;
   /** 打开设置弹出子窗口（App.tsx 管理 Dialog 状态） */
   onOpenSettings: () => void;
@@ -133,6 +138,16 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
     return () => mql.removeEventListener("change", onChange);
   }, []);
 
+  // 双击标题栏空白处：最大化/还原（按钮区域不触发）
+  const handleTitlebarDoubleClick = useCallback((e: ReactMouseEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return;
+    try {
+      void getCurrentWindow().toggleMaximize();
+    } catch {
+      // 非 Tauri 环境忽略
+    }
+  }, []);
+
   return (
     <div className="app-shell bg-background text-foreground">
       {/* 移动端侧栏遮罩（点击关闭 drawer） */}
@@ -141,31 +156,14 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
         onClick={() => setSidebarOpen(false)}
       />
 
-      {/* 左侧 Sidebar：dsh 运行状态 + 工具链 */}
-      <aside
-        ref={sidebarResizer.panelRef}
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
-        style={{ "--sidebar-width": `${sidebarResizer.width}px` } as CSSProperties}
-        aria-label="左侧栏"
-      >
-        <div className="sidebar-content">
-          <StatusCard />
-          <Separator className="my-4" />
-          <ToolchainPanel />
-        </div>
-      </aside>
-
-      {/* 侧栏拖拽 handle（仅桌面三栏；紧凑/移动档 CSS 隐藏） */}
-      {sidebarOpen && (
-        <div
-          {...sidebarResizer.separatorProps}
-          className={`panel-resize-handle sidebar-resize-handle${sidebarResizer.isResizing ? " is-resizing" : ""}`}
-        />
-      )}
-
-      {/* 中央 Main：标题栏 + 版本管理 */}
-      <main className="app-main">
-        <header className="app-header">
+      {/* 左侧列：主窗口标题栏 + 内容行 */}
+      <div className="app-left">
+        {/* 主窗口标题栏（无边框自绘）：与左侧栏/日志面板同背景融合贯穿；拖拽移动窗口 */}
+        <header
+          className="titlebar"
+          data-tauri-drag-region
+          onDoubleClick={handleTitlebarDoubleClick}
+        >
           <div className="flex min-w-0 items-center gap-2">
             <Button
               variant="ghost"
@@ -182,7 +180,7 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
               </p>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1.5">
             <span className="text-xs text-muted-foreground">{version}</span>
             <Button
               variant="outline"
@@ -192,20 +190,58 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
             >
               <SettingsIcon className="size-3.5" /> 设置
             </Button>
+            {/* 自绘窗口控制按钮（无边框窗口必需） */}
+            <WindowControls />
+            {/* 日志收起/展开按钮：主窗口标题栏最右（关闭按钮右边） */}
             <Button
-              variant="ghost"
-              size="icon-sm"
+              variant="outline"
+              size="sm"
               onClick={() => setRightOpen(!rightOpen)}
               title={rightOpen ? "收起日志" : "展开日志"}
             >
-              {rightOpen ? <PanelRightClose /> : <PanelRightOpen />}
+              {rightOpen ? (
+                <>
+                  <X className="size-3.5" /> 收起
+                </>
+              ) : (
+                <>
+                  <PanelRightOpen className="size-3.5" /> 日志
+                </>
+              )}
             </Button>
           </div>
         </header>
-        <div className="app-main-body">
-          <VersionPanel />
+
+        {/* 内容行：左侧栏 | 拖拽把手 | 主区 */}
+        <div className="app-content">
+          {/* 左侧 Sidebar：dsh 运行状态 + 工具链（与标题栏融合贯穿） */}
+          <aside
+            ref={sidebarResizer.panelRef}
+            className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
+            style={{ "--sidebar-width": `${sidebarResizer.width}px` } as CSSProperties}
+            aria-label="左侧栏"
+          >
+            <div className="sidebar-content">
+              <StatusCard />
+              <Separator className="my-4" />
+              <ToolchainPanel />
+            </div>
+          </aside>
+
+          {/* 侧栏拖拽 handle（仅桌面三栏；紧凑/移动档 CSS 隐藏） */}
+          {sidebarOpen && (
+            <div
+              {...sidebarResizer.separatorProps}
+              className={`panel-resize-handle sidebar-resize-handle${sidebarResizer.isResizing ? " is-resizing" : ""}`}
+            />
+          )}
+
+          {/* 主区：版本管理（自动占满剩余空间） */}
+          <main className="app-main">
+            <VersionPanel />
+          </main>
         </div>
-      </main>
+      </div>
 
       {/* 右栏拖拽 handle（仅桌面三栏；紧凑/移动档 CSS 隐藏） */}
       {rightOpen && (
@@ -215,14 +251,15 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
         />
       )}
 
-      {/* 右侧 Panel：日志（≥960px 参与 split；紧凑档为 fixed overlay；移动端全屏） */}
+      {/* 右侧日志面板：从窗口顶贯穿到底（覆盖标题栏右侧区域；子窗口外观保留） */}
       <aside
         ref={rightResizer.panelRef}
         className={`right-panel-container${rightOpen ? " right-panel-open" : " right-panel-closed"}${rightResizer.isResizing ? " right-panel-resizing" : ""}`}
         style={{ "--right-panel-width": `${rightResizer.width}px` } as CSSProperties}
         aria-label="日志面板"
       >
-        <LogPanel className="h-full" onClose={() => setRightOpen(false)} />
+        {/* onClose 移除：日志收起按钮已移至主窗口标题栏（关闭按钮右边） */}
+        <LogPanel className="h-full" />
       </aside>
 
       {/* 紧凑/移动档右栏遮罩（点击关闭 overlay） */}

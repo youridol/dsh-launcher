@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.3.10] - 2026-09-01
+
+### 变更
+
+- 主窗口改为无边框（decorations: false）：窗口内容标题栏提升为唯一主窗口标题栏，
+  与系统原生标题栏融为一体；标题栏 `data-tauri-drag-region` 支持拖拽移动窗口，
+  双击空白处最大化/还原
+- 标题栏右上角自绘窗口控制按钮（最小化/最大化/还原/关闭，补 capabilities 权限：
+  start-dragging/minimize/toggle-maximize/unmaximize/close/is-maximized）；
+  右侧日志面板从窗口顶部贯穿到底（回归 v0.3.3 覆盖标题栏右侧区域的视觉），
+  标题栏与侧边栏同背景无分隔线融合贯穿
+- 日志收起/展开按钮从日志面板内部移到主窗口标题栏最右端（关闭按钮右边），
+  收起后按钮自动变为"日志"展开入口；新增 WindowControls 组件
+
+### 修复
+
+- 修复无边框窗口控制组件在非 Tauri 环境崩溃：getCurrentWindow() 惰性获取
+  （useEffect 内 + ref 存储），浏览器预览时不崩溃
+
 ## [v0.3.9] - 2026-09-01
 
 ### 变更

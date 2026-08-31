@@ -195,28 +195,43 @@ body {
   padding: 1rem;
 }
 
-/* ---- 中央 Main：自动占满剩余空间 ---- */
+/* ---- 左侧列：主窗口标题栏 + 内容行（标题栏与侧边栏同背景融合贯穿） ---- */
+.app-left {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+/* 主窗口标题栏（无边框自绘）：拖拽移动窗口；与内容同背景、无分隔线（融合） */
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 0.75rem 0 1rem;
+  user-select: none;
+}
+/* 内容行：左侧栏 | 拖拽把手 | 主区 */
+.app-content {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+/* 中央 Main：自动占满剩余空间 */
 .app-main {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
-}
-.app-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0 1rem 1rem;
-  flex-shrink: 0;
-}
-.app-main-body {
-  flex: 1;
-  min-height: 0;
   overflow-y: auto;
-  padding: 0 1rem 1rem;
+  padding: 1rem;
 }
 
 /* ---- 拖拽 handle（separator）：9px 命中区跨边界 + 1px hover 线（色用现有 --border） ---- */
