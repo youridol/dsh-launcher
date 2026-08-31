@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.3.6] - 2026-08-31
+
+### 修复
+
+- 修复日志超宽不换行：日志内容区加 `break-words`（overflow-wrap），
+  超长无空格内容（URL/路径/错误堆栈）在容器宽度内自动断行
+- 修复 taskkill 错误日志乱码：
+  - 根因：Windows 中文系统 taskkill stderr 为 GBK 编码，`from_utf8_lossy`
+    按 UTF-8 解码产生 `����` 乱码
+  - 修复：新增 `decode_console_text`（UTF-8 优先，失败按 GBK 解码，基于
+    encoding_rs），应用于 taskkill/卸载等系统命令输出；新增单元测试
+
 ## [v0.3.5] - 2026-08-31
 
 ### 修复

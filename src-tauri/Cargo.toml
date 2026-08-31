@@ -1,6 +1,6 @@
 [package]
 name = "dsh-launcher"
-version = "0.3.5"
+version = "0.3.6"
 description = "deepseek-harness 启动器与运行环境管理器"
 authors = ["dsh-launcher"]
 edition = "2021"
@@ -20,6 +20,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "time", "macros"] }

@@ -185,7 +185,7 @@ export default function LogPanel({
           viewportRef={scrollRef}
           className="min-h-0 flex-1 rounded-md border bg-muted/30 p-2 font-mono text-xs"
         >
-          <pre className="whitespace-pre-wrap">
+          <pre className="whitespace-pre-wrap break-words">
             {liveMode
               ? streamText || "等待日志…"
               : content || "暂无日志"}

@@ -307,7 +307,7 @@ impl ProcessManager {
                 self.logger.log(
                     LogSource::Launcher,
                     LogLevel::Warn,
-                    &format!("taskkill 返回非零: {}", String::from_utf8_lossy(&out.stderr)),
+                    &format!("taskkill 返回非零: {}", decode_console_text(&out.stderr)),
                 );
             }
             Err(e) => {
@@ -449,7 +449,7 @@ impl ProcessManager {
                     LogLevel::Error,
                     &format!(
                         "卸载 dshmarket 失败: {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
+                        decode_console_text(&out.stderr).trim()
                     ),
                 );
                 false
@@ -562,6 +562,18 @@ fn extract_web_url(line: &str) -> Option<String> {
     }
 }
 
+/// 解码 Windows 控制台输出（GBK/GB18030 编码；UTF-8 优先，失败回退 GBK）
+/// 修复 taskkill 等系统命令错误信息乱码（中文 Windows 输出 GBK）
+fn decode_console_text(bytes: &[u8]) -> String {
+    // 优先按 UTF-8 解码（正常 Unicode 程序输出）
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    // 失败 → 按 GBK（Windows 中文代码页 936）解码
+    let (cow, _, _) = encoding_rs::GBK.decode(bytes);
+    cow.into_owned()
+}
+
 /// 检查指定 PID 的进程是否存活（tasklist 精确过滤）
 fn process_alive(pid: u32) -> bool {
     if pid == 0 {
@@ -581,7 +593,28 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::decode_console_text;
     use super::extract_web_url;
+
+    #[test]
+    fn test_decode_console_text_gbk() {
+        // 真实 taskkill 中文输出（GBK 编码）："错误: 无法终止 PID 3108 (属于 PID 24800 子进程)的进程。"
+        let msg = "错误: 无法终止 PID 3108 (属于 PID 24800 子进程)的进程。\r\n原因: 只能强制终止这个进程(带 /F 选项)。\r\n";
+        let gbk = encoding_rs::GBK.encode(msg).0;
+        let decoded = decode_console_text(&gbk);
+        assert!(
+            decoded.contains("无法终止 PID 3108"),
+            "GBK 解码应得到中文: {decoded:?}"
+        );
+        assert!(
+            decoded.contains("只能强制终止"),
+            "应包含原因说明: {decoded:?}"
+        );
+        // UTF-8 输入直接通过
+        assert_eq!(decode_console_text("hello".as_bytes()), "hello");
+        // 混合/无效字节不 panic
+        let _ = decode_console_text(&[0xff, 0xfe, 0x00, 0x41]);
+    }
 
     #[test]
     fn test_extract_web_url() {
