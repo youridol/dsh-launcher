@@ -31,23 +31,23 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      {/* 1600 窗口：容器撑满不超边界（max-w 留少量边距） */}
-      <div className="mx-auto max-w-[1560px] p-4">
-        {/* 头部 */}
-        <header className="flex items-center justify-between pb-4">
-          <div>
-            <h1 className="text-lg font-semibold">dsh-launcher</h1>
-            <p className="text-xs text-muted-foreground">
-              deepseek-harness 启动器
-            </p>
-          </div>
-          <div className="text-xs text-muted-foreground">{version}</div>
-        </header>
+      {/* 1600 窗口：整体 flex 行，日志边栏贯穿右侧全高（含标题栏区域） */}
+      <div className="mx-auto flex max-w-[1560px] p-4">
+        {/* 主区（头部 + 两列内容） */}
+        <div className="min-w-0 flex-1 pr-6">
+          {/* 头部 */}
+          <header className="flex items-center justify-between pb-4">
+            <div>
+              <h1 className="text-lg font-semibold">dsh-launcher</h1>
+              <p className="text-xs text-muted-foreground">
+                deepseek-harness 启动器
+              </p>
+            </div>
+            <div className="text-xs text-muted-foreground">{version}</div>
+          </header>
 
-        {/* 布局：主区两列 + 右侧日志边栏（可展开收起） */}
-        <div className="flex items-stretch gap-6">
-          {/* 主区：两列（状态/工具链 + 版本/设置） */}
-          <div className="grid flex-1 grid-cols-1 items-stretch gap-6 lg:grid-cols-2">
+          {/* 主区内容：两列（状态/工具链 + 版本/设置） */}
+          <div className="grid grid-cols-1 items-stretch gap-6 lg:grid-cols-2">
             {/* 左列 */}
             <div className="flex min-w-0 flex-col">
               <StatusCard />
@@ -62,31 +62,31 @@ export default function App() {
               <SettingsPanel />
             </div>
           </div>
-
-          {/* 日志边栏：固定在右侧（无卡片容器），展开显示日志，收起显示窄条按钮 */}
-          {logOpen ? (
-            <div className="w-[340px] shrink-0 border-l pl-4">
-              <LogPanel
-                className="h-[calc(100vh-170px)] min-h-[360px]"
-                onClose={() => setLogOpen(false)}
-              />
-            </div>
-          ) : (
-            <div className="flex shrink-0 flex-col items-center justify-center gap-2">
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setLogOpen(true)}
-                title="展开日志"
-              >
-                <PanelRightOpen />
-              </Button>
-              <span className="rotate-90 text-[11px] whitespace-nowrap text-muted-foreground">
-                日志
-              </span>
-            </div>
-          )}
         </div>
+
+        {/* 日志边栏：贯穿右侧全高（从窗口顶到底，含标题栏区域），可展开收起 */}
+        {logOpen ? (
+          <div className="-my-4 -mr-4 w-[340px] shrink-0 border-l pl-4">
+            <LogPanel
+              className="h-[calc(100vh)]"
+              onClose={() => setLogOpen(false)}
+            />
+          </div>
+        ) : (
+          <div className="-my-4 -mr-4 flex shrink-0 flex-col items-center justify-center gap-2">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => setLogOpen(true)}
+              title="展开日志"
+            >
+              <PanelRightOpen />
+            </Button>
+            <span className="rotate-90 text-[11px] whitespace-nowrap text-muted-foreground">
+              日志
+            </span>
+          </div>
+        )}
       </div>
       <Toaster theme="dark" position="top-right" />
     </div>
