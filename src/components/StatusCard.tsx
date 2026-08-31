@@ -189,7 +189,8 @@ export default function StatusCard() {
         <CardDescription>dsh 生命周期与 Web GUI</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="flex items-end gap-4">
+        {/* 布局：允许换行，窄宽侧栏下不溢出（仅布局属性） */}
+        <div className="flex flex-wrap items-end gap-4">
           <div className="grid gap-1.5">
             <Label htmlFor="port">启动端口</Label>
             <Input

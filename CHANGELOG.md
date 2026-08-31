@@ -1,5 +1,27 @@
 # Changelog
 
+## [v0.3.9] - 2026-09-01
+
+### 变更
+
+- 前端布局重构为三栏架构（复刻 pi-agent-desktop 布局模型，仅改布局/排版，
+  视觉样式与业务功能零改动）：
+  - Left Sidebar（dsh 运行状态 + 工具链）| Main（标题栏 + 版本管理）| Right Panel（日志）
+  - 左右栏独立展开/收起，收起后 Main 自动扩展，再展开恢复之前宽度
+  - 拖拽调整宽度（pointer → min/max clamp → CSS 变量实时应用 → localStorage 持久化），
+    宽度状态与 open/close 状态分离；窗口缩放时重新 clamp 防溢出
+  - Sidebar 默认 260px（min 180 / max 480）；Right Panel 默认响应式（视口 42%，
+    min 300 / max 1200），左侧栏/右栏互不影响地独立计算可用空间
+  - 响应式：≥960px 三栏；641~959px 两栏（Right Panel 改 fixed overlay 不参与 split）；
+    ≤640px 移动端（Sidebar 变 drawer + 遮罩，Main 占满，Right Panel 全屏 overlay）
+
+### 新增
+
+- 新增 src/lib/panel-layout.ts（宽度常量/clamp/响应式计算）、
+  src/hooks/useResizablePanel.ts（拖拽 resize + 持久化）、
+  src/hooks/useIsMobile.ts（≤640 断点）、src/components/AppShell.tsx（三栏骨架）；
+- StatusCard/ToolchainPanel 内部行加 flex-wrap（仅布局属性，窄宽下不溢出）
+
 ## [v0.3.8] - 2026-09-01
 
 ### 修复

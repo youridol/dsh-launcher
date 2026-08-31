@@ -66,7 +66,8 @@ export default function ToolchainPanel() {
         {items.map((item, i) => (
           <div key={item.name}>
             {i > 0 && <Separator className="mb-3" />}
-            <div className="flex items-center justify-between gap-2">
+            {/* 布局：允许换行，窄宽侧栏下不溢出（仅布局属性） */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div className="flex items-center gap-2">
                   <span className="font-medium">{item.name}</span>

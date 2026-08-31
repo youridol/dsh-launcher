@@ -1,23 +1,17 @@
 // dsh-launcher 主界面：dark 主题
-// 布局：左侧主区两列（状态+Web GUI/工具链、版本管理）+ 右侧日志边栏（可展开收起）
-// 设置面板：标题栏"设置"按钮 → 弹出子窗口（Dialog）
+// 布局：三栏（左侧栏 状态+工具链 / 中央 版本管理 / 右侧 日志），骨架见 AppShell
+// 设置面板：标题栏"设置"按钮 → 弹出子窗口（Dialog，状态在本组件管理）
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import StatusCard from "@/components/StatusCard";
-import ToolchainPanel from "@/components/ToolchainPanel";
-import LogPanel from "@/components/LogPanel";
-import VersionPanel from "@/components/VersionPanel";
+import AppShell from "@/components/AppShell";
 import SettingsPanel from "@/components/SettingsPanel";
 import { Toaster } from "@/components/ui/sonner";
-import { Separator } from "@/components/ui/separator";
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { PanelRightOpen, Settings as SettingsIcon } from "lucide-react";
 
 export default function App() {
   // 强制黑暗主题
@@ -33,79 +27,13 @@ export default function App() {
       .catch(() => setVersion(""));
   }, []);
 
-  // 日志边栏展开/收起
-  const [logOpen, setLogOpen] = useState(true);
   // 设置弹出子窗口开关
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      {/* 1600 窗口：整体 flex 行，日志边栏贯穿右侧全高（含标题栏区域） */}
-      <div className="mx-auto flex max-w-[1560px] p-4">
-        {/* 主区（头部 + 两列内容） */}
-        <div className="min-w-0 flex-1 pr-6">
-          {/* 头部：左侧标题，右侧设置按钮 + 版本 */}
-          <header className="flex items-center justify-between pb-4">
-            <div>
-              <h1 className="text-lg font-semibold">dsh-launcher</h1>
-              <p className="text-xs text-muted-foreground">
-                deepseek-harness 启动器
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">{version}</span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setSettingsOpen(true)}
-                title="打开设置"
-              >
-                <SettingsIcon className="size-3.5" /> 设置
-              </Button>
-            </div>
-          </header>
-
-          {/* 主区内容：两列（状态/工具链 + 版本管理） */}
-          <div className="grid grid-cols-1 items-stretch gap-6 lg:grid-cols-2">
-            {/* 左列 */}
-            <div className="flex min-w-0 flex-col">
-              <StatusCard />
-              <Separator className="my-4" />
-              <ToolchainPanel />
-            </div>
-
-            {/* 右列：版本管理（设置已移入弹出子窗口） */}
-            <div className="flex min-w-0 flex-col">
-              <VersionPanel />
-            </div>
-          </div>
-        </div>
-
-        {/* 日志边栏：贯穿右侧全高；展开为子窗口外观，收起为贯穿窄条 */}
-        {logOpen ? (
-          <div className="-my-4 -mr-4 w-[340px] shrink-0 p-4 pl-0">
-            <LogPanel
-              className="h-full"
-              onClose={() => setLogOpen(false)}
-            />
-          </div>
-        ) : (
-          <div className="-my-4 -mr-4 flex shrink-0 flex-col items-center gap-3 border-l bg-muted/20 py-4">
-            {/* 贯穿窄条：顶部展开按钮 + 竖排标签 */}
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => setLogOpen(true)}
-              title="展开日志"
-            >
-              <PanelRightOpen />
-            </Button>
-            <span className="rotate-90 text-[11px] whitespace-nowrap text-muted-foreground">
-              日志
-            </span>
-          </div>
-        )}
-      </div>
+    <>
+      {/* 三栏布局骨架（布局/拖拽/响应式/持久化全在 AppShell） */}
+      <AppShell version={version} onOpenSettings={() => setSettingsOpen(true)} />
       {/* 设置弹出子窗口（Dialog） */}
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent className="max-h-[85vh] w-full max-w-lg overflow-y-auto">
@@ -117,6 +45,6 @@ export default function App() {
       </Dialog>
 
       <Toaster theme="dark" position="top-right" />
-    </div>
+    </>
   );
 }
