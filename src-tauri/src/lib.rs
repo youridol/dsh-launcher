@@ -57,6 +57,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::dsh::get_status,
             commands::dsh::get_web_url,
+            commands::dsh::create_desktop_shortcut,
             commands::dsh::start_dsh,
             commands::dsh::stop_dsh,
             commands::dsh::restart_dsh,

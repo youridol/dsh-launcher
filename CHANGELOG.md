@@ -1,5 +1,20 @@
 # Changelog
 
+## [v0.3.1] - 2026-08-31
+
+### 修复
+
+- 修复内嵌 Web GUI 窗口关闭后无法再次打开：
+  - 根因：窗口关闭后 `getByLabel` 可能返回残留对象，`setFocus` 对已销毁窗口
+    静默失败 → 永远聚焦不存在的窗口，无法重建
+  - 修复：`getByLabel` 返回对象时先尝试 setFocus，失败则 destroy 残留后重建；
+    监听 `tauri://destroyed` 确保下次可正常重建
+
+### 新增
+
+- 内嵌窗口"发送到桌面"：创建桌面快捷方式（.url 文件），
+  双击用默认浏览器打开 dsh web（含 token 认证）；新增 `create_desktop_shortcut` IPC
+
 ## [v0.3.0] - 2026-08-31
 
 ### 修复

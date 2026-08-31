@@ -30,6 +30,11 @@ export function getWebUrl(): Promise<string> {
   return invoke("get_web_url");
 }
 
+/** 创建桌面快捷方式（双击用默认浏览器打开 dsh web） */
+export function createDesktopShortcut(): Promise<string> {
+  return invoke("create_desktop_shortcut");
+}
+
 /** 启动 dsh web */
 export function startDsh(): Promise<string> {
   return invoke("start_dsh");

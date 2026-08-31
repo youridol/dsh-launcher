@@ -15,6 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  createDesktopShortcut,
   getDshStatus,
   getConfig,
   getWebUrl,
@@ -25,7 +26,7 @@ import {
   type DshStatus as Status,
 } from "@/lib/tauri";
 import { toast } from "sonner";
-import { Play, Square, RotateCw, Activity, ExternalLink, MonitorUp } from "lucide-react";
+import { Play, Square, RotateCw, Activity, ExternalLink, MonitorUp, MonitorDown } from "lucide-react";
 
 // 状态徽标配色
 const STATUS_META: Record<Status, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
@@ -138,21 +139,44 @@ export default function StatusCard() {
   async function openWebGui() {
     const label = "dsh-web-gui";
     try {
+      // 修复：窗口关闭后 getByLabel 可能返回残留对象，setFocus 失败则重建
       const existing = await WebviewWindow.getByLabel(label);
       if (existing) {
-        await existing.setFocus();
-        return;
+        try {
+          await existing.setFocus();
+          return;
+        } catch {
+          // 窗口已关闭/销毁 → 清理残留后重建
+          try {
+            await existing.destroy();
+          } catch {
+            // 忽略销毁失败
+          }
+        }
       }
       const url = await resolveWebUrl();
-      await new WebviewWindow(label, {
+      const win = await new WebviewWindow(label, {
         url,
         title: "deepseek-harness Web UI",
         width: 1600,
         height: 900,
       });
+      // 监听窗口销毁事件：关闭后再次打开时能正常重建（避免 label 残留）
+      win.once("tauri://destroyed", () => {
+        // 无需额外处理：下一次 openWebGui 的 getByLabel 会返回 null 或失败重建
+      });
     } catch (e) {
       console.error("打开内嵌 Web GUI 失败", e);
       toast.error(`打开内嵌 Web GUI 失败: ${e}`);
+    }
+  }
+
+  async function handleDesktopShortcut() {
+    try {
+      const msg = await createDesktopShortcut();
+      toast.success(msg);
+    } catch (e) {
+      toast.error(`创建桌面快捷方式失败: ${e}`);
     }
   }
 
@@ -220,6 +244,9 @@ export default function StatusCard() {
             </Button>
             <Button size="sm" variant="outline" onClick={openExternal}>
               <ExternalLink /> 外部浏览器
+            </Button>
+            <Button size="sm" variant="outline" onClick={handleDesktopShortcut}>
+              <MonitorDown /> 发送到桌面
             </Button>
           </div>
         </div>

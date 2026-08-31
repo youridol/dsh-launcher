@@ -27,6 +27,28 @@ pub fn get_web_url(state: State<'_, AppState>) -> String {
     crate::core::logging::extract_latest_web_url().unwrap_or_default()
 }
 
+/// 创建桌面快捷方式（.url 文件，双击用默认浏览器打开 dsh web）
+#[tauri::command]
+pub fn create_desktop_shortcut(state: State<'_, AppState>) -> Result<String, String> {
+    let url = state.process.web_url();
+    if url.is_empty() {
+        return Err("dsh web 未运行或 URL 未就绪，请先启动 dsh".to_string());
+    }
+    // 桌面路径：%USERPROFILE%\Desktop（Windows）
+    let desktop = std::env::var("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("Desktop");
+    std::fs::create_dir_all(&desktop).map_err(|e| format!("创建桌面目录失败: {e}"))?;
+    // .url 文件：Windows 快捷方式（[InternetShortcut]）
+    let lnk = desktop.join("deepseek-harness.url");
+    let content = format!(
+        "[InternetShortcut]\r\nURL={url}\r\nIconFile=C:\\Windows\\System32\\msedge.exe\r\nIconIndex=0\r\n"
+    );
+    std::fs::write(&lnk, content).map_err(|e| format!("写入快捷方式失败: {e}"))?;
+    Ok(format!("已创建桌面快捷方式: {}", lnk.display()))
+}
+
 /// 启动 dsh web（端口取自配置；阻塞操作放后台线程）
 #[tauri::command]
 pub async fn start_dsh(state: State<'_, AppState>) -> Result<String, String> {
