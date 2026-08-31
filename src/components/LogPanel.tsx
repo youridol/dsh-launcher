@@ -128,9 +128,6 @@ export default function LogPanel({
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">日志</span>
-          <span className="text-[11px] text-muted-foreground">
-            {liveMode ? "实时流" : "文件"}
-          </span>
           <Button
             variant={liveMode ? "default" : "ghost"}
             size="xs"
@@ -150,8 +147,8 @@ export default function LogPanel({
             <Download />
           </Button>
           {onClose && (
-            <Button variant="ghost" size="icon-sm" onClick={onClose} title="收起日志">
-              <X />
+            <Button variant="outline" size="sm" onClick={onClose} title="收起日志">
+              <X className="size-3.5" /> 收起
             </Button>
           )}
         </div>
