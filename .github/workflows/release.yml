@@ -121,7 +121,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md
-          git commit -m "v${{ steps.bump.outputs.new }}: 自动版本迭代" || echo "无版本变更提交"
+          # [skip ci]：避免 bump 提交推送回 master 时再次触发 Release（防循环）
+          git commit -m "v${{ steps.bump.outputs.new }}: 自动版本迭代 [skip ci]" || echo "无版本变更提交"
+
+      # 推送 bump 提交回 master：保证远端版本与已发布版本一致（避免下次重复 bump）
+      - name: 推送版本变更回 master
+        run: |
+          git push origin HEAD:master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # 构建安装包 + 创建 Release（tauri-action 自动装 NSIS，产物上传 Release）
       - name: 构建并发布
