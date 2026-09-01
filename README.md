@@ -35,3 +35,4 @@ Tauri 2 · Rust · React 19 · TypeScript · Vite · Tailwind CSS 4 · shadcn/ui
 ## 许可
 
 待补充（开源发布前确认）。
+- 持续集成：每次 push 自动校验并迭代版本发布
