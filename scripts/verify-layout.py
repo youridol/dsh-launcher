@@ -106,6 +106,13 @@ with sync_playwright() as p:
     rb_restored = page.locator(".right-panel-container").bounding_box()
     check("重载后恢复宽度", abs((sb_restored["width"] if sb_restored else 0) - 320) < 2 and abs((rb_restored["width"] if rb_restored else 0) - 560) < 2, f"sidebar={sb_restored['width'] if sb_restored else 0:.0f} right={rb_restored['width'] if rb_restored else 0:.0f}")
 
+    # 8b. 双通道左右排列（桌面 1600 档 main≈698≥640 两列）+ 每通道最多 8 条
+    npm_h = page.locator("text=npm 通道").bounding_box()
+    gh_h = page.locator("text=GitHub 通道").bounding_box()
+    check("双通道左右排列(标题同排)", bool(npm_h and gh_h) and abs((npm_h["y"] if npm_h else 999) - (gh_h["y"] if gh_h else 0)) < 4 and npm_h["x"] < gh_h["x"], f"npm y={npm_h['y'] if npm_h else 0:.0f} gh y={gh_h['y'] if gh_h else 0:.0f}")
+    install_btns = page.get_by_role("button", name="安装", exact=True).count() + page.get_by_role("button", name="当前版本", exact=True).count()
+    check("每通道最多 8 条(安装按钮总数≤16)", install_btns <= 16, f"count={install_btns}")
+
     # 9. 紧凑档 800px：Right 不参与 split（fixed overlay），titlebar 横贯
     page.set_viewport_size({"width": 800, "height": 900})
     page.wait_for_timeout(600)
@@ -122,7 +129,7 @@ with sync_playwright() as p:
     check("移动端 Main 占满", bool(mb_m) and abs(mb_m["width"] - 600) < 4, f"main={mb_m['width'] if mb_m else 0:.0f}")
     check("内容无横向溢出", overflow)
 
-    # 11. 无致命 JS 错误（忽略 Tauri API 缺失的 reject，各组件已 catch）
+    # 12. 无致命 JS 错误（忽略 Tauri API 缺失的 reject，各组件已 catch）
     fatal = [e for e in errors if "tauri" not in e and "invoke" not in e and "getCurrent" not in e]
     check("无致命 JS 错误", len(fatal) == 0, " | ".join(fatal) or "ok")
 

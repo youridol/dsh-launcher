@@ -237,6 +237,8 @@ export default function VersionPanel() {
             </p>
           </div>
         )}
+        {/* 双通道左右排列（大屏两列；每通道展示最新 + 7 个历史版本） */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:items-start">
         <div>
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-medium">npm 通道</h3>
@@ -251,7 +253,8 @@ export default function VersionPanel() {
             </Button>
           </div>
           <div className="max-h-64 space-y-1 overflow-y-auto">
-            {sortedNpm.map((v) => (
+            {/* 最新 + 7 个历史版本 */}
+            {sortedNpm.slice(0, 8).map((v) => (
               <div
                 key={v.version}
                 className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
@@ -275,8 +278,6 @@ export default function VersionPanel() {
           </div>
         </div>
 
-        <Separator />
-
         <div>
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-medium">GitHub 通道</h3>
@@ -291,7 +292,8 @@ export default function VersionPanel() {
             </Button>
           </div>
           <div className="max-h-64 space-y-1 overflow-y-auto">
-            {sortedGh.map((v) => (
+            {/* 最新 + 7 个历史版本 */}
+            {sortedGh.slice(0, 8).map((v) => (
               <div
                 key={v.version}
                 className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
@@ -313,6 +315,7 @@ export default function VersionPanel() {
               <div className="text-xs text-muted-foreground">暂无版本（请检查 GitHub 网络/镜像）</div>
             )}
           </div>
+        </div>
         </div>
 
         <Separator />
