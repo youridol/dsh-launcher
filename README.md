@@ -48,3 +48,4 @@ Tauri 2 · Rust · React 19 · TypeScript · Vite · Tailwind CSS 4 · shadcn/ui
 ## 许可
 
 [MIT](LICENSE) © 2026 dsh-launcher contributors
+- 自动发布：每次提交自动迭代版本并发布 GitHub Release
