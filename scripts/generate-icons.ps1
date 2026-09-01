@@ -1,9 +1,16 @@
 ﻿# 从 ico.png (512x512) 统一生成所有图标
 # 覆盖 icons 目录内所有 PNG + 重新生成 icon.ico（多尺寸）
+# 源图位于脚本同目录的 icons\ico.png（用 $PSScriptRoot 定位，不依赖本机绝对路径）
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
-$src = "Y:\dsh-launcher\src-tauri\icons\ico.png"
+$scriptDir = $PSScriptRoot
+if (-not $scriptDir) {
+    # 兼容从其他目录调用（.ps1 直接执行时 $PSScriptRoot 恒非空，此处仅兜底）
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+$iconsDir = Join-Path $scriptDir "..\src-tauri\icons"
+$src = Join-Path $iconsDir "ico.png"
 $icon = [System.Drawing.Image]::FromFile($src)
 if ($icon.Width -ne $icon.Height) {
     Write-Error "源图不是正方形: $($icon.Width)x$($icon.Height)"
@@ -42,14 +49,14 @@ function Resize-Image([System.Drawing.Image]$img, [int]$size) {
 foreach ($name in $targets.Keys) {
     $size = $targets[$name]
     $bmp = Resize-Image $icon $size
-    $out = Join-Path "Y:\dsh-launcher\src-tauri\icons" $name
+    $out = Join-Path $iconsDir $name
     $bmp.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
     Write-Host "生成 $name ($size x $size)"
 }
 
 # 生成 icon.ico：多尺寸 ICO（16/32/48/256）
-$icoPath = "Y:\dsh-launcher\src-tauri\icons\icon.ico"
+$icoPath = Join-Path $iconsDir "icon.ico"
 $sizes = @(16, 32, 48, 256)
 $images = @()
 foreach ($s in $sizes) {

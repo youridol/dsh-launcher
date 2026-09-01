@@ -294,8 +294,7 @@ pub fn global_shim_path() -> Option<PathBuf> {
 
 /// 定位 npm 全局 bin 目录（Windows：npm 把 .cmd 直接放 prefix 目录，PATH 条目即 prefix）
 fn npm_global_bin_dir() -> PathBuf {
-    let prefix = npm_prefix();
-    prefix
+    npm_prefix()
 }
 
 /// npm 全局 prefix 目录（`npm prefix -g`；失败回退常见位置）
@@ -315,12 +314,6 @@ fn npm_prefix() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("pnpm")
-}
-
-/// 定位 npm 全局 bin 目录（非 Windows 平台：prefix/bin 惯例；当前项目仅 Windows）
-#[allow(dead_code)]
-fn npm_global_bin_dir_unix() -> PathBuf {
-    npm_prefix().join("bin")
 }
 
 /// 从 git clone 输出行解析接收百分比（Receiving objects: 45%）

@@ -1,0 +1,146 @@
+# 自动发布工作流：master 每次提交自动构建当前版本并发布；若已发布则迭代 PATCH 版本后构建
+# 语义（保证"每次提交都发布一个新版本"）：
+#   1. 读取当前版本（package.json）
+#   2. 若 v<当前版本> tag 已存在（已发布过）且本次有新提交 → bump patch → 构建新版本
+#   3. 若 v<当前版本> tag 不存在（如清理后首次推送）→ 直接构建当前版本
+#   4. 构建产物由 tauri-action 上传到 GitHub Release
+# 手动触发（workflow_dispatch）：
+#   version-bump: minor/major → 强制按指定类型递增后再构建
+#   skip-release: true        → 只递增版本并提交，不构建
+
+name: Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      version-bump:
+        description: 版本递增类型（忽略则按需：当前版本已发布才递增）
+        type: choice
+        default: none
+        options: [none, patch, minor, major]
+      skip-release:
+        description: 只递增版本并提交，跳过构建发布
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码（完整历史，用于版本 tag 判断）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node.js（22）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci --include=dev
+
+      - name: 校验（tsc + vite build + cargo check）
+        run: |
+          npx tsc --noEmit
+          npm run build
+          cargo check --manifest-path src-tauri/Cargo.toml
+
+      # 决策：当前版本是否已发布（tag 存在）
+      - name: 判断当前版本是否已发布
+        id: published
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          echo "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
+          if (git tag -l "v$version") {
+            echo "is-published=true" | Out-File -Append $env:GITHUB_OUTPUT
+            echo "当前版本 v$version 已发布"
+          } else {
+            echo "is-published=false" | Out-File -Append $env:GITHUB_OUTPUT
+            echo "当前版本 v$version 未发布"
+          }
+
+      # 需要递增版本的条件：手动指定（none 除外）或 已发布（自动迭代）
+      - name: 递增版本号
+        id: bump
+        run: |
+          $manual = "${{ inputs.version-bump }}"
+          $isPublished = "${{ steps.published.outputs.is-published }}"
+          if ($manual -ne "" -and $manual -ne "none") {
+            node scripts/bump-version.mjs --$manual
+          } elseif ($isPublished -eq "true") {
+            node scripts/bump-version.mjs --patch
+          } else {
+            echo "当前版本未发布，直接使用，不递增"
+          }
+          $newVersion = (Get-Content package.json | ConvertFrom-Json).version
+          echo "new=$newVersion" | Out-File -Append $env:GITHUB_OUTPUT
+          echo "发布版本: v$newVersion"
+
+      # CHANGELOG：插入当前提交的变更说明（若该版本条目不存在）
+      - name: 更新 CHANGELOG
+        id: changelog
+        run: |
+          $newVersion = "${{ steps.bump.outputs.new }}"
+          $content = Get-Content CHANGELOG.md -Raw
+          if ($content -match "\[$newVersion\]") {
+            echo "CHANGELOG 已含 v$newVersion，跳过"
+            echo "entry=$newVersion" | Out-File -Append $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $date = Get-Date -Format "yyyy-MM-dd"
+          $msg = git log -1 --pretty=%s
+          $entry = "## [$newVersion] - $date`n`n### 变更`n`n- $msg`n"
+          $header = "# Changelog`n`n"
+          $newContent = $content -replace [regex]::Escape($header), ($header + $entry + "`n")
+          Set-Content CHANGELOG.md $newContent -Encoding UTF8
+          echo "entry=$entry" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: 提交版本/CHANGELOG 变更
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md
+          git commit -m "v${{ steps.bump.outputs.new }}: 自动版本迭代" || echo "无版本变更提交"
+
+      # 构建安装包 + 创建 Release（tauri-action 自动装 NSIS，产物上传 Release）
+      - name: 构建并发布
+        if: ${{ !inputs.skip-release }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v${{ steps.bump.outputs.new }}
+          releaseName: "v${{ steps.bump.outputs.new }}"
+          # 覆盖构建版本（tauri-action 默认读 tauri.conf.json，此处与 bump 后保持一致）
+          appVersion: ${{ steps.bump.outputs.new }}
+          releaseBody: |
+            ## dsh-launcher v${{ steps.bump.outputs.new }}
+
+            ${{ steps.changelog.outputs.entry }}
+
+            由 CI 自动构建发布（commit: ${{ github.sha }}）
+          releaseDraft: false
+          prerelease: false

@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.3.19] - 2026-09-02
+
+### 变更
+
+- 开源前代码清理：
+  - 移除死代码 `github.rs::npm_global_bin_dir_unix`（`#[allow(dead_code)]`）并简化 `npm_global_bin_dir`
+  - 删除未使用的 UI 组件 `select.tsx` / `tabs.tsx` / `tooltip.tsx`（无任何引用）
+  - 移除死依赖 `next-themes`（`ui/sonner.tsx` 改为由调用方直接传主题，应用本就强制 dark）
+  - `package.json` 移除重复的 `tailwindcss` 声明，并同步精简 `package-lock.json`（版本号对齐 + 移除 next-themes 条目）
+- 隐私/可移植性：`scripts/generate-icons.ps1` 硬编码的本机绝对路径（`Y:\dsh-launcher\`）改为基于 `$PSScriptRoot` 的相对路径
+- `index.html` 标题从 Tauri 模板默认值改为产品名；`README.md` 重写为项目简介（替换脚手架模板）
+
 ## [v0.3.18] - 2026-09-01
 
 ### 变更

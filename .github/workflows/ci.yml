@@ -1,0 +1,62 @@
+# CI 校验工作流：每次 push 到 master / PR 触发
+# 职责：tsc 类型检查 → 前端构建 → Rust 检查 → 单元/集成测试（离线部分）
+# 说明：github_tag_test / npm_versions_test 依赖真实网络（git ls-remote / npm view），
+#       在 CI 中跳过；本地开发可单独运行。
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: 校验（tsc / build / cargo check / test）
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js（22）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 缓存 cargo（增量编译）
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci --include=dev
+
+      - name: 类型检查（tsc）
+        run: npx tsc --noEmit
+
+      - name: 前端构建（vite build）
+        run: npm run build
+
+      - name: Rust 检查（cargo check 零警告）
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: 单元测试（cargo test --lib）
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: 集成测试（离线部分：配置默认值 / 托盘图标 / 并发）
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --test config_default_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test tray_icon_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test concurrency_test
