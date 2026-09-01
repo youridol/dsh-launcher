@@ -39,10 +39,9 @@ function readVersionIn(file, pattern) {
 
 const cargoVersion = readVersionIn("src-tauri/Cargo.toml", /^version = "([^"]+)"/m);
 const tauriVersion = readVersionIn("src-tauri/tauri.conf.json", /"version": "([^"]+)"/);
-const lockRootVersion = readVersionIn(
-  "package-lock.json",
-  /"name": "dsh-launcher",\n\s+"version": "([^"]+)"/,
-);
+// package-lock.json：用 JSON 解析根包 version（正则易受字段顺序影响）
+const lockJson = JSON.parse(readFileSync("package-lock.json", "utf8"));
+const lockRootVersion = lockJson.packages?.[""]?.version ?? null;
 
 // 一致性保护：四处版本必须一致（package.json 为权威），不一致则报错阻止
 const allVersions = [pkg.version, cargoVersion, tauriVersion, lockRootVersion];
