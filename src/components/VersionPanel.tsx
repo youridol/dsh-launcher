@@ -18,7 +18,6 @@ import {
   getInstallPaths,
   installVersion,
   listVersions,
-  uninstallDsh,
   type DshVersion,
   type InstallPaths,
 } from "@/lib/tauri";
@@ -145,19 +144,6 @@ export default function VersionPanel() {
     }
   }
 
-  async function handleUninstall() {
-    setBusy(true);
-    try {
-      const msg = await uninstallDsh();
-      toast.success(msg);
-      refresh();
-    } catch (e) {
-      toast.error(`卸载失败: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   const channelBadge = (c: string) => (
     <Badge variant={c === "npm" ? "secondary" : "outline"}>{c}</Badge>
   );
@@ -184,8 +170,8 @@ export default function VersionPanel() {
   };
 
   return (
-    <Card>
-      <CardHeader>
+    <Card className="flex min-h-0 flex-1 flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle className="flex items-center gap-2">
           <Package className="size-4" />
           版本管理
@@ -202,7 +188,7 @@ export default function VersionPanel() {
         </CardTitle>
         <CardDescription>npm / GitHub 双通道安装</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
         {/* 安装/下载目录（任务：显示 harness 下载和安装目录） */}
         {paths && (
           <div className="space-y-1 rounded-md border bg-muted/30 p-3 text-xs">
@@ -237,10 +223,10 @@ export default function VersionPanel() {
             </p>
           </div>
         )}
-        {/* 双通道左右排列（大屏两列；每通道展示最新 + 7 个历史版本） */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:items-start">
-        <div>
-          <div className="mb-2 flex items-center justify-between">
+        {/* 双通道左右排列（大屏两列；每通道展示最新 + 7 个历史版本；列内列表自适应高度滚动） */}
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="flex min-h-0 flex-col">
+          <div className="mb-2 flex shrink-0 items-center justify-between">
             <h3 className="text-sm font-medium">npm 通道</h3>
             <Button
               variant="ghost"
@@ -252,7 +238,7 @@ export default function VersionPanel() {
               <RefreshCw className={refreshing === "npm" ? "animate-spin" : ""} />
             </Button>
           </div>
-          <div className="max-h-64 space-y-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
             {/* 最新 + 7 个历史版本 */}
             {sortedNpm.slice(0, 8).map((v) => (
               <div
@@ -278,8 +264,8 @@ export default function VersionPanel() {
           </div>
         </div>
 
-        <div>
-          <div className="mb-2 flex items-center justify-between">
+        <div className="flex min-h-0 flex-col">
+          <div className="mb-2 flex shrink-0 items-center justify-between">
             <h3 className="text-sm font-medium">GitHub 通道</h3>
             <Button
               variant="ghost"
@@ -291,7 +277,7 @@ export default function VersionPanel() {
               <RefreshCw className={refreshing === "github" ? "animate-spin" : ""} />
             </Button>
           </div>
-          <div className="max-h-64 space-y-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
             {/* 最新 + 7 个历史版本 */}
             {sortedGh.slice(0, 8).map((v) => (
               <div
@@ -316,17 +302,6 @@ export default function VersionPanel() {
             )}
           </div>
         </div>
-        </div>
-
-        <Separator />
-
-        <div className="flex items-center gap-2">
-          <Button variant="destructive" disabled={busy || !installed} onClick={handleUninstall}>
-            卸载 dsh
-          </Button>
-          <span className="text-xs text-muted-foreground">
-            卸载后 dsh 代码被移除；DSH_HOME 用户数据默认保留
-          </span>
         </div>
       </CardContent>
     </Card>

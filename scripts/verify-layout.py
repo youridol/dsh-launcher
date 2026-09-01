@@ -106,6 +106,23 @@ with sync_playwright() as p:
     rb_restored = page.locator(".right-panel-container").bounding_box()
     check("重载后恢复宽度", abs((sb_restored["width"] if sb_restored else 0) - 320) < 2 and abs((rb_restored["width"] if rb_restored else 0) - 560) < 2, f"sidebar={sb_restored['width'] if sb_restored else 0:.0f} right={rb_restored['width'] if rb_restored else 0:.0f}")
 
+    # 8a. 卸载按钮在重启右侧 + 版本管理面板自适应高度 + 左侧描边贯穿窗口顶
+    status_btns = page.locator(".sidebar-content button")
+    btn_texts = [status_btns.nth(i).inner_text() for i in range(status_btns.count())]
+    # 按钮组顺序：…重启…卸载（重启索引 < 卸载索引）
+    restart_idx = next((i for i, t in enumerate(btn_texts) if "重启" in t), -1)
+    uninstall_idx = next((i for i, t in enumerate(btn_texts) if t == "卸载" or t.startswith("卸载")), -1)
+    check("卸载按钮位于重启右侧", restart_idx >= 0 and uninstall_idx > restart_idx, f"restart={restart_idx} uninstall={uninstall_idx}")
+    # 版本管理 Card 高度自适应窗口（main 高度 - 内边距 ≈ 860）
+    vcard = page.locator(".app-main .group\\/card, .app-main [data-slot=card]").first
+    vc = vcard.bounding_box()
+    mb_full = page.locator(".app-main").bounding_box()
+    check("版本管理卡片自适应窗口高度", bool(vc and mb_full) and vc["height"] > mb_full["height"] * 0.8, f"card.h={vc['height'] if vc else 0:.0f} main.h={mb_full['height'] if mb_full else 0:.0f}")
+    # 左侧描边贯穿：titlebar::before 竖线（x=sidebar宽）从窗口顶开始；sidebar 自身有 border-right
+    tbar_before = page.evaluate("() => { const el = document.querySelector('.titlebar'); return getComputedStyle(el, '::before').width; }")
+    sb_border = page.evaluate("() => getComputedStyle(document.querySelector('.sidebar-container')).borderRightWidth")
+    check("左侧描边贯穿(titlebar 竖线 + sidebar border)", tbar_before != "0px" and sb_border != "0px", f"before.w={tbar_before} sidebar.border={sb_border}")
+
     # 8b. 双通道左右排列（桌面 1600 档 main≈698≥640 两列）+ 每通道最多 8 条
     npm_h = page.locator("text=npm 通道").bounding_box()
     gh_h = page.locator("text=GitHub 通道").bounding_box()

@@ -12,11 +12,13 @@ import {
   createDesktopShortcut,
   getDshStatus,
   getConfig,
+  getInstalledVersion,
   getWebUrl,
   restartDsh,
   setPort as savePort,
   startDsh,
   stopDsh,
+  uninstallDsh,
   type DshStatus as Status,
 } from "@/lib/tauri";
 import { toast } from "sonner";
@@ -35,6 +37,10 @@ export default function StatusCard() {
   const [status, setStatus] = useState<Status>("stopped");
   const [port, setPort] = useState("3080");
   const [busy, setBusy] = useState(false);
+  // 是否已安装 dsh（卸载按钮可用性）
+  const [hasInstalled, setHasInstalled] = useState(false);
+  // 卸载进行中（独立于启动/停止 busy，避免互斥）
+  const [uninstallBusy, setUninstallBusy] = useState(false);
 
   // 拉取状态
   const refresh = useCallback(async () => {
@@ -65,6 +71,13 @@ export default function StatusCard() {
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  // 查询当前安装状态（卸载按钮禁用依据）
+  useEffect(() => {
+    getInstalledVersion()
+      .then((v) => setHasInstalled(Boolean(v)))
+      .catch(() => setHasInstalled(false));
+  }, []);
 
   async function handleStart() {
     setBusy(true);
@@ -109,6 +122,23 @@ export default function StatusCard() {
     } finally {
       setBusy(false);
       refresh();
+    }
+  }
+
+  async function handleUninstall() {
+    setUninstallBusy(true);
+    try {
+      const msg = await uninstallDsh();
+      toast.success(msg);
+      // 卸载后刷新安装状态与运行状态
+      getInstalledVersion()
+        .then((v) => setHasInstalled(Boolean(v)))
+        .catch(() => setHasInstalled(false));
+      refresh();
+    } catch (e) {
+      toast.error(`卸载失败: ${e}`);
+    } finally {
+      setUninstallBusy(false);
     }
   }
 
@@ -209,6 +239,15 @@ export default function StatusCard() {
             </Button>
             <Button variant="outline" onClick={handleRestart} disabled={!running || busy}>
               <RotateCw /> 重启
+            </Button>
+            {/* 卸载（从版本管理面板移入；置于重启右侧） */}
+            <Button
+              variant="destructive"
+              onClick={handleUninstall}
+              disabled={uninstallBusy || !hasInstalled}
+              title="卸载 dsh（移除代码，DSH_HOME 数据默认保留）"
+            >
+              {uninstallBusy ? "卸载中…" : "卸载"}
             </Button>
           </div>
         </div>

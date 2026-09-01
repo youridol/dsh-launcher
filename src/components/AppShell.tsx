@@ -156,8 +156,9 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
         onClick={() => setSidebarOpen(false)}
       />
 
-      {/* 左侧列：主窗口标题栏 + 内容行 */}
-      <div className="app-left">
+      {/* 左侧列：主窗口标题栏 + 内容行
+          ref 用于设置 --sidebar-width（titlebar 描边贯穿需读取），data-sidebar-open 控制收起态描边 */}
+      <div className="app-left" ref={sidebarResizer.panelRef} data-sidebar-open={sidebarOpen}>
         {/* 主窗口标题栏（无边框自绘）：与左侧栏/日志面板同背景融合贯穿；拖拽移动窗口 */}
         <header
           className="titlebar"
@@ -208,7 +209,6 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
         <div className="app-content">
           {/* 左侧 Sidebar：dsh 运行状态 + 工具链（与标题栏融合贯穿） */}
           <aside
-            ref={sidebarResizer.panelRef}
             className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
             style={{ "--sidebar-width": `${sidebarResizer.width}px` } as CSSProperties}
             aria-label="左侧栏"
