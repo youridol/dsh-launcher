@@ -22,7 +22,7 @@ import {
   type DshStatus as Status,
 } from "@/lib/tauri";
 import { toast } from "sonner";
-import { Play, Square, RotateCw, Activity, ExternalLink, MonitorUp, MonitorDown } from "lucide-react";
+import { Play, Square, RotateCw, Activity, ExternalLink, MonitorUp, MonitorDown, Trash2 } from "lucide-react";
 
 // 状态徽标配色
 const STATUS_META: Record<Status, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
@@ -247,7 +247,7 @@ export default function StatusCard() {
               disabled={uninstallBusy || !hasInstalled}
               title="卸载 dsh（移除代码，DSH_HOME 数据默认保留）"
             >
-              {uninstallBusy ? "卸载中…" : "卸载"}
+              <Trash2 /> {uninstallBusy ? "卸载中…" : "卸载"}
             </Button>
           </div>
         </div>
