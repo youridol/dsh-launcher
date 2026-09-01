@@ -101,13 +101,11 @@ jobs:
 
       # CHANGELOG：插入当前提交的变更说明（若该版本条目不存在）
       - name: 更新 CHANGELOG
-        id: changelog
         run: |
           $newVersion = "${{ steps.bump.outputs.new }}"
           $content = Get-Content CHANGELOG.md -Raw
           if ($content -match "\[$newVersion\]") {
             echo "CHANGELOG 已含 v$newVersion，跳过"
-            echo "entry=$newVersion" | Out-File -Append $env:GITHUB_OUTPUT
             exit 0
           }
           $date = Get-Date -Format "yyyy-MM-dd"
@@ -116,7 +114,7 @@ jobs:
           $header = "# Changelog`n`n"
           $newContent = $content -replace [regex]::Escape($header), ($header + $entry + "`n")
           Set-Content CHANGELOG.md $newContent -Encoding UTF8
-          echo "entry=$entry" | Out-File -Append $env:GITHUB_OUTPUT
+          echo "CHANGELOG 已更新，新增条目: $($entry.Split("`n")[0])"
 
       - name: 提交版本/CHANGELOG 变更
         run: |
@@ -139,7 +137,7 @@ jobs:
           releaseBody: |
             ## dsh-launcher v${{ steps.bump.outputs.new }}
 
-            ${{ steps.changelog.outputs.entry }}
+            ${{ github.event.head_commit.message }}
 
             由 CI 自动构建发布（commit: ${{ github.sha }}）
           releaseDraft: false
