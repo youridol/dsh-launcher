@@ -45,6 +45,19 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 单实例：只允许一个启动器进程（一个主窗口 + 一个托盘图标）
+        // 二次启动/快捷方式触发时唤醒已有实例：聚焦主窗口；
+        // 携带 --web-gui 时再开一个内嵌 Web GUI 窗口（不限制数量）
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+            if argv.iter().any(|a| a == "--web-gui") {
+                open_web_gui_window(app);
+            }
+        }))
         .manage(AppState {
             logger: Arc::clone(&logger),
             process: Arc::clone(&process),

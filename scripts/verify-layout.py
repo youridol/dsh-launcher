@@ -118,10 +118,21 @@ with sync_playwright() as p:
     vc = vcard.bounding_box()
     mb_full = page.locator(".app-main").bounding_box()
     check("版本管理卡片自适应窗口高度", bool(vc and mb_full) and vc["height"] > mb_full["height"] * 0.8, f"card.h={vc['height'] if vc else 0:.0f} main.h={mb_full['height'] if mb_full else 0:.0f}")
-    # 左侧描边贯穿：titlebar::before 竖线（x=sidebar宽）从窗口顶开始；sidebar 自身有 border-right
-    tbar_before = page.evaluate("() => { const el = document.querySelector('.titlebar'); return getComputedStyle(el, '::before').width; }")
-    sb_border = page.evaluate("() => getComputedStyle(document.querySelector('.sidebar-container')).borderRightWidth")
-    check("左侧描边贯穿(titlebar 竖线 + sidebar border)", tbar_before != "0px" and sb_border != "0px", f"before.w={tbar_before} sidebar.border={sb_border}")
+    # 左侧描边：贯穿整列的单条竖线（app-left::after，从窗口顶到底），位置=当前侧栏右缘
+    line = page.evaluate(
+        "() => {"
+        "  const el = document.querySelector('.app-left');"
+        "  const cs = getComputedStyle(el, '::after');"
+        "  const r = el.getBoundingClientRect();"
+        "  const sb = document.querySelector('.sidebar-container').getBoundingClientRect();"
+        "  return { w: cs.width, top: r.top, bottom: r.bottom, x: parseFloat(cs.left), sbRight: sb.left + sb.width };"
+        "}"
+    )
+    check(
+        "左侧描边贯穿整列且对齐侧栏右缘",
+        line["w"] == "1px" and line["top"] == 0 and line["bottom"] >= 850 and abs(line["x"] - line["sbRight"]) < 2,
+        f"w={line['w']} top={line['top']:.0f} bottom={line['bottom']:.0f} x={line['x']:.0f} sbRight={line['sbRight']:.0f}",
+    )
 
     # 8b. 双通道左右排列（桌面 1600 档 main≈698≥640 两列）+ 每通道最多 8 条
     npm_h = page.locator("text=npm 通道").bounding_box()

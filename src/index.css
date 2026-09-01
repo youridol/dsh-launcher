@@ -156,10 +156,8 @@ body {
   overflow: hidden;
 }
 
-/* 左右侧边栏描边（色用现有 --border；收起态在对应 media 中清除） */
-.sidebar-container {
-  border-right: 1px solid var(--border);
-}
+/* 左右侧边栏描边（色用现有 --border）
+   左侧：由 .app-left::after 贯穿整列（见下），右侧日志面板用 border-left */
 .right-panel-container {
   border-left: 1px solid var(--border);
 }
@@ -212,6 +210,32 @@ body {
   min-width: 0;
   min-height: 0;
   height: 100%;
+  position: relative;
+}
+/* 左侧边栏描边：贯穿整列的单条竖线（从窗口顶到底，跨越标题栏+内容区），
+   位置 = 侧栏右缘（--sidebar-width），与右侧日志描边（贯穿窗口顶）视觉对齐 */
+.app-left::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sidebar-width, 260px);
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+/* 侧栏收起时竖线隐藏（与侧栏消失同步） */
+.app-left[data-sidebar-open="false"]::after {
+  display: none;
+}
+/* 移动端 drawer 不参与文档流：列竖线隐藏，drawer 自身保留描边 */
+@media (max-width: 640px) {
+  .app-left::after {
+    display: none;
+  }
+  .sidebar-container {
+    border-right: 1px solid var(--border);
+  }
 }
 /* 主窗口标题栏（无边框自绘）：拖拽移动窗口；与内容同背景、无分隔线（融合） */
 .titlebar {
@@ -223,28 +247,6 @@ body {
   height: 40px;
   padding: 0 0.75rem 0 1rem;
   user-select: none;
-  position: relative;
-}
-/* 左侧栏描边贯穿到窗口顶：标题栏区域在左侧栏右缘处补一条竖线（与 sidebar 的 border-right 无缝衔接） */
-.titlebar::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: var(--sidebar-width, 260px);
-  width: 1px;
-  background: var(--border);
-  pointer-events: none;
-}
-/* 侧栏收起时标题栏竖线隐藏（与 sidebar 描边同步消失） */
-.app-left[data-sidebar-open="false"] .titlebar::before {
-  display: none;
-}
-/* 移动端 drawer 不参与文档流，标题栏竖线无对齐对象，隐藏 */
-@media (max-width: 640px) {
-  .titlebar::before {
-    display: none;
-  }
 }
 /* 内容行：左侧栏 | 拖拽把手 | 主区 */
 .app-content {
