@@ -182,14 +182,6 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             <span className="text-xs text-muted-foreground">{version}</span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onOpenSettings}
-              title="打开设置"
-            >
-              <SettingsIcon className="size-3.5" /> 设置
-            </Button>
             {/* 自绘窗口控制按钮（无边框窗口必需） */}
             <WindowControls />
             {/* 日志收起/展开按钮：主窗口标题栏最右（关闭按钮右边） */}
@@ -225,6 +217,19 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
               <StatusCard />
               <Separator className="my-4" />
               <ToolchainPanel />
+              {/* 底部：设置入口（分割线分隔，独立区域） */}
+              <div className="mt-auto flex flex-col pt-4">
+                <Separator className="mb-3" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onOpenSettings}
+                  title="打开设置"
+                  className="w-full"
+                >
+                  <SettingsIcon className="size-3.5" /> 设置
+                </Button>
+              </div>
             </div>
           </aside>
 

@@ -36,11 +36,17 @@ with sync_playwright() as p:
     # 2. 右侧日志面板贯穿窗口顶（y=0，覆盖标题栏右侧区域）
     check("日志面板贯穿窗口顶(y=0)", bool(rb) and abs((rb["y"] if rb else 999) - 0) < 2, f"y={rb['y'] if rb else 0:.0f}")
 
-    # 3. 标题栏按钮顺序：版本|设置|最小化|最大化|关闭|日志收起（日志在关闭按钮右边=最后）
+    # 3. 标题栏按钮顺序：版本|最小化|最大化|关闭|日志收起（日志在关闭按钮右边=最后；设置已移到侧栏底部）
     tb_btns = page.locator(".titlebar button").count()
-    check("标题栏按钮数=6(侧栏/设置/最小/最大/关闭/日志)", tb_btns == 6, f"count={tb_btns}")
-    log_btn = page.locator(".titlebar button").nth(5).inner_text()
+    check("标题栏按钮数=5(侧栏/最小/最大/关闭/日志)", tb_btns == 5, f"count={tb_btns}")
+    log_btn = page.locator(".titlebar button").nth(4).inner_text()
     check("日志按钮在标题栏最右(关闭按钮右边)", "收起" in log_btn or "日志" in log_btn, f"text={log_btn!r}")
+    # 侧栏底部设置按钮（独立区域）
+    sidebar_set = page.locator(".sidebar-content button[title=\"打开设置\"]")
+    check("侧栏底部存在设置按钮", sidebar_set.count() == 1)
+    sb_footer_box = sidebar_set.bounding_box()
+    sb_box = page.locator(".sidebar-container").bounding_box()
+    check("设置按钮位于侧栏底部区域", bool(sb_footer_box and sb_box) and sb_footer_box["y"] > sb_box["y"] + sb_box["height"] * 0.7, f"y={sb_footer_box['y'] if sb_footer_box else 0:.0f}")
 
     # 4. Sidebar 展开/收起 → 收起后 Main 扩展 → 再展开恢复 260
     sidebar_toggle = page.locator(".titlebar button").first
@@ -56,7 +62,7 @@ with sync_playwright() as p:
     check("再展开恢复 260", abs((sb_reopen["width"] if sb_reopen else 0) - 260) < 2, f"width={sb_reopen['width'] if sb_reopen else 0:.0f}")
 
     # 5. 日志面板收起/展开（标题栏日志按钮）
-    right_toggle = page.locator(".titlebar button").nth(5)
+    right_toggle = page.locator(".titlebar button").nth(4)
     right_toggle.click()
     page.wait_for_timeout(450)
     rb_closed = page.locator(".right-panel-container").bounding_box()
