@@ -126,7 +126,7 @@ export default function LogPanel({
     // 子窗口外观：独立边框 + 背景 + 圆角，标题栏与内容区分离
     <div
       className={cn(
-        "flex h-full flex-col overflow-hidden rounded-lg border bg-card text-card-foreground shadow-sm",
+        "flex h-full flex-col overflow-hidden",  // 全页展示：去除卡片/子窗口外壳（边框/圆角/阴影/背景）
         className
       )}
     >

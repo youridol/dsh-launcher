@@ -2,13 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { CardDescription, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -179,16 +173,18 @@ export default function StatusCard() {
   }
 
   return (
-    <Card>
-      <CardHeader>
+    <div className="flex flex-col">
+      {/* 标题块（无卡片外壳：直接作为侧边栏面板内容） */}
+      <div className="flex flex-col gap-1">
         <CardTitle className="flex items-center gap-2">
           <Activity className="size-4" />
           dsh 运行状态
           <Badge variant={STATUS_META[status].variant}>{STATUS_META[status].label}</Badge>
         </CardTitle>
         <CardDescription>dsh 生命周期与 Web GUI</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
+      </div>
+      <Separator className="my-3" />
+      <div className="space-y-4">
         {/* 布局：允许换行，窄宽侧栏下不溢出（仅布局属性） */}
         <div className="flex flex-wrap items-end gap-4">
           <div className="grid gap-1.5">
@@ -238,7 +234,7 @@ export default function StatusCard() {
             </Button>
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

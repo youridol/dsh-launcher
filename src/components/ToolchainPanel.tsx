@@ -2,13 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { CardDescription, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { detectToolchain, installToolchain, type ToolchainItem } from "@/lib/tauri";
 import { toast } from "sonner";
@@ -51,8 +45,9 @@ export default function ToolchainPanel() {
   }
 
   return (
-    <Card>
-      <CardHeader>
+    <div className="flex flex-col">
+      {/* 标题块（无卡片外壳：直接作为侧边栏面板内容） */}
+      <div className="flex flex-col gap-1">
         <CardTitle className="flex items-center gap-2">
           <Wrench className="size-4" />
           工具链
@@ -61,8 +56,9 @@ export default function ToolchainPanel() {
           </Button>
         </CardTitle>
         <CardDescription>dsh 运行依赖</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
+      </div>
+      <Separator className="my-3" />
+      <div className="space-y-3">
         {items.map((item, i) => (
           <div key={item.name}>
             {i > 0 && <Separator className="mb-3" />}
@@ -95,7 +91,7 @@ export default function ToolchainPanel() {
             </div>
           </div>
         ))}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
