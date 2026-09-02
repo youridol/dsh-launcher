@@ -26,15 +26,11 @@ pub fn node_dir() -> PathBuf {
     toolchain_dir().join("node")
 }
 
-/// 检查目录是否存在且有内容
-pub fn dir_exists(p: &Path) -> bool {
-    p.is_dir() && fs::read_dir(p).map(|mut it| it.next().is_some()).unwrap_or(false)
-}
-
 /// 下载文件到本地
 /// base_url 可为镜像源；返回下载后本地路径
 /// v0.1.7：加日志输出（PowerShell 无行输出，仅记录开始/结束）
-fn download(logger: &Arc<Logger>, url: &str, dest: &Path) -> Result<(), String> {
+/// pub：commands/toolchain.rs 的 Git 安装包下载复用本实现（避免两处重复）
+pub fn download(logger: &Arc<Logger>, url: &str, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -139,22 +135,3 @@ pub fn install_node(logger: &Arc<Logger>) -> Result<String, String> {
     Ok(format!("Node {version} 已安装到 {}", node_install.display()))
 }
 
-/// 检查用户级 Node 是否可用（node_dir 里有 node.exe）
-pub fn user_node_available() -> bool {
-    node_dir().join("node.exe").exists()
-}
-
-/// 检查 Git 是否已安装（系统 PATH）
-pub fn system_git_available() -> bool {
-    let mut cmd = command::hidden("git");
-    cmd.arg("--version");
-    cmd.output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// 清理下载/解压残留（启动器启动时可调用）
-pub fn cleanup_temp() {
-    let _ = fs::remove_dir_all(toolchain_dir().join("tmp-node"));
-    let _ = fs::remove_dir_all(toolchain_dir().join("tmp-git"));
-}

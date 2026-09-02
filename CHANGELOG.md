@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.3.31] - 2026-09-02
+
+### 修复
+
+- WebView2 内嵌窗口任务栏图标模糊（v0.3.30 修复未生效）二次修复：
+  1. 根因定位：旧实现用 `CreateIconFromResourceEx` 从 icon.ico 构造 HICON，
+     实测该 API 对本项目 PNG 压缩型 ICO（icon.ico 7 帧均为 PNG）全部返回
+     ERROR_INVALID_HANDLE → ICON_BIG 从未成功发送 → 任务栏沿用默认图标模糊；
+  2. 改为 tao 同款可靠路径：256px PNG（128x128@2x.png）→ RGBA → `CreateIcon`
+     创建原生 256px HICON，进程级缓存持有（不销毁），WM_SETICON 发 ICON_BIG；
+  3. 真实运行验证：主窗口与内嵌 Web GUI 窗口 WM_GETICON 读回
+     ICON_BIG=256x256、ICON_SMALL=512x512（Windows 高质量缩放到任意任务栏尺寸/DPI）；
+  4. 新增 tests/icon_window_test.rs 端到端回归测试（真实窗口 + WM_GETICON 读回断言）。
+
+### 变更（全链路代码审计）
+
+- **工具链状态实时更新**：安装完成后 Rust 广播 `toolchain://changed`，ToolchainPanel 订阅自动刷新；
+  安装期间订阅 `install://progress`（channel=toolchain）显示进度条；VersionPanel 进度订阅按
+  channel 过滤（npm/github），避免工具链进度污染 dsh 版本安装进度条。
+- **修复 dsh .cmd 启动失败**：Windows 上 dsh 是 .cmd shim，`Command::new("dsh")` 直接 spawn 报
+  program not found（实测）；process.rs 启动/探测、get_installed_version 均改 `hidden_cmd`（cmd /C 包装）。
+- **卸载语义补齐**：卸载前先优雅停止 dsh（ADR-0003）；`keepDshHomeOnUninstall` 开关生效——
+  关闭时删除 ~/.dsh（先确认目录含 profiles/settings.yaml 特征，避免误删），默认保留不碰用户数据。
+- **补全半成品开关**：`autoStartDsh`（启动器启动时自动拉起 dsh）+ `autoOpenBrowser`（启动成功自动打开内嵌窗口）。
+- **工具链检测一致性**：detect 对 npm/pnpm/node 在 PATH 缺失时回退用户级 node_dir（消除“装了 Node 仍报 npm 缺失”矛盾）；
+  dsh 启动时若 PATH 无 node 且已装用户级 Node，前缀注入 node_dir（DESIGN §4.3“注入工具链 PATH”）。
+- **图标统一**：Rust 创建内嵌窗口时 builder 预置 SMALL 图标（消除创建瞬间默认 exe 图标闪现），
+  与主窗口/apply_window_icon 同源（512px icon.png）；窗口图标失败路径落 stderr（不静默吞错）。
+- **死代码/重复清理**：commands/logs.rs 复用 core::logging::logs_dir（删重复实现）；detect_node 简化为
+  run_cmd 统一回退；删除 11 个无用图标（Square*Logo/StoreLogo/icon.icns，仅 MSIX/macOS 用，本项目 NSIS）；
+  generate-icons.ps1 同步：帧数对齐实际 7 帧（16-256）、移除 Square/Store 生成、补 writer/stream Dispose。
+- 日志模块顶部注释对齐当前单文件布局。
+
+### 变更（v0.3.30 未独立发布，与 0.3.31 同批合入）
+
+- WebView2 内嵌窗口任务栏图标模糊修复（v0.3.30 方案）：`extract_largest_ico_frame` 构造单帧 ICO 时
+  未重写目录项 data offset（仍指向原 ICO 偏移）→ CreateIconFromResourceEx 读到错误偏移
+  → 图标损坏/模糊。现正确重写为 22（数据实际位置），附单测 + .NET Icon 实载验证（256px）。
+- 主窗口统一走 `apply_window_icon`（SMALL 512px + ICON_BIG 256px），与内嵌窗口一致，
+  保证任务栏/标题栏/Alt-Tab/不同 DPI 下图标清晰一致。
+- 代码审计清理：
+  1. 日志切割（rotate）改为级联轮转（.log.1 → .log.N），修复旧实现重复覆盖丢日志；
+     cleanup_old 适配当前单文件布局（原实现只删目录、30 天前的 .log 文件永不清理）。
+  2. 死代码移除：core/toolchain 的 dir_exists/user_node_available/system_git_available/
+     cleanup_temp、core/stream 的 run_exe、create_desktop_shortcut 的悬空语句。
+  3. 重复实现收敛：下载函数统一到 core::toolchain::download；npm prefix 统一到
+     core::github::npm_prefix_dir。
+  4. process.rs stop 悬垂引用与 restart 死锁风险修复；logging.rs 注释/文档对齐现状。
+  5. 移除死依赖 next-themes；删除 Vite 模板残留 favicon（vite.svg/tauri.svg），
+     替换为应用图标 favicon.png；清理 icon.ico.bak 与 dist/dist-bundles 构建产物。
+
 ## [0.3.29] - 2026-09-02
 
 ### 变更

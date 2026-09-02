@@ -24,7 +24,9 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
     // 从最新日志提取带 token 的 web URL，失败回退裸 URL
     let url = crate::core::logging::extract_latest_web_url()
         .unwrap_or_else(|| "http://127.0.0.1:3080".to_string());
-    let parsed = url.parse().unwrap_or_else(|_| "http://127.0.0.1:3080".parse().unwrap());
+    let parsed: tauri::Url = url
+        .parse()
+        .unwrap_or_else(|_| "http://127.0.0.1:3080".parse().unwrap());
     let label = format!(
         "dsh-web-gui-{}",
         std::time::SystemTime::now()
@@ -32,13 +34,34 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
             .map(|d| d.as_millis())
             .unwrap_or(0)
     );
-    // 创建内嵌窗口（不在此处设 icon，统一由 apply_window_icon 设置 SMALL+ICON_BIG 双尺寸）
-    let builder = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(parsed))
-        .title("deepseek-harness Web UI")
-        .inner_size(1600.0, 900.0);
+    // 构造内嵌窗口。构建期预置 SMALL 图标（消除创建瞬间默认 exe 图标闪现）；
+    // 图标源与主窗口一致（同一 512px PNG，同源生成）。
+    // 解码/设置失败均不影响窗口创建：图标随后由 apply_window_icon 补发 SMALL+BIG（双保险）
+    const WIN_ICON: &[u8] = include_bytes!("../icons/icon.png");
+    let builder = {
+        let base = || {
+            tauri::WebviewWindowBuilder::new(
+                app,
+                label.clone(),
+                tauri::WebviewUrl::External(parsed.clone()),
+            )
+            .title("deepseek-harness Web UI")
+            .inner_size(1600.0, 900.0)
+        };
+        match tauri::image::Image::from_bytes(WIN_ICON) {
+            Ok(img) => match base().icon(img) {
+                Ok(b) => b,
+                Err(_) => base(), // 平台不支持预置时回退（罕见）
+            },
+            Err(_) => base(),
+        }
+    };
     if let Ok(win) = builder.build() {
         // 高清任务栏图标：SMALL + ICON_BIG（任务栏大图标，修复模糊）
-        let _ = commands::dsh::apply_window_icon(&win);
+        // 启动期 logger 尚未关联 emitter，失败落 stderr 便于排查（错误已含 API/原因）
+        if let Err(e) = commands::dsh::apply_window_icon(&win) {
+            eprintln!("[dsh-launcher] 设置内嵌窗口图标失败: {e}");
+        }
     }
 }
 
@@ -72,11 +95,11 @@ pub fn run() {
             move |app| {
                 // 关联日志发射器（前端实时流式接收）
                 logger.set_emitter(app.handle().clone());
-                // 设置主窗口/任务栏高清图标（512px PNG，DPI 缩放后仍清晰）
+                // 设置主窗口/任务栏高清图标（SMALL 512px PNG + ICON_BIG 256px，DPI 缩放后仍清晰）
+                // 失败不阻断启动，落 stderr（错误已含 API/原因，便于排查）
                 if let Some(win) = app.get_webview_window("main") {
-                    const WIN_ICON: &[u8] = include_bytes!("../icons/icon.png");
-                    if let Ok(img) = tauri::image::Image::from_bytes(WIN_ICON) {
-                        let _ = win.set_icon(img);
+                    if let Err(e) = commands::dsh::apply_window_icon(&win) {
+                        eprintln!("[dsh-launcher] 设置主窗口图标失败: {e}");
                     }
                 }
                 // 创建系统托盘
@@ -85,6 +108,52 @@ pub fn run() {
                 let cfg = crate::core::config::AppConfig::load();
                 if cfg.port != 0 && crate::core::port::is_port_in_use(cfg.port) {
                     process.adopt_running(cfg.port);
+                }
+                // 自动启动开关（SettingsPanel）：启动器启动时若 dsh 未在运行则自动拉起；
+                // 启动成功且 autoOpenBrowser 开启 → 自动打开内嵌 Web GUI。
+                // 放后台线程延迟执行（不阻塞 setup / 主窗口首帧），完成后由端口探活确认就绪。
+                if cfg.auto_start_dsh
+                    && cfg.port != 0
+                    && !crate::core::port::is_port_in_use(cfg.port)
+                {
+                    let process = Arc::clone(&process);
+                    let logger = Arc::clone(&logger);
+                    let app_handle = app.handle().clone();
+                    let open_gui = cfg.auto_open_browser;
+                    // 后台线程延迟执行：不阻塞 setup / 主窗口首帧；
+                    // 启动（含 spawn 阻塞）放独立线程，避免占用 async 运行时
+                    std::thread::spawn(move || {
+                        // 延迟 1.5s：等主窗口/托盘就绪后再启动，避免与启动期探测竞争
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        let port = crate::core::config::AppConfig::load().port;
+                        if let Err(e) = process.start(port) {
+                            logger.log(
+                                crate::core::logging::LogSource::Launcher,
+                                crate::core::logging::LogLevel::Error,
+                                &format!("自动启动 dsh 失败: {e}"),
+                            );
+                            return;
+                        }
+                        logger.log(
+                            crate::core::logging::LogSource::Launcher,
+                            crate::core::logging::LogLevel::Info,
+                            &format!("自动启动 dsh（autoStartDsh），端口 {port}"),
+                        );
+                        if open_gui {
+                            // 等待端口就绪（最多 8s）后打开内嵌 Web GUI
+                            // 窗口操作须回主线程（Tauri 窗口非线程安全）
+                            for _ in 0..16 {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                if crate::core::port::probe(port) == Some(true) {
+                                    let app2 = app_handle.clone();
+                                    let _ = app_handle.run_on_main_thread(move || {
+                                        open_web_gui_window(&app2);
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    });
                 }
                 // v0.3.2：桌面快捷方式（--web-gui 参数）→ 启动即打开内嵌 Web GUI 窗口
                 if std::env::args().any(|a| a == "--web-gui") {

@@ -1,121 +1,107 @@
-//! dsh 生命周期 IPC 命令：启动 / 停止 / 重启 / 状态查询
+//! dsh 生命周期 IPC 命令：启动 / 停止 / 重启 / 状态查询 + 内嵌 Web GUI 窗口图标
 //!
 //! 并发策略（AGENTS.md 六、并发）：
 //! - 所有命令 async（不占 Tauri IPC 线程）
 //! - 阻塞操作（spawn/等待进程退出）经 spawn_blocking 跑在独立线程池
 //! - 启动/停止/重启互不阻塞（各自独立任务）
+//!
+//! 图标：apply_window_icon 同时设置 SMALL（标题栏）与 ICON_BIG（任务栏高清，
+//! 修复 WebView2 内嵌窗口任务栏图标模糊），见函数注释。
 
 use crate::core::process::DshStatus;
 use crate::AppState;
 use tauri::{Manager, State};
 
-/// 为窗口设置高清任务栏图标（SMALL 小图标 + Windows ICON_BIG 大图标）
-/// 修复：Windows 任务栏按钮使用 ICON_BIG，而 tauri `set_icon` 仅设置 ICON_SMALL（16px 缩放）
-/// → 任务栏图标模糊。这里手动解析 icon.ico 选取最大尺寸帧（256px PNG），构造单帧 ICO
-/// 设 ICON_BIG（Windows 高质量缩放任意任务栏尺寸，杜绝 16/32px 放大模糊）。
+/// 为窗口设置高清窗口图标（标题栏小图标 + 任务栏大图标）
+///
+/// 问题背景（WebView2 任务栏图标模糊修复）：
+/// - Windows 任务栏按钮使用窗口的 ICON_BIG（32px 语义，实际按 DPI 取更大），
+///   标题栏使用 ICON_SMALL（16px 语义）；
+/// - tauri 的 `set_icon` 在 tao 层只发送 `ICON_SMALL`（见 tao set_window_icon），
+///   任务栏按钮仍沿用默认 exe 资源图标经低分辨率缩放的模糊结果；
+/// - 旧实现用 `CreateIconFromResourceEx` 从 icon.ico 构造 HICON 发 ICON_BIG，
+///   但该 API 对本项目 PNG 压缩型 ICO（icon.ico 7 帧均为 PNG）全部失败
+///   （实测 ERROR_INVALID_HANDLE）→ ICON_BIG 从未生效 → 任务栏模糊。
+///
+/// 本实现复刻 tao 的可靠路径：256px PNG → RGBA → `CreateIcon` 创建原生 HICON
+/// （保留 256px 原生分辨率，Windows 高质量缩放到任意任务栏尺寸/DPI），
+/// 同时发送 ICON_SMALL + ICON_BIG。HICON 由进程级静态缓存持有（不销毁），
+/// 与应用同生命周期（WM_SETICON 后系统持有该句柄，立即销毁会导致重绘失效）。
 pub(crate) fn apply_window_icon(win: &tauri::WebviewWindow) -> Result<(), String> {
-    // 1. 小图标（标题栏/Alt-Tab 小尺寸）：tauri set_icon（512px PNG → Windows 缩放）
+    // 1. 小图标（标题栏 / Alt-Tab 小尺寸）：tauri set_icon（内部 RGBA → CreateIcon，可靠）
     const WIN_ICON: &[u8] = include_bytes!("../../icons/icon.png");
     let img = tauri::image::Image::from_bytes(WIN_ICON)
         .map_err(|e| format!("图标解析失败: {e}"))?;
     win.set_icon(img).map_err(|e| format!("设置图标失败: {e}"))?;
 
-    // 2. 大图标（任务栏按钮 ICON_BIG）：取 icon.ico 最大帧构造单帧 ICO 发送
+    // 2. 大图标（任务栏按钮 ICON_BIG）：256px 原生 HICON（进程级缓存，勿销毁）
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::{LPARAM, WPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateIconFromResourceEx, DestroyIcon, SendMessageW, ICON_BIG, LR_DEFAULTSIZE,
-            WM_SETICON,
+            SendMessageW, ICON_BIG, WM_SETICON,
         };
 
         let hwnd = win.hwnd().map_err(|e| format!("获取窗口句柄失败: {e}"))?;
-        let single_ico = extract_largest_ico_frame()?;
-        // SAFETY: single_ico 为合法单帧 ICO（ICONDIR+entry+PNG 数据），编译期嵌入解析；
-        // CreateIconFromResourceEx 返回独立 HICON 句柄
-        let hicon = unsafe {
-            CreateIconFromResourceEx(
-                &single_ico,
-                true,
-                0x0003_0000, // 图标资源版本（支持 Vista+ PNG 压缩 ICO）
-                0,           // 0 + LR_DEFAULTSIZE = 系统默认尺寸
-                0,
-                LR_DEFAULTSIZE,
-            )
-        };
-        if let Ok(hicon) = hicon {
-            // SAFETY: hwnd 为 tauri 提供的有效窗口句柄；SendMessageW 同步发送后系统持有图标
-            unsafe {
-                let _ = SendMessageW(
-                    hwnd,
-                    WM_SETICON,
-                    Some(WPARAM(ICON_BIG as usize)),
-                    Some(LPARAM(hicon.0 as isize)),
-                );
-            }
-            // 发送后系统已复制图标句柄，销毁本地引用防泄漏
-            unsafe { let _ = DestroyIcon(hicon); }
-        } else {
-            return Err(format!("创建任务栏图标失败: {:?}", hicon.err()));
+        let hicon = ensure_big_hicon()?;
+        // SAFETY: hwnd 为 tauri 提供的有效窗口句柄；hicon 为进程级缓存的有效 HICON，
+        // 与应用同生命周期（不销毁）。SendMessageW 同步发送后系统持有图标副本。
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG as usize)),
+                Some(LPARAM(hicon.0 as isize)),
+            );
         }
     }
     Ok(())
 }
 
-/// 从嵌入的 icon.ico 提取最大尺寸帧，构造单帧 ICO（ICONDIR + 1 entry + 图像数据）
-/// 目的：CreateIconFromResourceEx 对多帧 ICO 可能默认选中首帧（16px），
-/// 放大后任务栏模糊；选最大帧（256px）由 Windows 高质量缩放。
+/// 进程级缓存的 ICON_BIG HICON（256px 原生，应用生命周期内不销毁）
+/// 存原始句柄值（usize）规避 HICON 非 Send：句柄跨线程传递安全（tao 同语义）
 #[cfg(windows)]
-fn extract_largest_ico_frame() -> Result<Vec<u8>, String> {
-    const ICO_BYTES: &[u8] = include_bytes!("../../icons/icon.ico");
-    // ICONDIR: reserved(2) + type(2) + count(2)
-    let count = u16::from_le_bytes([ICO_BYTES[4], ICO_BYTES[5]]) as usize;
-    if ICO_BYTES.len() < 6 + count * 16 {
-        return Err("icon.ico 结构不完整".to_string());
+static BIG_ICON_CACHE: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
+/// 懒创建并缓存 256px 原生 HICON（tao 同款路径：PNG → RGBA → CreateIcon）
+///
+/// 为何不用 CreateIconFromResourceEx：实测对本项目 PNG 压缩 ICO 全部返回
+/// ERROR_INVALID_HANDLE（见取证测试 icon_forensics），而 CreateIcon(RGBA) 可靠。
+#[cfg(windows)]
+fn ensure_big_hicon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, String> {
+    use windows::Win32::UI::WindowsAndMessaging::CreateIcon;
+
+    let mut guard = BIG_ICON_CACHE.lock().map_err(|_| "图标缓存锁失败".to_string())?;
+    if let Some(raw) = *guard {
+        // raw 由本函数 CreateIcon 创建并缓存，生命周期与应用一致
+        return Ok(windows::Win32::UI::WindowsAndMessaging::HICON(
+            raw as *mut core::ffi::c_void,
+        ));
     }
-    // 选最大帧：优先尺寸最大（w=0 表示 256）
-    let mut best: Option<(usize, u32, u32, u32)> = None; // (entry_index, dim, data_off, data_len)
-    for i in 0..count {
-        let e = 6 + i * 16;
-        let w = ICO_BYTES[e] as u16;
-        let h = ICO_BYTES[e + 1] as u16;
-        let size = u32::from_le_bytes([
-            ICO_BYTES[e + 8],
-            ICO_BYTES[e + 9],
-            ICO_BYTES[e + 10],
-            ICO_BYTES[e + 11],
-        ]);
-        let off = u32::from_le_bytes([
-            ICO_BYTES[e + 12],
-            ICO_BYTES[e + 13],
-            ICO_BYTES[e + 14],
-            ICO_BYTES[e + 15],
-        ]);
-        if (off + size) as usize > ICO_BYTES.len() {
-            continue;
-        }
-        // 尺寸比较：w==0 → 256；忽略 h 非 0 且与 w 不一致的异常帧
-        if h != 0 && h as u32 != if w == 0 { 256 } else { w as u32 } {
-            continue;
-        }
-        let dim = if w == 0 { 256u32 } else { w as u32 };
-        let replace = match best {
-            None => true,
-            Some((_, best_dim, _, _)) => dim > best_dim,
-        };
-        if replace {
-            best = Some((i, dim, off, size));
-        }
+    // 256px 源（128x128@2x.png），Windows 任务栏图标黄金尺寸：
+    // 任何 DPI 下由系统从 256px 高质量缩放，杜绝低分辨率放大模糊
+    const ICON_256: &[u8] = include_bytes!("../../icons/128x128@2x.png");
+    let img = tauri::image::Image::from_bytes(ICON_256)
+        .map_err(|e| format!("256px 图标解析失败: {e}"))?;
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let rgba = img.rgba();
+
+    // 转 BGRA 并构造 AND mask（alpha 反转），与 tao RgbaIcon::into_windows_icon 相同
+    let mut bgra = Vec::with_capacity(rgba.len());
+    let mut and_mask = Vec::with_capacity((w * h) as usize);
+    for px in rgba.chunks_exact(4) {
+        bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        and_mask.push(px[3].wrapping_sub(u8::MAX));
     }
-    let (idx, _, data_off, data_len) = best.ok_or("icon.ico 无有效帧")?;
-    let entry = &ICO_BYTES[6 + idx * 16..6 + idx * 16 + 16];
-    let data = &ICO_BYTES[data_off as usize..(data_off + data_len) as usize];
-    // 构造单帧 ICO：ICONDIR(6) + 1 entry(16) + 图像
-    let mut out = Vec::with_capacity(6 + 16 + data.len());
-    out.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // reserved=0, type=1, count=1
-    out.extend_from_slice(entry);
-    out.extend_from_slice(data);
-    Ok(out)
+
+    // SAFETY: bgra/and_mask 为合法 BGRA/AND mask 缓冲（长度 = w*h*4 / w*h），
+    // CreateIcon 同步复制数据后返回独立 HICON；调用方（缓存）负责其生命周期
+    let hicon = unsafe {
+        CreateIcon(None, w, h, 1, 32, and_mask.as_ptr(), bgra.as_ptr())
+            .map_err(|e| format!("创建任务栏图标失败: {e}"))?
+    };
+    *guard = Some(hicon.0 as usize);
+    Ok(hicon)
 }
 
 /// 为内嵌 Web GUI 窗口设置高清任务栏图标（前端创建的窗口创建完成后调用）
@@ -146,12 +132,9 @@ pub fn get_web_url(state: State<'_, AppState>) -> String {
 }
 
 /// 创建桌面快捷方式（.lnk，双击启动 dsh-launcher 并打开内嵌 Web GUI 窗口）
+/// 注：URL 由启动器侧在收到 --web-gui 参数时重新解析（见 lib.rs），无需在此传入
 #[tauri::command]
 pub fn create_desktop_shortcut(state: State<'_, AppState>) -> Result<String, String> {
-    // 确认 dsh web 已运行（快捷方式打开的仍是内嵌窗口，需 dsh 在运行）
-    let url = state.process.web_url();
-    let _ = url; // URL 由启动器侧在 --web-gui 启动时重新解析
-
     // 当前 exe 路径
     let exe = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {e}"))?;
     // 桌面路径：%USERPROFILE%\Desktop（Windows）

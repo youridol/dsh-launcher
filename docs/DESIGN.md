@@ -23,22 +23,27 @@
 
 ```
 src-tauri/src/
-├── main.rs               # Tauri 入口
+├── main.rs               # Tauri 入口（调用 lib.rs::run）
+├── lib.rs                # 应用装配：窗口图标/托盘/单实例/内嵌 Web GUI 窗口
 ├── commands/             # IPC 命令（前端调用）
-│   ├── dsh.rs            #   dsh 生命周期：start/stop/restart/status
-│   ├── toolchain.rs      #   工具链：detect/install/mirror
-│   ├── version.rs        #   版本/通道：list/install/update/uninstall
-│   └── logs.rs           #   日志：stream/filter/export
+│   ├── mod.rs
+│   ├── dsh.rs            #   dsh 生命周期：start/stop/restart/status + 内嵌窗口图标
+│   ├── config.rs         #   配置读写：端口/镜像源/滑动开关/GitHub Token
+│   ├── toolchain.rs      #   工具链：detect/install
+│   ├── version.rs        #   版本/通道：list/install/uninstall/paths
+│   └── logs.rs           #   日志：list/read（实时流经 event 推送）
 ├── core/
-│   ├── process.rs        #   spawn dsh、PID 跟踪、SIGTERM/taskkill
-│   ├── port.rs           #   端口探测（启动前预检 + 5s 轮询）
-│   ├── install.rs        #   npm 通道 + GitHub 通道 + 离线包安装
-│   ├── toolchain.rs      #   工具链检测（node -v/git --version/…）与安装
-│   ├── mirror.rs         #   镜像源配置（npm registry / GitHub 加速）
-│   ├── config.rs         #   启动器配置持久化
-│   └── backup.rs         #   DSH_HOME 手动备份/导出
-├── logging.rs            #   dsh stdout/stderr + 启动器日志统一落盘
-└── events.rs             #   Tauri event 推送（状态变更/日志流）
+│   ├── mod.rs
+│   ├── process.rs        #   spawn dsh、PID 跟踪、SIGTERM/taskkill、状态机
+│   ├── port.rs           #   端口探测（启动前预检 + 5s 轮询兑底）
+│   ├── command.rs        #   无窗口子进程辅助（CREATE_NO_WINDOW / cmd 包装）
+│   ├── stream.rs         #   流式命令执行（逐行日志 + 进度回调）
+│   ├── github.rs         #   GitHub 通道：ls-remote/list、clone、pnpm 构建、全局 shim
+│   ├── toolchain.rs      #   Node 下载/解压安装（用户级）
+│   ├── events.rs         #   Tauri event 推送（安装进度/版本变更）
+│   ├── logging.rs        #   dsh stdout/stderr + 启动器日志统一落盘（按天/10MB 轮转）
+│   ├── config.rs         #   启动器配置持久化（%APPDATA%\dsh-launcher\config.json）
+│   └── tray.rs           #   系统托盘 + 窗口事件（关闭/最小化行为）
 ```
 
 ## 4. 核心流程
@@ -49,10 +54,10 @@ src-tauri/src/
 3. 安装走**官方通道**、**系统全局**；需提权的步骤（Git 装 Program Files）spawn `runas` 子进程，主进程不常驻管理员。
 4. 网络问题由镜像源解决（npm registry / GitHub 加速独立配置，默认官方源 + 常用镜像下拉）。
 
-### 4.2 dsh 安装（三入口）
-- **npm 通道**：`npm i -g @deepseek-ai/dsh@<version>`（registry 现有版本，当前 0.1.1-rc.2）。
-- **GitHub 通道**：从 GitHub Releases 拉 v0.1.2-alpha.1 及更新的源码 tag → clone → `pnpm install` + `pnpm build`。
-- **离线包**：用户手动下载的 dsh 源码 tar.gz/zip → 选择文件 → 解压 → 本地构建（工具链仍需在线）。
+### 4.2 dsh 安装（双入口 + 全局单版本）
+- **npm 通道**：`npm i -g @deepseek-ai/dsh@<version>`（registry 现有版本）。
+- **GitHub 通道**：git ls-remote 列 tag → 选 v0.1.2-alpha.1 及更新的源码 tag → clone → `pnpm install` + `pnpm build`（ADR-0001/0003）。
+- **全局单版本**：切换 = 先卸载再装；GitHub 安装后建全局 `dsh.cmd` shim。
 
 ### 4.3 生命周期
 - **启动**：spawn `dsh web --port <p>`，CWD = dsh 官方默认（不干预 workspace root），注入全局工具链 PATH。
@@ -62,26 +67,25 @@ src-tauri/src/
 
 ### 4.4 日志
 - 采集：dsh stdout/stderr + 启动器自身日志，统一时间戳格式。
-- 落盘：按天轮转 + 按大小 10MB 切割，保留 30 天。
-- UI：实时流式 + 来源/级别过滤 + 关键词搜索 + 一键导出 .log。
+- 落盘：`%LOCALAPPDATA%\dsh-launcher\logs\<date>.log` 按天轮转 + 单文件 10MB 切割（.log.1…），保留 30 天。
+- UI：实时流（`log://line` event，最新在上）+ 文件视图/导出（导出前剔除 emoji 防乱码）。
 
 ### 4.5 窗口与托盘
-- 内嵌 WebView2 渲染 `http://127.0.0.1:<port>` + "外部浏览器打开"兜底按钮。
+- 内嵌 WebView2 渲染 `http://127.0.0.1:<port>`（含 token 免认证）+ "外部浏览器打开"兜底按钮（opener 插件）。
+- 内嵌窗口任务栏图标：Rust 侧设置 SMALL + ICON_BIG（多尺寸 ICO 最大帧，防模糊）。
 - 托盘菜单：打开主窗口 / 启动 / 停止 / 重启 / 退出。
-- 滑动开关：① 主窗口关闭 = 直接退出（含 dsh）② 最小化到托盘 ③ 卸载时保留 DSH_HOME（默认保留）。
-- 退出：托盘"退出"先优雅停止 dsh 再退出；可勾选"退出时驻留 dsh"。
+- 滑动开关：① 关闭直接退出（含 dsh）② 最小化到托盘 ③ 退出时驻留 dsh ④ 卸载保留 DSH_HOME（默认保留）。
 
 ## 5. 数据与配置
 
-- 启动器配置：`%APPDATA%\dsh-launcher\config.json`（端口、镜像源、滑动开关、通道偏好）。
-- 日志：`%LOCALAPPDATA%\dsh-launcher\logs\`（按天目录，10MB 切割，30 天保留）。
-- DSH_HOME：**只读展示、不接管**（`%USERPROFILE%\.dsh`，实际以 dsh 为准），卸载时默认保留、可开关。
-- 手动备份：导出 DSH_HOME zip 到用户指定位置。
+- 启动器配置：`%APPDATA%\dsh-launcher\config.json`（端口、镜像源、GitHub Token、滑动开关）。
+- 日志：`%LOCALAPPDATA%\dsh-launcher\logs\`（单文件 10MB 切割，30 天保留）。
+- DSH_HOME：**只读展示、不接管**（实际位置以 dsh 为准），卸载时默认保留、可开关（`keepDshHomeOnUninstall`）。
 
 ## 6. 版本策略（ADR-0004）
 
-- 启动器版本独立于 dsh，从 **0.1.0** 起，**0.0.1 递进、0.1.9→0.2.0 十进一**（非语义化版本）。
-- 三处同步：`package.json` + `src-tauri/Cargo.toml` + `src-tauri/tauri.conf.json`。
+- 启动器版本独立于 dsh；
+- 同步处：`package.json` + `src-tauri/Cargo.toml` + `src-tauri/tauri.conf.json` + `package-lock.json` + `Cargo.lock`（bump-version.mjs 自动同步五处）。
 - `CHANGELOG.md` 顶部插中文条目。
 
 ## 7. 分发

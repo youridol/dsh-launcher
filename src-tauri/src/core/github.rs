@@ -294,11 +294,12 @@ pub fn global_shim_path() -> Option<PathBuf> {
 
 /// 定位 npm 全局 bin 目录（Windows：npm 把 .cmd 直接放 prefix 目录，PATH 条目即 prefix）
 fn npm_global_bin_dir() -> PathBuf {
-    npm_prefix()
+    npm_prefix_dir()
 }
 
-/// npm 全局 prefix 目录（`npm prefix -g`；失败回退常见位置）
-fn npm_prefix() -> PathBuf {
+/// npm 全局 prefix 目录（`npm prefix -g`；失败回退到 pnpm 全局目录）
+/// 供 GitHub shim 与版本管理面板复用（唯一实现，避免多处重复）
+pub fn npm_prefix_dir() -> PathBuf {
     let mut c = command::hidden_cmd("npm");
     c.args(["prefix", "-g"]);
     if let Ok(out) = c.output() {

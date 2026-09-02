@@ -130,12 +130,16 @@ export default function VersionPanel() {
   }, []);
 
   // 订阅安装进度事件（Rust 端 install://progress）
+  // 仅处理 dsh 版本安装通道（npm/github）；工具链安装进度由 ToolchainPanel 自己订阅，
+  // 避免互相污染进度条
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
         unlisten = await listenProgress((p) => {
-          setProgress(p);
+          if (p.channel === "npm" || p.channel === "github") {
+            setProgress(p);
+          }
         });
       } catch (e) {
         console.error("订阅安装进度事件失败", e);

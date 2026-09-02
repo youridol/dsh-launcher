@@ -188,18 +188,7 @@ export default function StatusCard() {
       const url = await resolveWebUrl();
       // 每次使用唯一 label 创建（修复：窗口关闭后 getByLabel 残留导致无法重建）
       const label = `dsh-web-gui-${Date.now()}`;
-      const win = new WebviewWindow(
-        label,
-        {
-          url,
-          title: "deepseek-harness Web UI",
-          width: 1600,
-          height: 900,
-          // 传统滚动条（非 Fluent overlay），保证全局 CSS 自定义滚动条常显
-          // ScrollBarStyle 仅类型导出（declare enum），运行时值 "default" 与枚举一致
-          scrollBarStyle: "default",
-        } as unknown as ConstructorParameters<typeof WebviewWindow>[1],
-      );
+      const win = new WebviewWindow(label, { url, title: "deepseek-harness Web UI", width: 1600, height: 900 });
       // 创建失败提示（Tauri 2 创建错误通过 tauri://error 事件上报）
       win.once("tauri://error", (e) => {
         console.error("内嵌窗口创建失败", e);

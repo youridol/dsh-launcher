@@ -133,23 +133,6 @@ pub(crate) fn read_all_lines<R: std::io::Read>(mut reader: R, on_line: &dyn Fn(&
     }
 }
 
-/// 便捷封装：运行一个"无窗口"的 .exe 命令并流式输出（如 git）
-pub fn run_exe(
-    logger: &Arc<Logger>,
-    program: &str,
-    args: &[String],
-    cwd: Option<&std::path::Path>,
-    err_level: LogLevel,
-    on_line: Option<Arc<LineCallback>>,
-) -> Result<(), String> {
-    let mut c = command::hidden(program);
-    c.args(args);
-    if let Some(dir) = cwd {
-        c.current_dir(dir);
-    }
-    run_streamed(logger, c, LogLevel::Info, err_level, on_line)
-}
-
 /// 便捷封装：运行一个 .cmd 脚本（npm/pnpm）并流式输出
 pub fn run_cmd_script(
     logger: &Arc<Logger>,

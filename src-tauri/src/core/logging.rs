@@ -1,9 +1,9 @@
 //! 全域日志：dsh 进程 stdout/stderr + 启动器自身日志统一落盘
 //!
 //! 策略（docs/DESIGN.md §4.4）：
-//! - 目录 `%LOCALAPPDATA%\dsh-launcher\logs\<yyyy-mm-dd>\`
-//! - 单文件按大小 10MB 切割（.log.1、.log.2 …）
-//! - 按天轮转，保留最近 30 天
+//! - 目录 `%LOCALAPPDATA%\dsh-launcher\logs\`，当前布局为单文件 `<date>.log` 直接放根目录
+//! - 单文件按大小 10MB 切割（.log.1、.log.2 …，级联轮转，见 rotate()）
+//! - 按天轮转，保留最近 30 天（cleanup_old 兼容早期 `<date>/<date>.log` 目录布局）
 //! - 前端通过 Tauri event 流式接收（见 commands/logs.rs）
 
 use std::fs::{self, OpenOptions};
@@ -71,7 +71,6 @@ pub struct Logger {
 struct LoggerInner {
     dir: PathBuf,
     current_date: String,
-    current_index: u32,
     current_size: u64,
 }
 
@@ -94,7 +93,6 @@ impl Logger {
             inner: Mutex::new(LoggerInner {
                 dir,
                 current_date: String::new(),
-                current_index: 0,
                 current_size: 0,
             }),
             emitter: Mutex::new(None),
@@ -136,7 +134,6 @@ impl Logger {
             // 日期变化 → 切换新文件
             if inner.current_date != date {
                 inner.current_date = date.clone();
-                inner.current_index = 0;
                 inner.current_size = 0;
             }
             let path = inner.dir.join(format!("{date}.log"));
@@ -147,10 +144,9 @@ impl Logger {
                 level.as_str(),
                 msg
             );
-            // 超限切割
+            // 超限切割（级联轮转 .log.1 … .log.MAX，见 rotate()）
             if inner.current_size + line.len() as u64 > MAX_FILE_SIZE {
-                rotate(&path, inner.current_index);
-                inner.current_index += 1;
+                rotate(&path);
                 inner.current_size = 0;
             }
             if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
@@ -197,7 +193,7 @@ impl Logger {
         }
     }
 
-    /// 删除超过 RETAIN_DAYS 天前的日志目录
+    /// 删除超过 RETAIN_DAYS 天前的日志文件（当前布局：logs/<date>.log 直接放根目录）
     fn cleanup_old(&self) {
         let Ok(inner) = self.inner.lock() else {
             return;
@@ -207,10 +203,23 @@ impl Logger {
             return;
         };
         for entry in entries.flatten() {
+            // 兼容早期日期目录（logs/<date>/<date>.log）与当前单文件布局（logs/<date>.log）
+            if entry.path().is_dir() {
+                // 早期布局：目录名形如 yyyy-mm-dd，删除整目录
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.len() == 10 && is_older_than(&name, &today, RETAIN_DAYS) {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+                continue;
+            }
+            // 当前布局：文件名形如 yyyy-mm-dd.log / yyyy-mm-dd.log.N（切割旧档）
             let name = entry.file_name().to_string_lossy().to_string();
-            // 目录名形如 yyyy-mm-dd，字典序即时间序
-            if name.len() == 10 && is_older_than(&name, &today, RETAIN_DAYS) {
-                let _ = fs::remove_dir_all(entry.path());
+            let base = name
+                .strip_suffix(".log")
+                .or_else(|| name.split_once(".log.").map(|(b, _)| b))
+                .unwrap_or("");
+            if base.len() == 10 && is_older_than(base, &today, RETAIN_DAYS) {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }
@@ -303,7 +312,8 @@ fn is_leap(y: i64) -> bool {
 }
 
 /// 日志根目录：%LOCALAPPDATA%\dsh-launcher\logs
-fn logs_dir() -> PathBuf {
+/// pub：commands/logs.rs 列表/读取复用（唯一实现，避免两处重复）
+pub fn logs_dir() -> PathBuf {
     std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -344,16 +354,22 @@ fn find_web_url_in_content(content: &str) -> Option<String> {
         })
 }
 
-/// 文件切割：把 path 重命名为 path.index 形式
-fn rotate(path: &Path, index: u32) {
-    if index >= MAX_ROTATED {
-        // 超出保留份数，删除最旧的
-        let old = path.with_extension(format!("log.{}", MAX_ROTATED));
-        let _ = fs::remove_file(&old);
-        return;
+/// 文件切割：当前 <date>.log 超限时，将旧文件按 .log.1 → .log.2 → … 级联轮转
+/// （MAX_ROTATED 份为上限：先删最旧 .log.MAX，再依次后移，最后把当前文件变为 .log.1）
+/// 注意：这不是“循环复用”覆盖，而是归档式轮换——每份切割档保留唯一内容，
+/// 超过上限的最旧档被删除，保证同一天最多保留 MAX_ROTATED 份历史切割档。
+fn rotate(path: &Path) {
+    // 先删最旧的 .log.MAX（若存在）
+    let oldest = path.with_extension(format!("log.{}", MAX_ROTATED));
+    let _ = fs::remove_file(&oldest);
+    // 级联后移：.log.{MAX-1} → .log.{MAX} … .log.1 → .log.2
+    for i in (1..MAX_ROTATED).rev() {
+        let from = path.with_extension(format!("log.{i}"));
+        let to = path.with_extension(format!("log.{}", i + 1));
+        let _ = fs::rename(&from, &to);
     }
-    let new = path.with_extension(format!("log.{}", index));
-    let _ = fs::rename(path, &new);
+    // 当前文件 → .log.1
+    let _ = fs::rename(path, path.with_extension("log.1"));
 }
 
 #[cfg(test)]
@@ -395,6 +411,52 @@ mod tests {
         assert!(!is_older_than("2026-08-01", "2026-08-29", 30));
         // 非法日期不判定为旧
         assert!(!is_older_than("bad-date", "2026-08-29", 30));
+    }
+
+    #[test]
+    fn test_rotate_cascades_and_keeps_max() {
+        // 构造临时目录，验证切割后：.log.1 最新、旧档依次后移、超过 MAX_ROTATED 的最旧被删除
+        let tmp = std::env::temp_dir().join(format!("dsh-log-rotate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("2026-09-02.log");
+        fs::write(&path, "current").unwrap();
+        // 预置旧档 .log.1 … .log.MAX（模拟历史切割）
+        for i in 1..=MAX_ROTATED {
+            fs::write(path.with_extension(format!("log.{i}")), format!("old{i}")).unwrap();
+        }
+        rotate(&path);
+        // 当前文件已被移走 → 不存在
+        assert!(!path.exists());
+        // .log.1 = 原当前文件
+        assert_eq!(fs::read_to_string(path.with_extension("log.1")).unwrap(), "current");
+        // 其余级联后移：.log.{i} = 原 .log.{i-1}
+        for i in 2..=MAX_ROTATED {
+            assert_eq!(
+                fs::read_to_string(path.with_extension(format!("log.{i}"))).unwrap(),
+                format!("old{}", i - 1)
+            );
+        }
+        // 最旧的 .log.MAX 原内容（old{MAX}）应已被删除（被 old{MAX-1} 顶替）
+        assert_ne!(
+            fs::read_to_string(path.with_extension(format!("log.{}", MAX_ROTATED))).unwrap(),
+            format!("old{MAX_ROTATED}")
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_rotate_no_existing_backups() {
+        // 无任何旧档时切割：仅生成 .log.1，不报错
+        let tmp = std::env::temp_dir().join(format!("dsh-log-rotate2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("2026-09-02.log");
+        fs::write(&path, "hello").unwrap();
+        rotate(&path);
+        assert_eq!(fs::read_to_string(path.with_extension("log.1")).unwrap(), "hello");
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

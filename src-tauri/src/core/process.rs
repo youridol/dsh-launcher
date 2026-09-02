@@ -140,18 +140,21 @@ impl ProcessManager {
             return Err(format!("端口 {port} 已被占用，请在设置中修改端口后重试"));
         }
 
-        // 启动命令：优先 PATH 中的 dsh（npm 全局）；
+        // 启动命令：优先 PATH 中的 dsh（npm 全局 / 启动器创建的 dsh.cmd shim）；
         // 找不到则用 GitHub 安装目录内的 `pnpm dsh web`（cwd=安装目录），
         // 修复 v0.2.3：GitHub 安装后 dsh 不在 PATH → program not found。
         // --no-open：不自动弹外部浏览器（Web GUI 由用户通过内嵌窗口/桌面快捷方式打开）
-        let mut cmd = command::hidden("dsh");
+        // Windows 上 dsh 是 .cmd（npm 全局 shim / 启动器 install_global_shim 产物），
+        // 不能直接 spawn（program not found），必须 cmd.exe /C 包装（见 command.rs 说明）
+        let mut cmd = command::hidden_cmd("dsh");
         cmd.args(["web", "--port", &port.to_string(), "--no-open"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
 
         // 探测 PATH 中的 dsh 是否存在；不存在则改用安装目录内 pnpm dsh
-        let dsh_in_path = command::hidden("dsh")
+        // （同样用 cmd 包装探测 .cmd，否则对 dsh.cmd 恒报 not found）
+        let dsh_in_path = command::hidden_cmd("dsh")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -183,6 +186,33 @@ impl ProcessManager {
                 LogLevel::Error,
                 "PATH 中无 dsh 且未找到 GitHub 安装目录",
             );
+        }
+
+        // 注入工具链 PATH（DESIGN §4.3）：若系统 PATH 无 node 但启动器已装用户级 Node，
+        // 前缀注入 node_dir（含 npm/pnpm），否则依赖 node 的 dsh/pnpm 子进程无法启动
+        #[cfg(windows)]
+        {
+            let mut probe = command::hidden("where");
+            probe.arg("node");
+            let node_in_path = probe
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !node_in_path {
+                let node_dir = crate::core::toolchain::node_dir();
+                if node_dir.join("node.exe").exists() {
+                    let current = std::env::var("PATH").unwrap_or_default();
+                    let node_path = node_dir.to_string_lossy().to_string();
+                    if !current.contains(&node_path) {
+                        cmd.env("PATH", format!("{node_path};{current}"));
+                        self.logger.log(
+                            LogSource::Launcher,
+                            LogLevel::Info,
+                            &format!("已注入用户级 Node 到子进程 PATH: {node_path}"),
+                        );
+                    }
+                }
+            }
         }
 
         let child = cmd.spawn().map_err(|e| {
@@ -266,10 +296,11 @@ impl ProcessManager {
         );
 
         // Windows 下用 taskkill /PID <pid> /T 模拟 SIGTERM（优雅排空）
-        let mut sigterm = command::hidden("taskkill");
-        let sigterm = sigterm
-            .args(["/PID", &pid.to_string(), "/T"])
-            .output();
+        let sigterm = {
+            let mut c = command::hidden("taskkill");
+            c.args(["/PID", &pid.to_string(), "/T"])
+                .output()
+        };
 
         // 等待优雅退出，最多 1 秒（v0.3.5：child 句柄已被监视线程 take 走，
         // 用 tasklist 探测进程存活；node/pnpm 进程树对无 /F 的 taskkill 常不响应，
@@ -333,9 +364,15 @@ impl ProcessManager {
         // 生命周期操作互斥：避免与 start/stop 并发
         let _op = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
         let port = self.current_port();
-        self.stop_locked()?;
-        // 等待端口释放
+        // 先优雅停止旧进程；若旧进程已不在（如已被外部终止），stop 仍返回 Ok（幂等），
+        // 继续用同一配置拉起新进程。仅当停止真正失败（taskkill 无法终止）时放弃重启，
+        // 避免新旧进程端口冲突导致启动失败。
+        let stop_res = self.stop_locked();
+        // 等待端口释放（停止后需短暂排空）
         thread::sleep(Duration::from_millis(500));
+        if let Err(e) = stop_res {
+            return Err(format!("停止旧进程失败，放弃重启: {e}"));
+        }
         self.start_locked(port)
     }
 

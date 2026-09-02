@@ -17,9 +17,18 @@ pub const PROGRESS_EVENT: &str = "install://progress";
 /// （解决卸载在 StatusCard，而 VersionPanel 各自独立 state 不联动的问题）
 pub const VERSION_CHANGED_EVENT: &str = "version://changed";
 
+/// 工具链变更事件名：工具链安装完成后广播，前端刷新各条目状态（present/missing）
+/// （解决 ToolchainPanel 安装后不实时更新的问题；安装期间另有 install://progress 进度流）
+pub const TOOLCHAIN_CHANGED_EVENT: &str = "toolchain://changed";
+
 /// 通过 AppHandle 广播“dsh 安装版本已变更”（无 handle 时静默丢弃）
 pub fn emit_version_changed(app: &tauri::AppHandle) {
     let _ = app.emit(VERSION_CHANGED_EVENT, ());
+}
+
+/// 通过 AppHandle 广播“工具链已变更”（无 handle 时静默丢弃）
+pub fn emit_toolchain_changed(app: &tauri::AppHandle) {
+    let _ = app.emit(TOOLCHAIN_CHANGED_EVENT, ());
 }
 
 /// 安装阶段

@@ -1,6 +1,6 @@
 ﻿# 从 ico.png (512x512) 统一生成所有图标
-# 覆盖 icons 目录内所有 PNG + 重新生成 icon.ico（多尺寸）
-# 源图位于脚本同目录的 icons\ico.png（用 $PSScriptRoot 定位，不依赖本机绝对路径）
+# 覆盖 src-tauri/icons 目录内所有 PNG + 重新生成 icon.ico（多尺寸）
+# 源图位于 src-tauri\icons\ico.png（用 $PSScriptRoot 定位，不依赖本机绝对路径）
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
@@ -17,22 +17,14 @@ if ($icon.Width -ne $icon.Height) {
     exit 1
 }
 
-# 目标尺寸表：文件名 -> 尺寸
+# 目标尺寸表：文件名 -> 尺寸（仅含实际使用的图标：tauri.conf bundle.icon 引用项 + 托盘 32）
+# 注意：Square*Logo / StoreLogo / icon.icns 为 MSIX/macOS 专用，本项目仅 NSIS(Windows)，
+# 不生成（已从仓库清理，见 v0.3.31 代码审计）。
 $targets = @{
     "32x32.png"          = 32
     "128x128.png"        = 128
     "128x128@2x.png"     = 256
-    "Square30x30Logo.png"   = 30
-    "Square44x44Logo.png"   = 44
-    "Square71x71Logo.png"   = 71
-    "Square89x89Logo.png"   = 89
-    "Square107x107Logo.png" = 107
-    "Square142x142Logo.png" = 142
-    "Square150x150Logo.png" = 150
-    "Square284x284Logo.png" = 284
-    "Square310x310Logo.png" = 310
-    "StoreLogo.png"       = 50
-    "icon.png"            = 512
+    "icon.png"           = 512
 }
 
 function Resize-Image([System.Drawing.Image]$img, [int]$size) {
@@ -55,9 +47,12 @@ foreach ($name in $targets.Keys) {
     Write-Host "生成 $name ($size x $size)"
 }
 
-# 生成 icon.ico：多尺寸 ICO（16/32/48/256）
+# 生成 icon.ico：多尺寸 ICO（16/24/32/48/64/128/256，与当前产物一致）
 $icoPath = Join-Path $iconsDir "icon.ico"
-$sizes = @(16, 32, 48, 256)
+# 注意：Vista+ 支持 PNG 压缩 ICO，但 CreateIconFromResourceEx 对 PNG 压缩帧
+# 会返回 ERROR_INVALID_HANDLE（见 commands/dsh.rs 注释取证）——本脚本仍输出 PNG 压缩
+# ICO 供 exe 资源/tauri 打包使用；运行期窗口图标走 RGBA→CreateIcon 路径，不依赖本 ICO。
+$sizes = @(16, 24, 32, 48, 64, 128, 256)
 $images = @()
 foreach ($s in $sizes) {
     $images += ,(Resize-Image $icon $s)
@@ -97,6 +92,7 @@ foreach ($d in $pngDatas) {
 }
 $writer.Flush()
 [System.IO.File]::WriteAllBytes($icoPath, $stream.ToArray())
+$writer.Dispose()
 $stream.Dispose()
 foreach ($img in $images) { $img.Dispose() }
 Write-Host "生成 icon.ico（含 $($sizes -join ',') px 多尺寸 PNG 压缩）"

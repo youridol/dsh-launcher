@@ -16,6 +16,18 @@ export async function listenVersionChanged(
   });
 }
 
+/** 工具链变更事件名（对应 Rust TOOLCHAIN_CHANGED_EVENT） */
+export const TOOLCHAIN_CHANGED_EVENT = "toolchain://changed";
+
+/** 订阅工具链变更事件（安装完成后触发，前端刷新各条目状态） */
+export async function listenToolchainChanged(
+  onChanged: () => void,
+): Promise<UnlistenFn> {
+  return listen(TOOLCHAIN_CHANGED_EVENT, () => {
+    onChanged();
+  });
+}
+
 /** dsh 运行状态（对应 Rust DshStatus） */
 export type DshStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 

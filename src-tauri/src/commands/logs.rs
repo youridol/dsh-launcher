@@ -1,31 +1,24 @@
-//! 日志 IPC：日志文件列表、导出、读取
+//! 日志 IPC：日志文件列表、读取
 //!
-//! 日志落盘在 `%LOCALAPPDATA%\dsh-launcher\logs\<date>\<date>.log`（core/logging.rs）。
-//! 前端实时流式通过 Tauri event 推送（后续接入），这里提供文件级读取/导出。
+//! 日志落盘在 `%LOCALAPPDATA%\dsh-launcher\logs\<date>.log`（core/logging.rs）。
+//! 前端实时流式通过 Tauri event `log://line` 推送（core/logging.rs emit）；
+//! 本模块提供文件级列表/读取（补流与文件视图）。
 
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+
+use crate::core::logging::logs_dir;
 
 /// 日志文件条目
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogFile {
-    /// 相对路径（date/file）
+    /// 相对路径（date.log 或 date/date.log）
     pub path: String,
     /// 大小（字节）
     pub size: u64,
     /// 修改时间（秒）
     pub modified: u64,
-}
-
-/// 日志根目录
-fn logs_dir() -> PathBuf {
-    std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("dsh-launcher")
-        .join("logs")
 }
 
 /// 列出所有日志文件（兼容两种布局：早期版本日期目录 logs/<date>/<date>.log，
