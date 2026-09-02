@@ -274,7 +274,7 @@ fn install_global_shim(logger: &Arc<Logger>) -> Result<(), String> {
     // dsh.cmd：cd 到安装目录后执行 pnpm dsh，透传参数
     let shim = format!(
         "@echo off\r\ncd /d \"{}\"\r\npnpm dsh %*\r\n",
-        dest.to_string_lossy().replace('"', "\"")
+        dest.to_string_lossy()
     );
     let shim_path = bin_dir.join("dsh.cmd");
     fs::write(&shim_path, shim).map_err(|e| format!("写入 dsh.cmd 失败: {e}"))?;

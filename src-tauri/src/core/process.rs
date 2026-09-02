@@ -143,8 +143,9 @@ impl ProcessManager {
         // 启动命令：优先 PATH 中的 dsh（npm 全局）；
         // 找不到则用 GitHub 安装目录内的 `pnpm dsh web`（cwd=安装目录），
         // 修复 v0.2.3：GitHub 安装后 dsh 不在 PATH → program not found。
+        // --no-open：不自动弹外部浏览器（Web GUI 由用户通过内嵌窗口/桌面快捷方式打开）
         let mut cmd = command::hidden("dsh");
-        cmd.args(["web", "--port", &port.to_string()])
+        cmd.args(["web", "--port", &port.to_string(), "--no-open"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
@@ -162,9 +163,9 @@ impl ProcessManager {
                 LogLevel::Info,
                 &format!("PATH 中无 dsh，改用安装目录启动: {}", github_dir.display()),
             );
-            // pnpm dsh web --port <p>，cwd = 安装目录（pnpm 脚本: node --import tsx/esm apps/cli/src/bin.ts）
+            // pnpm dsh web --port <p> --no-open，cwd = 安装目录（pnpm 脚本: node --import tsx/esm apps/cli/src/bin.ts）
             let mut c = command::hidden_cmd("pnpm");
-            c.args(["dsh", "web", "--port", &port.to_string()])
+            c.args(["dsh", "web", "--port", &port.to_string(), "--no-open"])
                 .current_dir(&github_dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -206,7 +207,7 @@ impl ProcessManager {
 
         // 子进程放入共享句柄，监视线程取走所有权
         *self.child.lock().unwrap() = Some(child);
-        let pid = self.pid.lock().unwrap().clone();
+        let pid = *self.pid.lock().unwrap();
 
         self.spawn_monitor(pid);
         // v0.2.7：启动探活线程——端口监听则置 Running；
@@ -238,9 +239,9 @@ impl ProcessManager {
 
         // 用记录的 PID（v0.2.5：child 句柄被监视线程 take 走，stop 依赖 pid 字段）；
         // v0.3.5：pid 为 0 但端口在监听（收养的外部 dsh）→ 按端口查 PID
-        let mut pid = self.pid.lock().unwrap().clone();
+        let mut pid = *self.pid.lock().unwrap();
         if pid == 0 {
-            let port = self.port.lock().unwrap().clone();
+            let port = *self.port.lock().unwrap();
             if port != 0 && port::is_port_in_use(port) {
                 pid = Self::pid_by_port(port).unwrap_or(0);
                 if pid != 0 {

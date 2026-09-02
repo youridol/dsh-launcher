@@ -2,6 +2,19 @@
 // 对应 Rust 端 commands/* 模块（见 src-tauri/src/commands/）
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+/** dsh 安装版本变更事件名（对应 Rust VERSION_CHANGED_EVENT） */
+export const VERSION_CHANGED_EVENT = "version://changed";
+
+/** 订阅 dsh 安装版本变更事件（卸载/安装后触发，前端刷新安装状态） */
+export async function listenVersionChanged(
+  onChanged: () => void,
+): Promise<UnlistenFn> {
+  return listen(VERSION_CHANGED_EVENT, () => {
+    onChanged();
+  });
+}
 
 /** dsh 运行状态（对应 Rust DshStatus） */
 export type DshStatus = "stopped" | "starting" | "running" | "stopping" | "error";

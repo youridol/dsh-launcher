@@ -5,6 +5,7 @@
 //! - 滑动开关 1：主窗口关闭按钮 = 直接退出（含 dsh）还是最小化到托盘
 //! - 滑动开关 2：最小化到托盘
 //! - 退出：先优雅停止 dsh，再退出；可勾选"退出时驻留 dsh"
+//!
 //! 开关状态来自 AppConfig（core/config.rs）
 
 use crate::core::config::AppConfig;

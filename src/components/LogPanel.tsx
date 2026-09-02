@@ -1,5 +1,6 @@
 // 日志侧边栏：全域日志流式展示（dsh + 启动器），固定在右侧，无卡片容器
 // 实时流：Tauri event `log://line`（Rust logging.rs emit）
+// 补流：挂载时读取最新日志文件（含启动早期日志与 dsh 日志）→ 放入实时流，避免丢失
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,6 +21,18 @@ interface LogLine {
 // 实时流最大缓冲行数
 const MAX_STREAM_LINES = 2000;
 
+// 解析落盘日志行 "[HH:MM:SS] [source] [LEVEL] message" → LogLine
+function parseLogLine(line: string): LogLine | null {
+  const m = line.match(/^\[(\d{2}:\d{2}:\d{2})\] \[(\w+)\] \[(\w+)\] (.*)$/);
+  if (!m) return null;
+  return {
+    timestamp: m[1],
+    source: m[2],
+    level: m[3],
+    message: m[4],
+  };
+}
+
 export default function LogPanel({
   className,
   onClose,
@@ -36,6 +49,8 @@ export default function LogPanel({
   const [liveMode, setLiveMode] = useState(true);
   // 内容容器引用（自动滚动；指向 ScrollArea 的 viewport，即真正的滚动容器）
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 已补流的日志文件（避免重复加载同一文件追加）
+  const backfilledRef = useRef<string | null>(null);
 
   // 订阅 Rust 日志事件（实时流，最新条目在最前）
   useEffect(() => {
@@ -62,6 +77,36 @@ export default function LogPanel({
     };
   }, []);
 
+  // 补流：读取最新日志文件 → 解析为 LogLine（倒序：新在前）放入实时流
+  // 覆盖 LogPanel 挂载前产生的日志（如启动早期、主窗口操作、dsh 启动输出）
+  const backfillLatestFile = useCallback(async () => {
+    try {
+      const files = await listLogs();
+      const latest = files[0];
+      if (!latest || backfilledRef.current === latest.path) return;
+      const raw = await readLog(latest.path);
+      const lines: LogLine[] = [];
+      for (const line of raw.split(/\r?\n/).reverse()) {
+        const parsed = parseLogLine(line);
+        if (parsed) lines.push(parsed);
+      }
+      if (lines.length > 0) {
+        backfilledRef.current = latest.path;
+        setStreamLines((prev) => {
+          // 合并去重：跳过与已缓冲相同 timestamp+message 的旧条目
+          const seen = new Set(prev.slice(0, 50).map((l) => l.timestamp + l.message));
+          const merged = [...prev];
+          for (const l of lines) {
+            if (!seen.has(l.timestamp + l.message)) merged.push(l);
+          }
+          return merged.slice(0, MAX_STREAM_LINES);
+        });
+      }
+    } catch (e) {
+      console.error("补流日志失败", e);
+    }
+  }, []);
+
   // 最新在上 → 自动滚动到顶部（滚动容器是 ScrollArea 的 viewport）
   useEffect(() => {
     if (liveMode && scrollRef.current) {
@@ -84,11 +129,14 @@ export default function LogPanel({
   }, [selected]);
 
   useEffect(() => {
-    refreshFiles();
-    // 文件列表定期刷新（30 秒，实时流为主）
-    const timer = setInterval(refreshFiles, 30000);
+    // 首次挂载：先补流最新日志（含启动早期/dsh 日志），再刷新文件列表
+    backfillLatestFile().finally(() => refreshFiles());
+    // 实时流为主：文件列表定期刷新（30 秒）保持文件视图可用；补流仅首帧一次（避免重复追加）
+    const timer = setInterval(() => {
+      refreshFiles();
+    }, 30000);
     return () => clearInterval(timer);
-  }, [refreshFiles]);
+  }, [backfillLatestFile, refreshFiles]);
 
   async function selectLog(path: string) {
     setLiveMode(false);

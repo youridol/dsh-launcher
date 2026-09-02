@@ -99,22 +99,72 @@ jobs:
           echo "new=$newVersion" | Out-File -Append $env:GITHUB_OUTPUT
           echo "发布版本: v$newVersion"
 
-      # CHANGELOG：插入当前提交的变更说明（若该版本条目不存在）
+      # CHANGELOG：插入当前提交的完整变更说明（若该版本条目不存在）
+      # 说明：
+      # - 使用 git log 的完整 body（多行，含各修改点）写入 CHANGELOG 顶部
+      # - 用“按行数组”方式插入（兼容 CRLF/LF 行尾，避免正则匹配失败导致条目丢失）
+      # - UTF8 无 BOM 写入（PS7 的 utf8 默认无 BOM；显式 utf8NoBOM 保险）
       - name: 更新 CHANGELOG
         run: |
           $newVersion = "${{ steps.bump.outputs.new }}"
-          $content = Get-Content CHANGELOG.md -Raw
-          if ($content -match "\[$newVersion\]") {
+          $lines = Get-Content CHANGELOG.md
+          $joined = $lines -join "`n"
+          if ($joined -match "\[$newVersion\]") {
             echo "CHANGELOG 已含 v$newVersion，跳过"
             exit 0
           }
           $date = Get-Date -Format "yyyy-MM-dd"
-          $msg = git log -1 --pretty=%s
-          $entry = "## [$newVersion] - $date`n`n### 变更`n`n- $msg`n"
-          $header = "# Changelog`n`n"
-          $newContent = $content -replace [regex]::Escape($header), ($header + $entry + "`n")
-          Set-Content CHANGELOG.md $newContent -Encoding UTF8
-          echo "CHANGELOG 已更新，新增条目: $($entry.Split("`n")[0])"
+          # 完整提交说明（title + body，排除 [skip ci] 与空行）
+          $rawMsg = git log -1 --pretty=%B
+          $msgLines = @($rawMsg -split "`r?`n") | Where-Object { $_.Trim() -ne '' -and $_ -notmatch '^\[skip ci\]' }
+          # 新条目行数组（标题行加 - 前缀；已带 - 前缀的详情行不重复加）
+          $entryLines = @("## [$newVersion] - $date", "", "### 变更", "")
+          foreach ($m in $msgLines) {
+            $trimmed = $m.Trim()
+            if ($trimmed -match '^- ') { $entryLines += $trimmed } else { $entryLines += "- $trimmed" }
+          }
+          # 找 "# Changelog" 头位置（兼容 BOM）
+          $headerIdx = 0
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^# Changelog') { $headerIdx = $i; break }
+          }
+          # 新文件 = 头（去 BOM 的干净头）之后插入空行 + 新条目
+          $newLines = @()
+          for ($i = 0; $i -le $headerIdx; $i++) { $newLines += $lines[$i] -replace "^\uFEFF", '' }
+          $newLines += ""
+          $newLines += $entryLines
+          for ($i = $headerIdx + 1; $i -lt $lines.Count; $i++) { $newLines += $lines[$i] }
+          # 统一 CRLF 写入（保持仓库既有行尾风格），UTF8 无 BOM
+          ($newLines -join "`r`n") + "`r`n" | Set-Content CHANGELOG.md -Encoding utf8NoBOM -NoNewline
+          echo "CHANGELOG 已更新: $($msgLines[0])"
+
+      # 提取本次版本的 CHANGELOG 条目 → 写入临时文件（供 release notes 使用，
+      # 避免 YAML 内联多行 output 的转义/缩进问题）
+      - name: 提取 Release notes（CHANGELOG 条目）
+        id: release-notes
+        shell: bash
+        run: |
+          new_version="${{ steps.bump.outputs.new }}"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          # 提取 CHANGELOG 中 "## [版本]" 到下一个 "## [" 的条目
+          # 用 index() 匹配版本标记（避免正则转义问题）
+          marker="[$new_version]"
+          awk -v m="$marker" '
+            index($0, "## ") == 1 {
+              if (found) exit
+              if (index($0, m) > 0) found=1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > "$notes_file"
+          if [ -s "$notes_file" ]; then
+            echo "已提取 v$new_version 的 CHANGELOG 条目"
+          else
+            echo "未找到 v$new_version 条目，回退到提交信息"
+            echo "由 CI 自动发布（commit: ${{ github.sha }}）" > "$notes_file"
+          fi
+          # 记录文件路径供后续步骤使用（通过 env 传递，不经 YAML 插值）
+          echo "NOTES_FILE=$notes_file" >> "$GITHUB_ENV"
 
       - name: 提交版本/CHANGELOG 变更
         run: |
@@ -142,11 +192,16 @@ jobs:
           releaseName: "v${{ steps.bump.outputs.new }}"
           # 覆盖构建版本（tauri-action 默认读 tauri.conf.json，此处与 bump 后保持一致）
           appVersion: ${{ steps.bump.outputs.new }}
-          releaseBody: |
-            ## dsh-launcher v${{ steps.bump.outputs.new }}
-
-            ${{ github.event.head_commit.message }}
-
-            由 CI 自动构建发布（commit: ${{ github.sha }}）
+          releaseBody: "由 CI 自动构建发布"
           releaseDraft: false
           prerelease: false
+
+      # Release notes 补充为 CHANGELOG 条目（完整修改日志）
+      - name: 补充 Release notes（CHANGELOG 修改日志）
+        if: ${{ !inputs.skip-release }}
+        shell: bash
+        run: |
+          new_version="${{ steps.bump.outputs.new }}"
+          gh release edit "v$new_version" --notes-file "$NOTES_FILE"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

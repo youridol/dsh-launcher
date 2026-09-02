@@ -1,4 +1,4 @@
-//! Tauri 事件推送：安装进度（install://progress）
+//! Tauri 事件推送：安装进度（install://progress）+ 版本变更（version://changed）
 //!
 //! 设计（docs/DESIGN.md §4.4）：前端实时流式接收日志（log://line）+ 安装进度。
 //! 进度事件由安装流程（npm/GitHub 通道、工具链安装）在后台线程 emit，
@@ -12,6 +12,15 @@ use tauri::Emitter;
 
 /// 安装进度事件名
 pub const PROGRESS_EVENT: &str = "install://progress";
+
+/// 版本变更事件名：安装/卸载完成后广播，前端刷新已安装版本与通道状态
+/// （解决卸载在 StatusCard，而 VersionPanel 各自独立 state 不联动的问题）
+pub const VERSION_CHANGED_EVENT: &str = "version://changed";
+
+/// 通过 AppHandle 广播“dsh 安装版本已变更”（无 handle 时静默丢弃）
+pub fn emit_version_changed(app: &tauri::AppHandle) {
+    let _ = app.emit(VERSION_CHANGED_EVENT, ());
+}
 
 /// 安装阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

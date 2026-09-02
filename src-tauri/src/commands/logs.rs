@@ -28,43 +28,65 @@ fn logs_dir() -> PathBuf {
         .join("logs")
 }
 
-/// 列出所有日志文件（按日期目录）
+/// 列出所有日志文件（兼容两种布局：早期版本日期目录 logs/<date>/<date>.log，
+/// 当前版本直接放根目录 logs/<date>.log）
 #[tauri::command]
 pub fn list_logs() -> Vec<LogFile> {
     let dir = logs_dir();
     let mut result = Vec::new();
-    let Ok(dates) = fs::read_dir(&dir) else {
+    let Ok(entries) = fs::read_dir(&dir) else {
         return result;
     };
-    for date in dates.flatten() {
-        let date_path = date.path();
-        if !date_path.is_dir() {
-            continue;
-        }
-        let Ok(files) = fs::read_dir(&date_path) else {
-            continue;
-        };
-        for file in files.flatten() {
-            let path = file.path();
-            if path.extension().map(|e| e == "log").unwrap_or(false) {
-                if let Ok(meta) = fs::metadata(&path) {
-                    result.push(LogFile {
-                        path: format!(
-                            "{}/{}",
-                            date.file_name().to_string_lossy(),
-                            path.file_name().unwrap_or_default().to_string_lossy()
-                        ),
-                        size: meta.len(),
-                        modified: meta
-                            .modified()
-                            .map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
-                            .unwrap_or(0),
-                    });
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_log = path.extension().map(|e| e == "log").unwrap_or(false);
+        if path.is_dir() {
+            // 早期布局：日期目录内的 .log 文件
+            let Ok(files) = fs::read_dir(&path) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let fpath = file.path();
+                if fpath.extension().map(|e| e == "log").unwrap_or(false) {
+                    if let Ok(meta) = fs::metadata(&fpath) {
+                        result.push(LogFile {
+                            path: format!(
+                                "{}/{}",
+                                entry.file_name().to_string_lossy(),
+                                fpath.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            size: meta.len(),
+                            modified: meta
+                                .modified()
+                                .map(|m| {
+                                    m.duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0)
+                                })
+                                .unwrap_or(0),
+                        });
+                    }
                 }
+            }
+        } else if is_log {
+            // 当前布局：根目录直接放 <date>.log
+            if let Ok(meta) = fs::metadata(&path) {
+                result.push(LogFile {
+                    path: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                    size: meta.len(),
+                    modified: meta
+                        .modified()
+                        .map(|m| {
+                            m.duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0),
+                });
             }
         }
     }
-    result.sort_by(|a, b| b.modified.cmp(&a.modified));
+    result.sort_by_key(|f| std::cmp::Reverse(f.modified));
     result
 }
 

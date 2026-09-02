@@ -18,6 +18,7 @@ import {
   getInstallPaths,
   installVersion,
   listVersions,
+  listenVersionChanged,
   type DshVersion,
   type InstallPaths,
 } from "@/lib/tauri";
@@ -94,6 +95,24 @@ export default function VersionPanel() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // 订阅 dsh 安装版本变更事件（卸载/安装后由 Rust 广播 → 刷新安装状态与路径）
+  // 解决：卸载按钮在 StatusCard，而本面板 state 独立，卸载后不刷新（安装后因在本面板内才正常）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        unlisten = await listenVersionChanged(() => {
+          refreshInstalled();
+        });
+      } catch (e) {
+        console.error("订阅版本变更事件失败", e);
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [refreshInstalled]);
 
   // 单独刷新某通道版本列表（npm / github 独立按钮）
   const refreshChannel = useCallback(async (channel: "npm" | "github") => {

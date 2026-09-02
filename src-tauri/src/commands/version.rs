@@ -3,6 +3,7 @@
 //! 双通道模型（ADR-0001）：
 //! - npm 通道：registry 现有版本（当前最新 0.1.1-rc.2）
 //! - GitHub 通道：v0.1.2-alpha.1 及更新源码 tag（core/github.rs）
+//!
 //! 全局单版本（ADR-0003）：切换 = 先卸载再装
 //!
 //! 并发策略：所有命令 async + spawn_blocking（npm/git 是网络/磁盘 IO，不占 IPC 线程）
@@ -104,43 +105,77 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
 }
 
 /// 安装指定版本（npm 通道：npm i -g；GitHub 通道：clone + build）
-/// v0.1.7：流式执行 + 进度事件 + 日志实时输出
+/// v0.1.7：流式执行 + 进度事件 + 日志实时输出；成功后广播 version://changed
 #[tauri::command]
 pub async fn install_version(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     channel: String,
     version: String,
 ) -> Result<String, String> {
     let logger = Arc::clone(&state.logger);
-    tauri::async_runtime::spawn_blocking(move || match channel.as_str() {
-        "npm" => install_npm_version(&logger, &version),
-        "github" => core_github::install_version(&version, &logger),
-        other => Err(format!("未知通道: {other}")),
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = match channel.as_str() {
+            "npm" => install_npm_version(&logger, &version),
+            "github" => core_github::install_version(&version, &logger),
+            other => Err(format!("未知通道: {other}")),
+        };
+        if result.is_ok() {
+            // 安装成功 → 广播版本变更（前端刷新已安装版本/通道状态）
+            crate::core::events::emit_version_changed(&app);
+        }
+        result
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
 /// 卸载 dsh（npm 全局 + GitHub 通道目录）
+/// 完成后广播 version://changed（前端版本管理/状态卡联动刷新）
 #[tauri::command]
-pub async fn uninstall() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn uninstall(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let logger = Arc::clone(&state.logger);
+    tauri::async_runtime::spawn_blocking(move || {
+        logger.info("开始卸载 dsh（npm 全局包 + GitHub 源码目录 + 全局命令）…");
         // 1. 卸载 npm 全局包
-        let _ = {
+        let npm_result = {
             let mut c = command::hidden_cmd("npm");
             c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
             c.output()
         };
+        match &npm_result {
+            Ok(out) if out.status.success() => {
+                logger.info("npm 全局包已卸载");
+            }
+            Ok(out) => {
+                logger.warn(&format!(
+                    "npm uninstall 返回非零: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+            Err(e) => {
+                logger.warn(&format!("npm uninstall 执行失败（可能未通过 npm 安装）: {e}"));
+            }
+        }
         // 2. 清理 GitHub 通道克隆目录（固定 deepseek-harness）
         let gh_dir = core_github::github_clone_dir();
         if gh_dir.exists() {
-            std::fs::remove_dir_all(&gh_dir).map_err(|e| e.to_string())?;
+            match std::fs::remove_dir_all(&gh_dir) {
+                Ok(_) => logger.info(&format!("GitHub 源码目录已清理: {}", gh_dir.display())),
+                Err(e) => return Err(format!("清理 GitHub 源码目录失败: {e}")),
+            }
+        } else {
+            logger.info("GitHub 源码目录不存在，跳过清理");
         }
         // 3. 清理全局 dsh.cmd shim（GitHub 安装时创建的）
         let shim = crate::core::github::global_shim_path();
         if let Some(p) = shim {
-            let _ = std::fs::remove_file(p);
+            let _ = std::fs::remove_file(&p);
+            logger.info(&format!("已删除全局 dsh 命令: {}", p.display()));
         }
+        // 广播版本变更（前端刷新安装状态）
+        crate::core::events::emit_version_changed(&app);
+        logger.info("dsh 已卸载完成");
         Ok::<_, String>("dsh 已卸载（npm 全局包 + GitHub 源码目录 + 全局命令）".to_string())
     })
     .await

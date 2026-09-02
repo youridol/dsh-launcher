@@ -79,6 +79,9 @@ pub fn create_desktop_shortcut(state: State<'_, AppState>) -> Result<String, Str
     if !lnk.exists() {
         return Err("创建快捷方式失败（文件未生成）".to_string());
     }
+    state
+        .logger
+        .info(&format!("已创建桌面快捷方式（打开内嵌窗口）: {}", lnk.display()));
     Ok(format!("已创建桌面快捷方式（打开内嵌窗口）: {}", lnk.display()))
 }
 

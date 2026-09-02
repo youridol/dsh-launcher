@@ -14,6 +14,7 @@ import {
   getConfig,
   getInstalledVersion,
   getWebUrl,
+  listenVersionChanged,
   restartDsh,
   setPort as savePort,
   setWebGuiIcon,
@@ -79,6 +80,27 @@ export default function StatusCard() {
       .then((v) => setHasInstalled(Boolean(v)))
       .catch(() => setHasInstalled(false));
   }, []);
+
+  // 订阅 dsh 安装版本变更事件：卸载/安装完成后刷新安装状态 + 运行状态
+  // （Rust 端在 uninstall/install 成功后广播 version://changed）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        unlisten = await listenVersionChanged(() => {
+          getInstalledVersion()
+            .then((v) => setHasInstalled(Boolean(v)))
+            .catch(() => setHasInstalled(false));
+          refresh();
+        });
+      } catch (e) {
+        console.error("订阅版本变更事件失败", e);
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [refresh]);
 
   async function handleStart() {
     setBusy(true);
