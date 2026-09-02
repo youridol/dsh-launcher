@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.26] - 2026-09-02
+
+### 变更
+
+- feat: 内嵌窗口任务栏图标高清修复 + 侧栏默认宽 340 + 日志按钮纯图标
+- 1. 内嵌 WebviewWindow 任务栏图标模糊根因修复：
+- 根因：Windows 任务栏按钮用 ICON_BIG(32px)，tauri set_icon 只设 ICON_SMALL(16px 放大)
+- 新增 apply_window_icon：SMALL(512px PNG) + 从多尺寸 icon.ico 用 CreateIconFromResourceEx
+- 提取 32px 设 WM_SETICON ICON_BIG；前端创建与 --web-gui 两条路径统一调用
+- Cargo.toml 加 windows 0.61 依赖（与 tauri 同版本复用）
+- 2. 主窗口左右侧边栏默认宽固定 340px（原左侧 260 / 右侧响应式 360-640）：
+- panel-layout 常量改 340；storageKey 升 v2 作废旧拖拽值
+- 3. 右侧日志收起按钮去文字，仅保留图标
+
 ## [0.3.25] - 2026-09-02
 
 ### 变更
