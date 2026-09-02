@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.32] - 2026-09-02
+
+### 变更
+
+- ci(release.yml)：修复“无版本变更提交”时 pwsh 下 `|| echo` 兜底不重置
+  `$LASTEXITCODE` 导致 step 误报失败（v0.3.31 首次发布实测）；提交/推送步骤改 `shell: bash`。
+- 发布补充便携包：tauri bundler 不产 zip，release 工作流在 tauri-action 后新增
+  “打包并上传便携包”步骤（release exe → portable.zip → gh release upload），
+  GitHub Release 同时产出安装包（setup.exe）与便携包（portable.zip）。
+
 ## [0.3.31] - 2026-09-02
 
 ### 修复

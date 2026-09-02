@@ -209,3 +209,29 @@ jobs:
           gh release edit "v$new_version" --notes-file "$NOTES_FILE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 便携包（portable zip）：tauri bundler 不产 zip，这里把 release exe 压 zip 上传，
+      # 与安装包（setup.exe）一并作为发布产物（AGENTS.md：报告安装包 + 便携包）
+      # 用 pwsh（默认 shell）：路径天然 Windows 格式，无 bash/路径转换问题
+      - name: 打包并上传便携包
+        if: ${{ !inputs.skip-release }}
+        shell: pwsh
+        run: |
+          $new_version = "${{ steps.bump.outputs.new }}"
+          $exe = "src-tauri/target/release/dsh-launcher.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "未找到 release exe: $exe（tauri-action 未保留？）"
+            exit 1
+          }
+          $zip_name = "dsh-launcher_${new_version}_x64_portable.zip"
+          $tmpdir = Join-Path $env:RUNNER_TEMP "portable"
+          if (Test-Path $tmpdir) { Remove-Item $tmpdir -Recurse -Force }
+          New-Item -ItemType Directory -Path $tmpdir | Out-Null
+          Copy-Item $exe (Join-Path $tmpdir "dsh-launcher.exe")
+          $zip_path = Join-Path $env:RUNNER_TEMP $zip_name
+          Compress-Archive -Path (Join-Path $tmpdir "dsh-launcher.exe") -DestinationPath $zip_path -Force
+          # 上传到已由 tauri-action 创建的 Release
+          gh release upload "v$new_version" $zip_path --clobber
+          Write-Host "已上传便携包: $zip_name"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
