@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-launcher"
-version = "0.3.21"
+version = "0.3.22"
 dependencies = [
  "encoding_rs",
  "serde",

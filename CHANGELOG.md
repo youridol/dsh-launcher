@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.23] - 2026-09-02
+
+### 变更
+
+- fix: 日志流补全 + dsh 日志获取 + 卸载状态实时刷新 + Release notes 含修改日志
+- 任务1: 主窗口操作日志不全修复——uninstall/set_port/set_mirrors/set_switches/set_github_token/create_desktop_shortcut 命令补 logger，操作落盘并推前端实时流
+- 任务2: 日志面板获取不到 dsh 日志——list_logs 只扫日期子目录而实际日志在根目录（返回空）；改为兼容两种布局；LogPanel 挂载时读取最新日志文件补流（含启动早期/dsh 日志），避免事件订阅前丢失
+- 任务3: 卸载后版本管理安装状态不刷新——新增 version://changed 事件，uninstall/install 成功后广播；VersionPanel/StatusCard 订阅后刷新安装状态与通道状态（安装后仍正常）
+- 任务4: dsh 启动命令加 --no-open（不自动弹外部浏览器，由内嵌窗口/快捷方式打开）
+- 任务5: 桌面快捷方式确认走 --web-gui 内嵌窗口（实测验证，无需改码）
+- 任务6: Release 工作流——CHANGELOG 更新改用按行插入（修复 CRLF 导致条目丢失的 bug）；Release notes 提取本次版本 CHANGELOG 条目（完整修改日志）
+- 顺带修复 clippy 存量警告（github.rs/process.rs/tray.rs/logs.rs）
+
 ## [v0.3.19] - 2026-09-02
 
 ### 变更
