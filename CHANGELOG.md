@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.28] - 2026-09-02
+
+### 变更
+
+- fix: 日志滚动条紧贴右缘 + npm/GitHub 与日志滚动条统一样式
+- 1. 日志滚动条贴最右：移除 Base UI overlay ScrollBar（懒挂载且贴边有偏移），
+- viewport 恢复原生滚动条 → 滚动条紧贴 viewport 右缘 = 面板最右缘
+- 2. 统一样式：index.css 全局 ::-webkit-scrollbar（10px 圆角 thumb + hover 加深）
+- 与 Firefox scrollbar-width/color——npm/GitHub 版本列表（原生 overflow 容器）
+- 与右侧日志面板（ScrollArea viewport）滚动条外观完全一致
+
 ## [0.3.27] - 2026-09-02
 
 ### 变更
