@@ -297,26 +297,42 @@ body {
   word-break: break-word;
   overflow-wrap: anywhere;
 }
-/* 滚动条：overlay 定位贴右侧面板右缘（不占内容宽，出现时紧贴右边框） */
-.right-panel-container [data-slot="scroll-area-scrollbar"][data-orientation="vertical"] {
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: 10px;
-  z-index: 30;
+/* 日志 pre：宽度不溢出（break 所有字符），右侧为原生滚动条让位 */
+.right-panel-container [data-slot="scroll-area"] pre {
+  width: 100%;
+  min-width: 0;
+  padding-right: 0.6rem;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
-.right-panel-container [data-slot="scroll-area-thumb"] {
-  width: 6px;
-  border-radius: 3px;
-}
-/* 视口：滚动内容不出现原生滚动条（自定义 overlay 取代），换行由 pre 处理 */
+/* 日志视口：原生滚动条（统一风格见全局 ::-webkit-scrollbar），滚动条贴 viewport 右缘 = 面板右缘 */
 .right-panel-container [data-slot="scroll-area-viewport"] {
   overflow-y: scroll;
-  scrollbar-width: none;
 }
-.right-panel-container [data-slot="scroll-area-viewport"]::-webkit-scrollbar {
-  display: none;
+
+/* ---- 全局统一样式滚动条（WebKit/Chromium 与 Firefox）----
+   统一 npm/GitHub 版本列表（原生 overflow-y 容器）与右侧日志面板（ScrollArea viewport）的滚动条外观 */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--border) 85%, transparent);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--border) 85%, transparent) transparent;
 }
 
 /* ---- 拖拽 handle（separator）：9px 命中区跨边界 + 1px hover 线（色用现有 --border） ---- */

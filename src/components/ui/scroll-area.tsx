@@ -18,11 +18,12 @@ function ScrollArea({
       <ScrollAreaPrimitive.Viewport
         ref={viewportRef}
         data-slot="scroll-area-viewport"
-        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1"
+        className="size-full rounded-[inherit] outline-none"
       >
         {children}
       </ScrollAreaPrimitive.Viewport>
-      <ScrollBar />
+      {/* 滚动条：统一使用全局自定义原生滚动条样式（见 index.css ::-webkit-scrollbar），
+          不再渲染 Base UI overlay scrollbar（避免懒挂载/贴边偏移问题） */}
       <ScrollAreaPrimitive.Corner />
     </ScrollAreaPrimitive.Root>
   )
