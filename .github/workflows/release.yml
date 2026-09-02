@@ -167,6 +167,9 @@ jobs:
           echo "NOTES_FILE=$notes_file" >> "$GITHUB_ENV"
 
       - name: 提交版本/CHANGELOG 变更
+        # bash：`git commit ... || echo` 在 pwsh 下不重置 $LASTEXITCODE（native 退出码残留）
+        # 会导致“无版本变更”时 step 误报失败（v0.3.31 实测）。bash 的 || 语义正确。
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -176,8 +179,9 @@ jobs:
 
       # 推送 bump 提交回 master：保证远端版本与已发布版本一致（避免下次重复 bump）
       - name: 推送版本变更回 master
+        shell: bash
         run: |
-          git push origin HEAD:master
+          git push origin HEAD:master || echo "无变更可推送（远端已是最新）"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
