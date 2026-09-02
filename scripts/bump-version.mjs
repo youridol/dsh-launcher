@@ -42,12 +42,17 @@ const tauriVersion = readVersionIn("src-tauri/tauri.conf.json", /"version": "([^
 // package-lock.json：用 JSON 解析根包 version（正则易受字段顺序影响）
 const lockJson = JSON.parse(readFileSync("package-lock.json", "utf8"));
 const lockRootVersion = lockJson.packages?.[""]?.version ?? null;
+// Cargo.lock：dsh-launcher 包版本
+const cargoLockVersion = readVersionIn(
+  "src-tauri/Cargo.lock",
+  /name = "dsh-launcher"\nversion = "([^"]+)"/,
+);
 
-// 一致性保护：四处版本必须一致（package.json 为权威），不一致则报错阻止
-const allVersions = [pkg.version, cargoVersion, tauriVersion, lockRootVersion];
+// 一致性保护：五处版本必须一致（package.json 为权威），不一致则报错阻止
+const allVersions = [pkg.version, cargoVersion, tauriVersion, lockRootVersion, cargoLockVersion];
 if (new Set(allVersions).size !== 1) {
   console.error(
-    `版本号不同步，请先手动对齐（package.json=${pkg.version}, Cargo.toml=${cargoVersion}, tauri.conf.json=${tauriVersion}, package-lock.json=${lockRootVersion}）`,
+    `版本号不同步，请先手动对齐（package.json=${pkg.version}, Cargo.toml=${cargoVersion}, tauri.conf.json=${tauriVersion}, package-lock.json=${lockRootVersion}, Cargo.lock=${cargoLockVersion}）`,
   );
   process.exit(1);
 }
@@ -77,5 +82,15 @@ if (lock.packages?.[""]) {
 }
 lock.version = nextVersion;
 writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\n");
+
+// Cargo.lock：dsh-launcher 包 version（跟随 Cargo.toml，保持构建一致性）
+const cargoLock = readFileSync("src-tauri/Cargo.lock", "utf8");
+writeFileSync(
+  "src-tauri/Cargo.lock",
+  cargoLock.replace(
+    /(name = "dsh-launcher"\nversion = ")[^"]+(")/,
+    `$1${nextVersion}$2`,
+  ),
+);
 
 console.log(`版本已递增: ${pkg.version} → ${nextVersion}`);

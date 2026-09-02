@@ -58,30 +58,32 @@ export default function ToolchainPanel() {
         <CardDescription>dsh 运行依赖</CardDescription>
       </div>
       <Separator className="my-3" />
-      <div className="space-y-3">
+      <div className="space-y-2">
         {items.map((item, i) => (
           <div key={item.name}>
-            {i > 0 && <Separator className="mb-3" />}
-            {/* 布局：允许换行，窄宽侧栏下不溢出（仅布局属性） */}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{item.name}</span>
-                  <Badge variant={STATE_META[item.state]?.variant ?? "outline"}>
-                    {STATE_META[item.state]?.label ?? item.state}
-                  </Badge>
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {item.installedVersion
-                    ? `已安装 ${item.installedVersion}`
-                    : "未安装"}
-                  <span className="ml-2">要求: {item.required}</span>
-                </div>
-              </div>
+            {i > 0 && <Separator className="mb-2" />}
+            {/* 单行布局：标题 + 版本描述 + 安装按钮 一行排布（允许换行的场景保留） */}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              {/* 标题与状态徽标 */}
+              <span className="flex items-center gap-1.5 font-medium">
+                <span className="truncate">{item.name}</span>
+                <Badge variant={STATE_META[item.state]?.variant ?? "outline"}>
+                  {STATE_META[item.state]?.label ?? item.state}
+                </Badge>
+              </span>
+              {/* 版本描述：已安装版本 + 要求，与标题同行 */}
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                {item.installedVersion
+                  ? `已安装 ${item.installedVersion}`
+                  : "未安装"}
+                <span className="ml-1.5">要求: {item.required}</span>
+              </span>
+              {/* 安装按钮（缺失/版本不符时显示，靠右） */}
               {item.state !== "present" && (
                 <Button
                   variant="secondary"
                   size="sm"
+                  className="shrink-0"
                   disabled={busyName === item.name}
                   onClick={() => handleInstall(item.name)}
                 >
