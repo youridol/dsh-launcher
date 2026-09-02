@@ -9,18 +9,64 @@ use crate::core::process::DshStatus;
 use crate::AppState;
 use tauri::{Manager, State};
 
-/// 为内嵌 Web GUI 窗口设置高清任务栏图标（512px PNG，修复任务栏图标模糊）
-/// 前端创建的 WebviewWindow 无法在创建时直接传 icon，需创建后调用此命令
+/// 为窗口设置高清任务栏图标（SMALL 小图标 + Windows ICON_BIG 大图标）
+/// 修复：Windows 任务栏按钮使用 ICON_BIG（32px 大图标），而 tauri `set_icon` 仅设置
+/// ICON_SMALL（16px 缩放）→ 任务栏图标模糊。这里补充从多尺寸 icon.ico 提取 32px 设 ICON_BIG。
+pub(crate) fn apply_window_icon(win: &tauri::WebviewWindow) -> Result<(), String> {
+    // 1. 小图标（标题栏/Alt-Tab 小尺寸）：tauri set_icon（512px PNG → Windows 缩放）
+    const WIN_ICON: &[u8] = include_bytes!("../../icons/icon.png");
+    let img = tauri::image::Image::from_bytes(WIN_ICON)
+        .map_err(|e| format!("图标解析失败: {e}"))?;
+    win.set_icon(img).map_err(|e| format!("设置图标失败: {e}"))?;
+
+    // 2. 大图标（任务栏按钮 ICON_BIG）：从多尺寸 icon.ico 内存创建 32px HICON 并发送
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateIconFromResourceEx, DestroyIcon, SendMessageW, ICON_BIG, LR_DEFAULTSIZE,
+            WM_SETICON,
+        };
+
+        let hwnd = win.hwnd().map_err(|e| format!("获取窗口句柄失败: {e}"))?;
+        const ICO_BYTES: &[u8] = include_bytes!("../../icons/icon.ico");
+        // SAFETY: icon.ico 编译期嵌入且为合法多尺寸 ICO；CreateIconFromResourceEx 返回独立 HICON
+        let hicon = unsafe {
+            CreateIconFromResourceEx(
+                ICO_BYTES,
+                true,
+                0x0003_0000, // 图标资源版本（支持 Vista+ PNG 压缩 ICO）
+                32,
+                32,
+                LR_DEFAULTSIZE,
+            )
+        };
+        if let Ok(hicon) = hicon {
+            // SAFETY: hwnd 为 tauri 提供的有效窗口句柄；SendMessageW 同步发送后系统持有图标
+            unsafe {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(ICON_BIG as usize)),
+                    Some(LPARAM(hicon.0 as isize)),
+                );
+            }
+            // 发送后系统已复制图标句柄，销毁本地引用防泄漏
+            unsafe { let _ = DestroyIcon(hicon); }
+        } else {
+            return Err(format!("创建任务栏图标失败: {:?}", hicon.err()));
+        }
+    }
+    Ok(())
+}
+
+/// 为内嵌 Web GUI 窗口设置高清任务栏图标（前端创建的窗口创建完成后调用）
 #[tauri::command]
 pub fn set_web_gui_icon(app: tauri::AppHandle, label: String) -> Result<(), String> {
     let Some(win) = app.get_webview_window(&label) else {
         return Err(format!("窗口 {label} 不存在"));
     };
-    // 编译期嵌入高清图标（与主窗口同源，DPI 缩放后仍清晰）
-    const WIN_ICON: &[u8] = include_bytes!("../../icons/icon.png");
-    let img = tauri::image::Image::from_bytes(WIN_ICON)
-        .map_err(|e| format!("图标解析失败: {e}"))?;
-    win.set_icon(img).map_err(|e| format!("设置图标失败: {e}"))
+    apply_window_icon(&win)
 }
 
 /// 查询当前运行状态（快，直接返回）

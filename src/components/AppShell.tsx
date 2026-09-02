@@ -57,13 +57,13 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
   // 当前宽度值（ref 供拖拽/响应式计算实时读取；拖拽结束持久化）
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
   const rightPanelWidthRef = useRef(
-    typeof window === "undefined" ? 560 : getDefaultRightPanelWidth(window.innerWidth),
+    typeof window === "undefined" ? 340 : getDefaultRightPanelWidth(window.innerWidth),
   );
 
   // 右侧 Panel 响应式默认宽度（视口 42%，360~640）
   const getResponsiveRightPanelWidth = useCallback(
     () =>
-      typeof window === "undefined" ? 560 : getDefaultRightPanelWidth(window.innerWidth),
+      typeof window === "undefined" ? 340 : getDefaultRightPanelWidth(window.innerWidth),
     [],
   );
 
@@ -101,7 +101,7 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
     growthDirection: "right",
     maxWidth: SIDEBAR_MAX_WIDTH,
     minWidth: SIDEBAR_MIN_WIDTH,
-    storageKey: "dsh-launcher-sidebar-width",
+    storageKey: "dsh-launcher-sidebar-width-v2",
     widthRef: sidebarWidthRef,
   });
 
@@ -110,13 +110,13 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
     cssVariable: "--right-panel-width",
     // 首帧即用响应式宽度（与 ref 一致），避免挂载后从 fallback 宽度动画到默认值
     defaultWidth:
-      typeof window === "undefined" ? 560 : getDefaultRightPanelWidth(window.innerWidth),
+      typeof window === "undefined" ? 340 : getDefaultRightPanelWidth(window.innerWidth),
     getDefaultWidth: getResponsiveRightPanelWidth,
     getMaxWidth: getResponsiveRightPanelMaxWidth,
     growthDirection: "left",
     maxWidth: RIGHT_PANEL_MAX_WIDTH,
     minWidth: RIGHT_PANEL_MIN_WIDTH,
-    storageKey: "dsh-launcher-right-panel-width",
+    storageKey: "dsh-launcher-right-panel-width-v2",
     widthRef: rightPanelWidthRef,
   });
 
@@ -225,22 +225,14 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
             <span className="text-xs text-muted-foreground">{version}</span>
             {/* 自绘窗口控制按钮（无边框窗口必需） */}
             <WindowControls />
-            {/* 日志收起/展开按钮：主窗口标题栏最右（关闭按钮右边） */}
+            {/* 日志收起/展开按钮：主窗口标题栏最右（仅图标，无文字） */}
             <Button
               variant="outline"
-              size="sm"
+              size="icon-sm"
               onClick={() => setRightOpen(!rightOpen)}
               title={rightOpen ? "收起日志" : "展开日志"}
             >
-              {rightOpen ? (
-                <>
-                  <X className="size-3.5" /> 收起
-                </>
-              ) : (
-                <>
-                  <PanelRightOpen className="size-3.5" /> 日志
-                </>
-              )}
+              {rightOpen ? <X className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
             </Button>
           </div>
         </header>

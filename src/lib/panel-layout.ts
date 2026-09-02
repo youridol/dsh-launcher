@@ -7,13 +7,14 @@ export const MOBILE_MAX_WIDTH = 640;
 /** 紧凑桌面断点（<960px：仅 Sidebar | Main 两栏，Right Panel 不参与 split） */
 export const SPLIT_PANEL_MIN_WIDTH = 960;
 
-/** 左侧 Sidebar：默认 / 最小 / 最大宽度 */
-export const SIDEBAR_DEFAULT_WIDTH = 260;
-export const SIDEBAR_MIN_WIDTH = 180;
+/** 左侧 Sidebar：默认 / 最小 / 最大宽度（默认 340px，用户拖拽可在 200~480 调整） */
+export const SIDEBAR_DEFAULT_WIDTH = 340;
+export const SIDEBAR_MIN_WIDTH = 200;
 export const SIDEBAR_MAX_WIDTH = 480;
 
-/** 右侧 Panel：最小 / 最大宽度 */
-export const RIGHT_PANEL_MIN_WIDTH = 300;
+/** 右侧 Panel：默认固定 340px / 最小 / 最大宽度 */
+export const RIGHT_PANEL_DEFAULT_WIDTH = 340;
+export const RIGHT_PANEL_MIN_WIDTH = 280;
 export const RIGHT_PANEL_MAX_WIDTH = 1200;
 
 /** 主内容区允许的最小宽度（桌面 420 / 紧凑 320），防止面板挤压溢出 */
@@ -27,9 +28,9 @@ export function clampPanelWidth(width: number, minWidth: number, maxWidth: numbe
   return Math.round(Math.max(minWidth, Math.min(effectiveMax, finiteWidth)));
 }
 
-/** 右侧 Panel 默认宽度：响应式（视口 42%，360~640 之间） */
-export function getDefaultRightPanelWidth(viewportWidth: number): number {
-  return clampPanelWidth(viewportWidth * 0.42, 360, 640);
+/** 右侧 Panel 默认宽度：固定 340px（不再按视口响应式） */
+export function getDefaultRightPanelWidth(_viewportWidth: number): number {
+  return RIGHT_PANEL_DEFAULT_WIDTH;
 }
 
 /** 左侧 Sidebar 的最大可用宽度：视口减去主内容最小宽度与展开的右栏宽度 */

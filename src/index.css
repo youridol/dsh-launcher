@@ -188,7 +188,7 @@ body {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--sidebar-width, 260px);
+  left: var(--sidebar-width, 340px);
   width: 1px;
   background: var(--border);
   pointer-events: none;
@@ -210,7 +210,7 @@ body {
   background: var(--background);
 }
 .sidebar-container.sidebar-open {
-  width: var(--sidebar-width, 260px);
+  width: var(--sidebar-width, 340px);
 }
 .sidebar-container.sidebar-closed {
   width: 0;
@@ -225,8 +225,8 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  width: var(--sidebar-width, 260px);
-  min-width: var(--sidebar-width, 260px);
+  width: var(--sidebar-width, 340px);
+  min-width: var(--sidebar-width, 340px);
 }
 /* 侧栏头部：贯穿到窗口顶（标题栏高度对齐），与右侧日志面板头部对称 */
 .sidebar-header {
@@ -258,7 +258,7 @@ body {
   flex-shrink: 0;
   height: 40px;
   padding: 0 0.75rem 0 0.25rem;
-  margin-left: var(--sidebar-width, 260px);
+  margin-left: var(--sidebar-width, 340px);
   user-select: none;
 }
 /* 侧栏收起时标题栏回到最左 */
@@ -272,7 +272,7 @@ body {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  margin-left: var(--sidebar-width, 260px);
+  margin-left: var(--sidebar-width, 340px);
 }
 .app-left[data-sidebar-open="false"] .app-content {
   margin-left: 0;
@@ -282,7 +282,7 @@ body {
   position: absolute !important;
   top: 0;
   bottom: 0;
-  left: calc(var(--sidebar-width, 260px) - 4px);
+  left: calc(var(--sidebar-width, 340px) - 4px);
   margin: 0;
 }
 .app-left[data-sidebar-open="false"] .sidebar-resize-handle {
@@ -338,8 +338,8 @@ body {
     transition: width 0.2s ease, min-width 0.2s ease;
   }
   .right-panel-container.right-panel-open {
-    width: var(--right-panel-width, clamp(360px, 42vw, 640px));
-    min-width: var(--right-panel-width, clamp(360px, 42vw, 640px));
+    width: var(--right-panel-width, 340px);
+    min-width: var(--right-panel-width, 340px);
   }
   .right-panel-container.right-panel-closed {
     width: 0;
@@ -347,8 +347,8 @@ body {
     border-left: none;
   }
   .right-panel-container > * {
-    width: var(--right-panel-width, clamp(360px, 42vw, 640px));
-    min-width: var(--right-panel-width, clamp(360px, 42vw, 640px));
+    width: var(--right-panel-width, 340px);
+    min-width: var(--right-panel-width, 340px);
   }
   .right-panel-container.right-panel-resizing,
   .right-panel-container.right-panel-resizing > * {
@@ -380,7 +380,7 @@ body {
     right: 0;
     bottom: 0;
     z-index: 250;
-    width: min(560px, calc(100vw - 48px));
+    width: min(340px, calc(100vw - 48px));
     min-width: 300px;
     overflow: hidden;
     transition: transform 0.2s ease;
