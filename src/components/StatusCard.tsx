@@ -16,6 +16,7 @@ import {
   getWebUrl,
   restartDsh,
   setPort as savePort,
+  setWebGuiIcon,
   startDsh,
   stopDsh,
   uninstallDsh,
@@ -175,6 +176,13 @@ export default function StatusCard() {
       win.once("tauri://error", (e) => {
         console.error("内嵌窗口创建失败", e);
         toast.error(`打开内嵌 Web GUI 失败: ${e.payload}`);
+      });
+      // 窗口创建成功后设置高清任务栏图标（修复模糊：子窗口默认图标为低分辨率缩放）
+      // 需等 tauri://created（创建完成窗口才可被 Rust 端查到）
+      win.once("tauri://created", () => {
+        setWebGuiIcon(label).catch((e) => {
+          console.error("设置内嵌窗口图标失败", e);
+        });
       });
     } catch (e) {
       console.error("打开内嵌 Web GUI 失败", e);

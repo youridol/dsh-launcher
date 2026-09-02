@@ -32,10 +32,18 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
             .map(|d| d.as_millis())
             .unwrap_or(0)
     );
-    let _ = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(parsed))
+    // 高清任务栏图标（512px PNG，与主窗口一致，修复模糊）
+    // from_bytes 返回 Result；解析失败时回退到空图像（窗口仍创建，用系统默认图标）
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+        .unwrap_or_else(|_| tauri::image::Image::new_owned(Vec::new(), 0, 0));
+    // new/title/inner_size 返回 Builder；icon 返回 Result<Builder>；build 返回 Result<Window>
+    // 链式处理：icon 或 build 失败则窗口未创建（静默，与原 let _ = ...build() 行为一致）
+    let builder = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(parsed))
         .title("deepseek-harness Web UI")
-        .inner_size(1600.0, 900.0)
-        .build();
+        .inner_size(1600.0, 900.0);
+    let _ = builder
+        .icon(icon)
+        .and_then(|b| b.build());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -100,6 +108,7 @@ pub fn run() {
             commands::dsh::get_status,
             commands::dsh::get_web_url,
             commands::dsh::create_desktop_shortcut,
+            commands::dsh::set_web_gui_icon,
             commands::dsh::start_dsh,
             commands::dsh::stop_dsh,
             commands::dsh::restart_dsh,

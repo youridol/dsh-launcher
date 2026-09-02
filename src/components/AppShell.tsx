@@ -18,7 +18,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import StatusCard from "@/components/StatusCard";
-import ToolchainPanel from "@/components/ToolchainPanel";
 import VersionPanel from "@/components/VersionPanel";
 import LogPanel from "@/components/LogPanel";
 import WindowControls from "@/components/WindowControls";
@@ -157,30 +156,80 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
       />
 
       {/* 左侧列：主窗口标题栏 + 内容行
-          ref 用于设置 --sidebar-width（titlebar 描边贯穿需读取），data-sidebar-open 控制收起态描边 */}
+          ref 用于实时写入 --sidebar-width（驱动侧栏宽度/竖线/标题栏让位），
+          data-sidebar-open 控制收起态 */}
       <div className="app-left" ref={sidebarResizer.panelRef} data-sidebar-open={sidebarOpen}>
-        {/* 主窗口标题栏（无边框自绘）：与左侧栏/日志面板同背景融合贯穿；拖拽移动窗口 */}
+        {/* 左侧 Sidebar：absolute 覆盖全高（贯穿到窗口顶，与右侧日志面板视觉对称）
+            宽度 = var(--sidebar-width)，随拖拽实时（变量继承自 .app-left inline） */}
+        <aside
+          className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
+          aria-label="左侧栏"
+        >
+          <div className="sidebar-content">
+            {/* 侧栏头部（贯穿到窗口顶，与右侧日志面板头部对称）：折叠按钮 + 标题 */}
+            <header className="sidebar-header">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                title={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+              >
+                {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+              </Button>
+              <div className="min-w-0">
+                <h1 className="truncate text-sm font-semibold leading-tight">dsh-launcher</h1>
+                <p className="truncate text-[11px] text-muted-foreground leading-tight">
+                  deepseek-harness 启动器
+                </p>
+              </div>
+            </header>
+            <div className="sidebar-body">
+              <StatusCard />
+              {/* 底部：设置入口（分割线分隔，独立区域） */}
+              <div className="mt-auto flex flex-col pt-4">
+                <Separator className="mb-3" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onOpenSettings}
+                  title="打开设置"
+                  className="w-full"
+                >
+                  <SettingsIcon className="size-3.5" /> 设置
+                </Button>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        {/* 侧栏拖拽 handle：贯穿全高（从窗口顶到底，与右侧 handle 对称），
+            absolute 于 sidebar 右缘；紧凑/移动档 CSS 隐藏 */}
+        {sidebarOpen && (
+          <div
+            {...sidebarResizer.separatorProps}
+            className={`panel-resize-handle sidebar-resize-handle${sidebarResizer.isResizing ? " is-resizing" : ""}`}
+          />
+        )}
+
+        {/* 主窗口标题栏（无边框自绘）：位于侧栏右侧；收起时左侧显示展开按钮（否则无法重新展开），
+            右侧保留版本号 + 窗口控制 + 日志按钮；空白区域拖拽移动窗口 */}
         <header
           className="titlebar"
           data-tauri-drag-region
           onDoubleClick={handleTitlebarDoubleClick}
         >
-          <div className="flex min-w-0 items-center gap-2">
+          {/* 侧栏收起时的展开按钮（sidebar-open 时侧栏头部已有收起按钮） */}
+          {!sidebarOpen && (
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              title={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+              onClick={() => setSidebarOpen(true)}
+              title="展开左侧栏"
+              className="shrink-0"
             >
-              {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+              <PanelLeftOpen />
             </Button>
-            <div className="min-w-0">
-              <h1 className="truncate text-lg font-semibold">dsh-launcher</h1>
-              <p className="truncate text-xs text-muted-foreground">
-                deepseek-harness 启动器
-              </p>
-            </div>
-          </div>
+          )}
           <div className="flex shrink-0 items-center gap-1.5">
             <span className="text-xs text-muted-foreground">{version}</span>
             {/* 自绘窗口控制按钮（无边框窗口必需） */}
@@ -205,43 +254,8 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
           </div>
         </header>
 
-        {/* 内容行：左侧栏 | 拖拽把手 | 主区 */}
+        {/* 内容行：主区（版本管理），自动占满剩余空间 */}
         <div className="app-content">
-          {/* 左侧 Sidebar：dsh 运行状态 + 工具链（与标题栏融合贯穿） */}
-          <aside
-            className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
-            style={{ "--sidebar-width": `${sidebarResizer.width}px` } as CSSProperties}
-            aria-label="左侧栏"
-          >
-            <div className="sidebar-content">
-              <StatusCard />
-              <Separator className="my-4" />
-              <ToolchainPanel />
-              {/* 底部：设置入口（分割线分隔，独立区域） */}
-              <div className="mt-auto flex flex-col pt-4">
-                <Separator className="mb-3" />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={onOpenSettings}
-                  title="打开设置"
-                  className="w-full"
-                >
-                  <SettingsIcon className="size-3.5" /> 设置
-                </Button>
-              </div>
-            </div>
-          </aside>
-
-          {/* 侧栏拖拽 handle（仅桌面三栏；紧凑/移动档 CSS 隐藏） */}
-          {sidebarOpen && (
-            <div
-              {...sidebarResizer.separatorProps}
-              className={`panel-resize-handle sidebar-resize-handle${sidebarResizer.isResizing ? " is-resizing" : ""}`}
-            />
-          )}
-
-          {/* 主区：版本管理（自动占满剩余空间） */}
           <main className="app-main">
             <VersionPanel />
           </main>

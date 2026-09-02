@@ -162,37 +162,6 @@ body {
   border-left: 1px solid var(--border);
 }
 
-/* ---- 左侧 Sidebar（桌面档：参与 split 布局，宽度动画） ---- */
-@media (min-width: 641px) {
-  .sidebar-overlay-backdrop {
-    display: none;
-  }
-  .sidebar-container {
-    position: relative;
-    flex-shrink: 0;
-    overflow: hidden;
-    transition: width 0.2s ease, min-width 0.2s ease;
-  }
-  .sidebar-container.sidebar-open {
-    width: var(--sidebar-width, 260px);
-    min-width: var(--sidebar-width, 260px);
-  }
-  .sidebar-container.sidebar-closed {
-    width: 0;
-    min-width: 0;
-    border-right: none;
-  }
-  /* 内容固定宽度：收起动画期间不重排，展开即恢复 */
-  .sidebar-container > * {
-    width: var(--sidebar-width, 260px);
-    min-width: var(--sidebar-width, 260px);
-  }
-  .sidebar-container.sidebar-resizing,
-  .sidebar-container.sidebar-resizing > * {
-    transition: none;
-  }
-}
-
 /* 左侧内容：独立滚动（布局需要） */
 .sidebar-content {
   display: flex;
@@ -204,13 +173,13 @@ body {
 
 /* ---- 左侧列：主窗口标题栏 + 内容行（标题栏与侧边栏同背景融合贯穿） ---- */
 .app-left {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
   min-width: 0;
   min-height: 0;
   height: 100%;
-  position: relative;
 }
 /* 左侧边栏描边：贯穿整列的单条竖线（从窗口顶到底，跨越标题栏+内容区），
    位置 = 侧栏右缘（--sidebar-width），与右侧日志描边（贯穿窗口顶）视觉对齐 */
@@ -228,16 +197,59 @@ body {
 .app-left[data-sidebar-open="false"]::after {
   display: none;
 }
-/* 移动端 drawer 不参与文档流：列竖线隐藏，drawer 自身保留描边 */
-@media (max-width: 640px) {
-  .app-left::after {
-    display: none;
-  }
-  .sidebar-container {
-    border-right: 1px solid var(--border);
-  }
+
+/* 左侧 Sidebar：absolute 覆盖 .app-left 全高（贯穿到窗口顶，与右侧日志面板对称）
+   宽度 = var(--sidebar-width)（由 .app-left inline 实时更新 → 拖拽随拉随动） */
+.sidebar-container {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 210;
+  overflow: hidden;
+  background: var(--background);
 }
-/* 主窗口标题栏（无边框自绘）：拖拽移动窗口；与内容同背景、无分隔线（融合） */
+.sidebar-container.sidebar-open {
+  width: var(--sidebar-width, 260px);
+}
+.sidebar-container.sidebar-closed {
+  width: 0;
+}
+/* 拖拽中：禁用 transition（随拉随动，无延迟） */
+.sidebar-container.sidebar-resizing {
+  transition: none;
+}
+
+/* 侧栏内容：头部固定 + 主体滚动 */
+.sidebar-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: var(--sidebar-width, 260px);
+  min-width: var(--sidebar-width, 260px);
+}
+/* 侧栏头部：贯穿到窗口顶（标题栏高度对齐），与右侧日志面板头部对称 */
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 0.75rem 0 0.5rem;
+  user-select: none;
+}
+/* 侧栏主体：状态卡 + 底部设置，独立滚动 */
+.sidebar-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 1rem 1rem;
+}
+/* 主窗口标题栏（无边框自绘）：位于侧栏右侧；左侧让位 --sidebar-width（sidebar absolute 不占位），
+   收起时左侧显示展开按钮（space-between 分布）；右侧保留版本号 + 窗口控制 + 日志按钮；
+   空白区域拖拽移动窗口 */
 .titlebar {
   display: flex;
   align-items: center;
@@ -245,16 +257,36 @@ body {
   gap: 0.75rem;
   flex-shrink: 0;
   height: 40px;
-  padding: 0 0.75rem 0 1rem;
+  padding: 0 0.75rem 0 0.25rem;
+  margin-left: var(--sidebar-width, 260px);
   user-select: none;
 }
-/* 内容行：左侧栏 | 拖拽把手 | 主区 */
+/* 侧栏收起时标题栏回到最左 */
+.app-left[data-sidebar-open="false"] .titlebar {
+  margin-left: 0;
+}
+/* 内容行：主区（版本管理），位于侧栏右侧（margin 让位） */
 .app-content {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
   min-height: 0;
+  margin-left: var(--sidebar-width, 260px);
+}
+.app-left[data-sidebar-open="false"] .app-content {
+  margin-left: 0;
+}
+/* 侧栏拖拽 handle：absolute 贯穿全高（从窗口顶到底），位于 sidebar 右缘，与右侧 handle 对称 */
+.sidebar-resize-handle {
+  position: absolute !important;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-width, 260px) - 4px);
+  margin: 0;
+}
+.app-left[data-sidebar-open="false"] .sidebar-resize-handle {
+  display: none;
 }
 /* 中央 Main：自动占满剩余空间 */
 .app-main {

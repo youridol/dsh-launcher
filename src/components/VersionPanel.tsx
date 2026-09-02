@@ -28,6 +28,7 @@ import {
 } from "@/lib/install";
 import { toast } from "sonner";
 import { Package, RefreshCw } from "lucide-react";
+import ToolchainPanel from "@/components/ToolchainPanel";
 
 export default function VersionPanel() {
   const [npmVersions, setNpmVersions] = useState<DshVersion[]>([]);
@@ -302,6 +303,11 @@ export default function VersionPanel() {
             )}
           </div>
         </div>
+        </div>
+        {/* 分割线 + 工具链（从左侧边栏移入：位于 npm/GitHub 列表底部） */}
+        <Separator className="my-1" />
+        <div className="shrink-0">
+          <ToolchainPanel />
         </div>
       </CardContent>
     </Card>

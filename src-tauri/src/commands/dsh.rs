@@ -7,7 +7,21 @@
 
 use crate::core::process::DshStatus;
 use crate::AppState;
-use tauri::State;
+use tauri::{Manager, State};
+
+/// 为内嵌 Web GUI 窗口设置高清任务栏图标（512px PNG，修复任务栏图标模糊）
+/// 前端创建的 WebviewWindow 无法在创建时直接传 icon，需创建后调用此命令
+#[tauri::command]
+pub fn set_web_gui_icon(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    let Some(win) = app.get_webview_window(&label) else {
+        return Err(format!("窗口 {label} 不存在"));
+    };
+    // 编译期嵌入高清图标（与主窗口同源，DPI 缩放后仍清晰）
+    const WIN_ICON: &[u8] = include_bytes!("../../icons/icon.png");
+    let img = tauri::image::Image::from_bytes(WIN_ICON)
+        .map_err(|e| format!("图标解析失败: {e}"))?;
+    win.set_icon(img).map_err(|e| format!("设置图标失败: {e}"))
+}
 
 /// 查询当前运行状态（快，直接返回）
 #[tauri::command]

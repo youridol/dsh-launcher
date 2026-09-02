@@ -30,6 +30,11 @@ export function getWebUrl(): Promise<string> {
   return invoke("get_web_url");
 }
 
+/** 为内嵌 Web GUI 窗口设置高清任务栏图标（修复图标模糊） */
+export function setWebGuiIcon(label: string): Promise<void> {
+  return invoke("set_web_gui_icon", { label });
+}
+
 /** 创建桌面快捷方式（双击用默认浏览器打开 dsh web） */
 export function createDesktopShortcut(): Promise<string> {
   return invoke("create_desktop_shortcut");
