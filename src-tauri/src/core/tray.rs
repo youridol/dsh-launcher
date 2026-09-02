@@ -49,7 +49,8 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
     let mut tray_builder = TrayIconBuilder::with_id("dsh-launcher-tray")
         .tooltip("dsh-launcher")
         .menu(&menu)
-        .show_menu_on_left_click(true);
+        // 左键单击不弹菜单（改为唤起主窗口，见 on_tray_icon_event）；菜单右键弹出
+        .show_menu_on_left_click(false);
     // 托盘图标：编译期嵌入 32x32 PNG（Windows 托盘标准尺寸），避免运行时路径丢失
     {
         const TRAY_ICON: &[u8] = include_bytes!("../../icons/32x32.png");
@@ -59,6 +60,30 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
     }
 
     let _tray = tray_builder
+        // 左键单击/双击托盘图标 → 唤起主窗口（恢复显示/还原/聚焦）
+        .on_tray_icon_event(|tray, event| {
+            let is_left_click = matches!(
+                event,
+                tauri::tray::TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    button_state: tauri::tray::MouseButtonState::Up,
+                    ..
+                }
+            ) || matches!(
+                event,
+                tauri::tray::TrayIconEvent::DoubleClick {
+                    button: tauri::tray::MouseButton::Left,
+                    ..
+                }
+            );
+            if is_left_click {
+                if let Some(win) = tray.app_handle().get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+        })
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             match id {

@@ -166,16 +166,8 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
           aria-label="左侧栏"
         >
           <div className="sidebar-content">
-            {/* 侧栏头部（贯穿到窗口顶，与右侧日志面板头部对称）：折叠按钮 + 标题 */}
+            {/* 侧栏头部（贯穿到窗口顶，与右侧日志面板头部对称）：标题（收起按钮已移至主内容左上方） */}
             <header className="sidebar-header">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                title={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
-              >
-                {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
-              </Button>
               <div className="min-w-0">
                 <h1 className="truncate text-sm font-semibold leading-tight">dsh-launcher</h1>
                 <p className="truncate text-[11px] text-muted-foreground leading-tight">
@@ -211,25 +203,24 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
           />
         )}
 
-        {/* 主窗口标题栏（无边框自绘）：位于侧栏右侧；收起时左侧显示展开按钮（否则无法重新展开），
-            右侧保留版本号 + 窗口控制 + 日志按钮；空白区域拖拽移动窗口 */}
+        {/* 主窗口标题栏（无边框自绘）：位于侧栏右侧；左侧放侧栏收起/展开按钮（主内容左上方），
+            右侧整组（版本号 + 窗口控制 + 日志收起）贴近日志侧边栏；空白区域拖拽移动窗口 */}
         <header
           className="titlebar"
           data-tauri-drag-region
           onDoubleClick={handleTitlebarDoubleClick}
         >
-          {/* 侧栏收起时的展开按钮（sidebar-open 时侧栏头部已有收起按钮） */}
-          {!sidebarOpen && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => setSidebarOpen(true)}
-              title="展开左侧栏"
-              className="shrink-0"
-            >
-              <PanelLeftOpen />
-            </Button>
-          )}
+          {/* 侧栏收起/展开按钮：主内容左上方（侧栏展开显示收起，收起显示展开） */}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            title={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+            className="shrink-0"
+          >
+            {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+          </Button>
+          {/* 右侧控件组：版本号 + 最小化/最大化/关闭 + 日志收起（贴右缘，靠近右侧日志边栏） */}
           <div className="flex shrink-0 items-center gap-1.5">
             <span className="text-xs text-muted-foreground">{version}</span>
             {/* 自绘窗口控制按钮（无边框窗口必需） */}
