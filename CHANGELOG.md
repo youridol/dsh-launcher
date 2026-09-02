@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.25] - 2026-09-02
+
+### 变更
+
+- feat: 托盘单击唤起主窗口 + 标题栏控件布局重排 + 仓库 topics
+- 托盘：左键单击/双击托盘图标唤起主窗口（show/unminimize/set_focus），菜单改右键弹出（show_menu_on_left_click(false) + on_tray_icon_event）
+- 标题栏：修复 space-between 单子元素导致控件组贴左的 bug——窗口控制组（版本号+最小化/最大化/关闭+日志收起）改为贴右靠近日志侧边栏
+- 侧栏收起按钮移至主内容左上方（titlebar 左端，sidebar 右缘处）；sidebar-header 仅保留标题
+- 仓库 topics 补充：deepseek-harness/dsh/dsh-plugin/ai-agents/electron/typescript/desktop-app
+
 ## [0.3.24] - 2026-09-02
 
 ### 变更
