@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.29] - 2026-09-02
+
+### 变更
+
+- feat: 日志清屏按钮替代刷新 + 滚动条恢复 + 侧栏默认对齐 340 + emoji 过滤
+- 1. 日志工具栏：移除'刷新文件列表'按钮（RefreshCw），新增'清屏'按钮（Eraser）——
+- 清空实时流缓冲与文件视图内容；文件列表仍由 30s 定时器自动刷新
+- 2. 日志滚动条丢失修复：显式设置 WebView2 scrollBarStyle=default（传统滚动条，
+- 非 Fluent overlay，避免 Windows11 overlay 滚动条自动隐藏）；tauri.conf.json
+- 主窗口 + 前端内嵌窗口 + CSS 全局 ::-webkit-scrollbar 定制滚动条均生效
+- 3. 侧边栏默认宽度对齐右侧：storageKey 升 v3 作废旧拖拽值，左右默认均 340px
+- 4. emoji 乱码修复：显示/导出前 strip emoji（U+1F000-U+1FAFF 等区段 +
+- 变体选择符 + ZWJ 序列），剔除 dsh 终端彩色 emoji 避免跨编码乱码
+
 ## [0.3.28] - 2026-09-02
 
 ### 变更
