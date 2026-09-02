@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.27] - 2026-09-02
+
+### 变更
+
+- fix: 内嵌窗口任务栏图标取最大帧高清 + 侧栏标题移主内容区 + 日志滚动条贴右不越界
+- 1. 任务栏图标模糊（二次修复）：根因是 CreateIconFromResourceEx 传多帧 ICO 时
+- 可能选中首帧(16px)放大；改为手动解析 ICONDIR 选最大 256px 帧构造单帧 ICO
+- （ICONDIR+entry+PNG），Windows 高质量缩放任意任务栏尺寸
+- 2. 左侧栏标题 'dsh-launcher' 移至主内容区 titlebar（收起按钮与右侧控件之间 flex-1），
+- 移除侧栏标题与 'dsh-launcher 启动器' 描述；侧栏内容 40px 顶部占位与右侧日志头部对齐
+- 3. 日志面板：内容容器右 padding 移除（pl-4）使滚动条贴右缘；ScrollArea min-w-0 +
+- viewport overflow-x hidden 修复 flex 子项撑破导致的 1px 横向溢出；
+- pre 加 word-break/overflow-wrap + 右留滚动条位，长文本换行不越过滚动条
+
 ## [0.3.26] - 2026-09-02
 
 ### 变更
