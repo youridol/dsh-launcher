@@ -166,15 +166,7 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
           aria-label="左侧栏"
         >
           <div className="sidebar-content">
-            {/* 侧栏头部（贯穿到窗口顶，与右侧日志面板头部对称）：标题（收起按钮已移至主内容左上方） */}
-            <header className="sidebar-header">
-              <div className="min-w-0">
-                <h1 className="truncate text-sm font-semibold leading-tight">dsh-launcher</h1>
-                <p className="truncate text-[11px] text-muted-foreground leading-tight">
-                  deepseek-harness 启动器
-                </p>
-              </div>
-            </header>
+            {/* 标题已移至主内容区（titlebar），侧栏不再含标题/描述 */}
             <div className="sidebar-body">
               <StatusCard />
               {/* 底部：设置入口（分割线分隔，独立区域） */}
@@ -220,6 +212,10 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
           >
             {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
           </Button>
+          {/* 主内容区标题（原左侧边栏标题移入）：占据中间区域 */}
+          <div className="min-w-0 flex-1 select-none px-2">
+            <h1 className="truncate text-sm font-semibold leading-tight">dsh-launcher</h1>
+          </div>
           {/* 右侧控件组：版本号 + 最小化/最大化/关闭 + 日志收起（贴右缘，靠近右侧日志边栏） */}
           <div className="flex shrink-0 items-center gap-1.5">
             <span className="text-xs text-muted-foreground">{version}</span>

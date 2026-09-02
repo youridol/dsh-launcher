@@ -208,8 +208,8 @@ export default function LogPanel({
         </div>
       </div>
 
-      {/* 内容区（一体化侧边栏：无背景色、无描边） */}
-      <div className="flex min-h-0 flex-1 gap-4 px-4 pt-1 pb-4">
+      {/* 内容区（一体化侧边栏：无背景色、无描边；右侧不留 padding，滚动条紧贴右缘） */}
+      <div className="flex min-h-0 flex-1 gap-3 pl-4 pt-1 pb-2">
         {/* 日志文件列表（非实时流时显示） */}
         {!liveMode && (
           <div className="w-36 shrink-0 space-y-1">
@@ -232,7 +232,7 @@ export default function LogPanel({
         {/* 日志输出容器：无背景色无描边（整体侧边栏） */}
         <ScrollArea
           viewportRef={scrollRef}
-          className="min-h-0 flex-1 overflow-hidden font-mono text-xs"
+          className="min-h-0 min-w-0 flex-1 overflow-hidden font-mono text-xs"
         >
           <pre className="whitespace-pre-wrap break-words">
             {liveMode

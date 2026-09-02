@@ -10,8 +10,9 @@ use crate::AppState;
 use tauri::{Manager, State};
 
 /// 为窗口设置高清任务栏图标（SMALL 小图标 + Windows ICON_BIG 大图标）
-/// 修复：Windows 任务栏按钮使用 ICON_BIG（32px 大图标），而 tauri `set_icon` 仅设置
-/// ICON_SMALL（16px 缩放）→ 任务栏图标模糊。这里补充从多尺寸 icon.ico 提取 32px 设 ICON_BIG。
+/// 修复：Windows 任务栏按钮使用 ICON_BIG，而 tauri `set_icon` 仅设置 ICON_SMALL（16px 缩放）
+/// → 任务栏图标模糊。这里手动解析 icon.ico 选取最大尺寸帧（256px PNG），构造单帧 ICO
+/// 设 ICON_BIG（Windows 高质量缩放任意任务栏尺寸，杜绝 16/32px 放大模糊）。
 pub(crate) fn apply_window_icon(win: &tauri::WebviewWindow) -> Result<(), String> {
     // 1. 小图标（标题栏/Alt-Tab 小尺寸）：tauri set_icon（512px PNG → Windows 缩放）
     const WIN_ICON: &[u8] = include_bytes!("../../icons/icon.png");
@@ -19,7 +20,7 @@ pub(crate) fn apply_window_icon(win: &tauri::WebviewWindow) -> Result<(), String
         .map_err(|e| format!("图标解析失败: {e}"))?;
     win.set_icon(img).map_err(|e| format!("设置图标失败: {e}"))?;
 
-    // 2. 大图标（任务栏按钮 ICON_BIG）：从多尺寸 icon.ico 内存创建 32px HICON 并发送
+    // 2. 大图标（任务栏按钮 ICON_BIG）：取 icon.ico 最大帧构造单帧 ICO 发送
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -29,15 +30,16 @@ pub(crate) fn apply_window_icon(win: &tauri::WebviewWindow) -> Result<(), String
         };
 
         let hwnd = win.hwnd().map_err(|e| format!("获取窗口句柄失败: {e}"))?;
-        const ICO_BYTES: &[u8] = include_bytes!("../../icons/icon.ico");
-        // SAFETY: icon.ico 编译期嵌入且为合法多尺寸 ICO；CreateIconFromResourceEx 返回独立 HICON
+        let single_ico = extract_largest_ico_frame()?;
+        // SAFETY: single_ico 为合法单帧 ICO（ICONDIR+entry+PNG 数据），编译期嵌入解析；
+        // CreateIconFromResourceEx 返回独立 HICON 句柄
         let hicon = unsafe {
             CreateIconFromResourceEx(
-                ICO_BYTES,
+                &single_ico,
                 true,
                 0x0003_0000, // 图标资源版本（支持 Vista+ PNG 压缩 ICO）
-                32,
-                32,
+                0,           // 0 + LR_DEFAULTSIZE = 系统默认尺寸
+                0,
                 LR_DEFAULTSIZE,
             )
         };
@@ -58,6 +60,62 @@ pub(crate) fn apply_window_icon(win: &tauri::WebviewWindow) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// 从嵌入的 icon.ico 提取最大尺寸帧，构造单帧 ICO（ICONDIR + 1 entry + 图像数据）
+/// 目的：CreateIconFromResourceEx 对多帧 ICO 可能默认选中首帧（16px），
+/// 放大后任务栏模糊；选最大帧（256px）由 Windows 高质量缩放。
+#[cfg(windows)]
+fn extract_largest_ico_frame() -> Result<Vec<u8>, String> {
+    const ICO_BYTES: &[u8] = include_bytes!("../../icons/icon.ico");
+    // ICONDIR: reserved(2) + type(2) + count(2)
+    let count = u16::from_le_bytes([ICO_BYTES[4], ICO_BYTES[5]]) as usize;
+    if ICO_BYTES.len() < 6 + count * 16 {
+        return Err("icon.ico 结构不完整".to_string());
+    }
+    // 选最大帧：优先尺寸最大（w=0 表示 256）
+    let mut best: Option<(usize, u32, u32, u32)> = None; // (entry_index, dim, data_off, data_len)
+    for i in 0..count {
+        let e = 6 + i * 16;
+        let w = ICO_BYTES[e] as u16;
+        let h = ICO_BYTES[e + 1] as u16;
+        let size = u32::from_le_bytes([
+            ICO_BYTES[e + 8],
+            ICO_BYTES[e + 9],
+            ICO_BYTES[e + 10],
+            ICO_BYTES[e + 11],
+        ]);
+        let off = u32::from_le_bytes([
+            ICO_BYTES[e + 12],
+            ICO_BYTES[e + 13],
+            ICO_BYTES[e + 14],
+            ICO_BYTES[e + 15],
+        ]);
+        if (off + size) as usize > ICO_BYTES.len() {
+            continue;
+        }
+        // 尺寸比较：w==0 → 256；忽略 h 非 0 且与 w 不一致的异常帧
+        if h != 0 && h as u32 != if w == 0 { 256 } else { w as u32 } {
+            continue;
+        }
+        let dim = if w == 0 { 256u32 } else { w as u32 };
+        let replace = match best {
+            None => true,
+            Some((_, best_dim, _, _)) => dim > best_dim,
+        };
+        if replace {
+            best = Some((i, dim, off, size));
+        }
+    }
+    let (idx, _, data_off, data_len) = best.ok_or("icon.ico 无有效帧")?;
+    let entry = &ICO_BYTES[6 + idx * 16..6 + idx * 16 + 16];
+    let data = &ICO_BYTES[data_off as usize..(data_off + data_len) as usize];
+    // 构造单帧 ICO：ICONDIR(6) + 1 entry(16) + 图像
+    let mut out = Vec::with_capacity(6 + 16 + data.len());
+    out.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // reserved=0, type=1, count=1
+    out.extend_from_slice(entry);
+    out.extend_from_slice(data);
+    Ok(out)
 }
 
 /// 为内嵌 Web GUI 窗口设置高清任务栏图标（前端创建的窗口创建完成后调用）
