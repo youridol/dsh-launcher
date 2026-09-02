@@ -8,7 +8,7 @@ import { listLogs, readLog, type LogFile } from "@/lib/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { Download, RefreshCw, X } from "lucide-react";
+import { Download, Eraser, X } from "lucide-react";
 
 // 日志行（对应 Rust LogLine）
 interface LogLine {
@@ -149,12 +149,14 @@ export default function LogPanel({
   }
 
   function exportLog() {
-    // 实时流模式导出流内容；文件模式导出文件内容
+    // 实时流模式导出流内容；文件模式导出文件内容（导出前剔除 emoji，避免乱码）
     const data = liveMode
       ? streamLines
-          .map((l) => `[${l.timestamp}] [${l.source}] [${l.level}] ${l.message}`)
+          .map((l) =>
+            stripEmoji(`[${l.timestamp}] [${l.source}] [${l.level}] ${l.message}`),
+          )
           .join("\n")
-      : content;
+      : stripEmoji(content);
     const blob = new Blob([data], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -166,8 +168,25 @@ export default function LogPanel({
     URL.revokeObjectURL(url);
   }
 
+  // 清屏：清空实时流缓冲（替代原"刷新文件列表"按钮；文件列表仍由定时器自动刷新）
+  function clearLog() {
+    setStreamLines([]);
+    setContent("");
+    // 重置补流标记：下次手动切回实时流不自动补历史（清屏意图 = 只看后续新日志）
+    backfilledRef.current = null;
+  }
+
+  // 移除日志消息中的 emoji（dsh 终端输出 emoji 在跨编码转换时会产生乱码，直接剔除）
+  function stripEmoji(s: string): string {
+    // 匹配常见 Unicode emoji 区段 + 变体选择符 + ZWJ 序列（保留 ASCII/中文）
+    return s.replace(
+      /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{1F1E6}-\u{1F1FF}\u{200D}\u{2B00}-\u{2BFF}\u{2B50}\u{3030}\u{00A9}\u{00AE}]/gu,
+      "",
+    );
+  }
+
   const streamText = streamLines
-    .map((l) => `[${l.timestamp}] [${l.source}] [${l.level}] ${l.message}`)
+    .map((l) => stripEmoji(`[${l.timestamp}] [${l.source}] [${l.level}] ${l.message}`))
     .join("\n");
 
   return (
@@ -194,8 +213,9 @@ export default function LogPanel({
           </Button>
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon-sm" onClick={refreshFiles} title="刷新文件列表">
-            <RefreshCw />
+          {/* 清屏（替代原"刷新文件列表"按钮：清空实时流缓冲，文件列表仍由定时器自动刷新） */}
+          <Button variant="ghost" size="icon-sm" onClick={clearLog} title="清屏">
+            <Eraser />
           </Button>
           <Button variant="ghost" size="icon-sm" onClick={exportLog} title="导出日志">
             <Download />

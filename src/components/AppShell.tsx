@@ -101,7 +101,7 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
     growthDirection: "right",
     maxWidth: SIDEBAR_MAX_WIDTH,
     minWidth: SIDEBAR_MIN_WIDTH,
-    storageKey: "dsh-launcher-sidebar-width-v2",
+    storageKey: "dsh-launcher-sidebar-width-v3",
     widthRef: sidebarWidthRef,
   });
 
@@ -116,7 +116,7 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
     growthDirection: "left",
     maxWidth: RIGHT_PANEL_MAX_WIDTH,
     minWidth: RIGHT_PANEL_MIN_WIDTH,
-    storageKey: "dsh-launcher-right-panel-width-v2",
+    storageKey: "dsh-launcher-right-panel-width-v3",
     widthRef: rightPanelWidthRef,
   });
 
