@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.5] - 2026-09-03
+
+### 变更
+
+- fix: 分发到其他 Windows 客户机的 Web GUI 打不开（401 认证页 / localhost 拒绝连接）
+- 分发机器实测根因：
+- 启动器（Tauri GUI 进程 + CREATE_NO_WINDOW）把 dsh web stdout 接成匿名管道时，
+- 在部分客户机上输出不实时到达（token URL 直到 dsh 被杀才出现），启动器永远
+- 捕获不到 token → Web GUI 回退裸 URL → 401 "dsh web authentication required"；
+- 开窗时机早于 dsh 端口就绪 → 窗口直接 ERR_CONNECTION_REFUSED。
+- 修复：
+- core/process.rs：dsh 子进程 stdout/stderr 由管道改为重定向落盘文件
+- （logs/dsh-web-stdout.log、dsh-web-stderr.log，每次启动截断），监视线程轮询
+- tail 文件实时喂日志并捕获 token URL —— 摆脱 GUI 父进程管道缓冲的不确定性；
+- lib.rs：open_web_gui_window（桌面快捷方式/自动打开）后台线程先等端口监听
+- （≤8s）再等带 token 完整 URL（≤10s），拿到才开窗；dsh 未运行/无 URL 时聚焦
+- 主窗口并落日志提示，不再打开 401/拒绝连接死窗口（窗口创建仍回主线程）；
+- components/StatusCard.tsx：内嵌打开/外部浏览器改为等待 token URL（最长 40s），
+- 不再 10s 后回退裸 URL（401 入口）；dsh 未运行直接提示先启动，等待期间按钮禁用；
+- core/github.rs：git 解析加入 Git for Windows 常见安装目录绝对路径兜底
+- （工具链安装后启动器 PATH 快照不刷新导致 "git ls-remote: program not found"）。
+- 验证：全新 Windows 客户机端到端通过 —— 自动启动 dsh、token URL 3s 内实时
+- 进入日志、用捕获链接鉴权握手 200（裸 URL 401），内嵌 Web GUI 正常打开；
+- GitHub 通道版本列表正常。版本 0.4.5。
+
 ## [0.4.3] - 2026-09-03
 
 ### 修复
