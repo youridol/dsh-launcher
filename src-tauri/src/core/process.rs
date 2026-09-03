@@ -141,52 +141,57 @@ impl ProcessManager {
         }
 
         // 启动命令：优先 PATH 中的 dsh（npm 全局 / 启动器创建的 dsh.cmd shim）；
-        // 找不到则用 GitHub 安装目录内的 `pnpm dsh web`（cwd=安装目录），
-        // 修复 v0.2.3：GitHub 安装后 dsh 不在 PATH → program not found。
+        // 找不到则用 GitHub 安装目录内的直接 node 启动（见下）。
         // --no-open：不自动弹外部浏览器（Web GUI 由用户通过内嵌窗口/桌面快捷方式打开）
-        // Windows 上 dsh 是 .cmd（npm 全局 shim / 启动器 install_global_shim 产物），
-        // 不能直接 spawn（program not found），必须 cmd.exe /C 包装（见 command.rs 说明）
-        let mut cmd = command::hidden_cmd("dsh");
-        cmd.args(["web", "--port", &port.to_string(), "--no-open"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
-
-        // 探测 PATH 中的 dsh 是否存在；不存在则改用安装目录内 pnpm dsh
-        // （同样用 cmd 包装探测 .cmd，否则对 dsh.cmd 恒报 not found）
+        // Windows 上 npm 全局 dsh 是 .cmd（npm shim），不能直接 spawn，必须 cmd /C 包装；
+        // 但 GitHub 通道 dsh.cmd shim（cd 目录 && pnpm dsh）嵌套过深会引发两类问题：
+        //   ① token stdout 多层缓冲不实时 → 内嵌窗口拿不到新 token → 401 authentication required
+        //   ② 进程树 5 层 taskkill /T 杀不净 → 残留孤儿占端口 + 旧 token 错乱
+        // 因此 GitHub 通道改为**直接 node 启动 bin.ts**（进程浅、stdout 实时、taskkill 干净）。
+        let github_dir = crate::core::github::github_clone_dir();
         let dsh_in_path = command::hidden_cmd("dsh")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        let github_dir = crate::core::github::github_clone_dir();
-        if !dsh_in_path && github_dir.join("package.json").exists() {
+        // npm 全局真 dsh 优先（PATH 中非本启动器 shim 的真实 dsh）
+        let mut cmd = if dsh_in_path {
+            // 探测 PATH 中 dsh 是否为本启动器 shim（cd github 目录 && pnpm dsh）
+            let shim_owned = crate::core::github::global_shim_is_ours();
+            if !shim_owned && github_dir.join("apps/cli/src/bin.ts").exists() {
+                self.logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Info,
+                    &format!("PATH 中 dsh 为 npm 全局包，直接用其启动"),
+                );
+                command::hidden_cmd("dsh")
+            } else {
+                // 本启动器 shim → 走直接 node（避免嵌套）
+                self.logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Info,
+                    "dsh 为本启动器 GitHub shim，改用直接 node 启动（避免 pnpm 嵌套）",
+                );
+                direct_node_cmd(&github_dir, port)
+            }
+        } else if github_dir.join("package.json").exists() {
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Info,
-                &format!("PATH 中无 dsh，改用安装目录启动: {}", github_dir.display()),
+                &format!("PATH 中无 dsh，直接用安装目录启动: {}", github_dir.display()),
             );
-            // pnpm dsh web --port <p> --no-open，cwd = 安装目录（pnpm 脚本: node --import tsx/esm apps/cli/src/bin.ts）
-            let mut c = command::hidden_cmd("pnpm");
-            c.args(["dsh", "web", "--port", &port.to_string(), "--no-open"])
-                .current_dir(&github_dir)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null());
-            cmd = c;
-        } else if dsh_in_path {
-            self.logger.log(
-                LogSource::Launcher,
-                LogLevel::Info,
-                "使用 PATH 中的 dsh 启动",
-            );
+            direct_node_cmd(&github_dir, port)
         } else {
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Error,
                 "PATH 中无 dsh 且未找到 GitHub 安装目录",
             );
-        }
+            return Err("未找到 dsh（PATH 无 dsh 且无 GitHub 安装目录），请先安装 dsh".to_string());
+        };
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
 
         // 注入工具链 PATH（DESIGN §4.3）：若系统 PATH 无 node 但启动器已装用户级 Node，
         // 前缀注入 node_dir（含 npm/pnpm），否则依赖 node 的 dsh/pnpm 子进程无法启动
@@ -329,6 +334,50 @@ impl ProcessManager {
                 c.args(["/PID", &pid.to_string(), "/T", "/F"])
                     .output()
             };
+        }
+
+        // v0.4.2：端口级兑底清剿 —— taskkill /T 对 pnpm 深嵌套进程树可能杀不净
+        // （远程实测残留 dsh web node 孤儿进程继续占端口，持有旧 token → 401）。
+        // 若端口仍监听，按端口查实际监听 PID 逐个强杀，直到端口释放（最多 5 轮）。
+        let port_now = *self.port.lock().unwrap();
+        if port_now != 0 && port::is_port_in_use(port_now) {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Warn,
+                &format!("停止后端口 {port_now} 仍被占用（taskkill 树杀不净），按端口清剿残留进程…"),
+            );
+            for round in 1..=5 {
+                let Some(listener) = Self::pid_by_port(port_now) else {
+                    break;
+                };
+                // 避免误杀刚重启的新实例：仅当监听者不是当前托管的 pid 链时强杀
+                let _ = round;
+                self.logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Warn,
+                    &format!("端口 {port_now} 残留监听进程 pid={listener}，强制终止…"),
+                );
+                let mut c = command::hidden("taskkill");
+                c.args(["/PID", &listener.to_string(), "/T", "/F"])
+                    .output()
+                    .ok();
+                // 等待端口释放
+                let deadline = Instant::now() + Duration::from_millis(1500);
+                while Instant::now() < deadline {
+                    if !port::is_port_in_use(port_now) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+                if !port::is_port_in_use(port_now) {
+                    self.logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Info,
+                        &format!("端口 {port_now} 已释放（残留进程已清理）"),
+                    );
+                    break;
+                }
+            }
         }
 
         match sigterm {
@@ -584,6 +633,51 @@ impl ProcessManager {
             *url_slot = String::new();
         });
     }
+}
+
+/// 构造"直接 node 启动 GitHub 通道 dsh"的命令（v0.4.2 修复）：
+/// `node --import tsx/esm apps/cli/src/bin.ts web --port <p> --no-open`，cwd = 安装目录。
+///
+/// 为何不用 `pnpm dsh`（dsh.cmd shim）：
+/// - pnpm 在 Windows 上经 cmd.exe 多层嵌套（cmd→node(pnpm)→cmd→node(tsx)→cmd→node(dsh)），
+///   dsh web 的 token stdout 在多级管道缓冲下**不实时到达**启动器 → 内嵌窗口拿不到新 token
+///   → 401 "dsh web authentication required"；
+/// - 进程树 5 层导致 `taskkill /T` 杀不净 → 残留孤儿 node 继续占端口（旧 token 错乱）。
+/// 直接 node 启动：进程树浅（node 单进程 + 其子），stdout 实时，taskkill 干净。
+/// 返回已配好 stdout/stderr/stdin 的 Command（PATH 由调用方注入 node_dir）。
+#[cfg(windows)]
+fn direct_node_cmd(github_dir: &std::path::Path, port: u16) -> std::process::Command {
+    use crate::core::command;
+    // 用绝对 node.exe（用户级 node_dir 或 PATH 中 node），避免 cmd 包装
+    let mut node_exe = crate::core::toolchain::node_dir().join("node.exe");
+    if !node_exe.exists() {
+        // 回退：探测 PATH 中 node
+        let mut probe = command::hidden("where");
+        probe.arg("node");
+        if let Ok(out) = probe.output() {
+            if out.status.success() {
+                let text = crate::core::text::decode(&out.stdout);
+                if let Some(line) = text.lines().next() {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        node_exe = std::path::PathBuf::from(line);
+                    }
+                }
+            }
+        }
+    }
+    let mut c = command::hidden(&node_exe);
+    c.current_dir(github_dir);
+    c.args([
+        "--import",
+        "tsx/esm",
+        "apps/cli/src/bin.ts",
+        "web",
+        "--port",
+        &port.to_string(),
+        "--no-open",
+    ]);
+    c
 }
 
 /// 从 dsh 输出行提取 web URL（形如 http://127.0.0.1:<port>/?token=xxx）

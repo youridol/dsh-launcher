@@ -292,6 +292,31 @@ pub fn global_shim_path() -> Option<PathBuf> {
     }
 }
 
+/// PATH 中的 dsh.cmd 是否为**本启动器创建**的 GitHub shim（内容含 github 安装目录 + pnpm dsh）。
+/// 用于启动决策：本启动器 shim 走直接 node 启动（避免 pnpm 嵌套），
+/// npm 全局真 dsh（node_modules 链接）直接用。探测 PATH 首个 dsh.cmd 内容。
+pub fn global_shim_is_ours() -> bool {
+    // PATH 中首个 dsh.cmd 的完整路径（用 where 探测）
+    let mut probe = command::hidden("where");
+    probe.arg("dsh.cmd");
+    let Ok(out) = probe.output() else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = crate::core::text::decode(&out.stdout);
+    let Some(first) = text.lines().next() else {
+        return false;
+    };
+    let p = PathBuf::from(first.trim());
+    // 本启动器 shim 特征：内容包含 github-dsh 安装目录与 `pnpm dsh`
+    let Ok(content) = fs::read_to_string(&p) else {
+        return false;
+    };
+    content.contains("github-dsh") && content.contains("pnpm dsh")
+}
+
 /// 定位 npm 全局 bin 目录（Windows：npm 把 .cmd 直接放 prefix 目录，PATH 条目即 prefix）
 fn npm_global_bin_dir() -> PathBuf {
     npm_prefix_dir()

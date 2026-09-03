@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.2] - 2026-09-03
+
+### 修复
+
+- **内嵌 Web GUI 报 “dsh web authentication required; reopen the URL printed by dsh web”**（
+  真实客户机 192.168.3.124 实测）：
+  - 根因 1（token 捕获延迟）：GitHub 通道 dsh 经 dsh.cmd shim（`cd 安装目录 && pnpm dsh`）
+    启动，Windows 下 pnpm 多层 cmd/node 嵌套（实测 5 层），dsh web 的 token stdout
+    在多级管道缓冲下**不实时到达**启动器 → web_url 捕获不到新 token → 内嵌窗口用裸 URL
+    或旧 token 访问 → 401；
+  - 根因 2（残留僵尸占端口）：进程树 5 层导致 `taskkill /T` 杀不净，停止后残留 dsh web
+    node 孤儿进程继续占 3080（持旧 token）→ 新旧 token 错乱叠加 401。
+  - 修复：GitHub 通道启动改为**直接 node 执行** `node --import tsx/esm
+    apps/cli/src/bin.ts web --port <p> --no-open`（cwd=安装目录，node.exe 绝对路径），
+    进程树浅、stdout 实时输出 token URL、taskkill 可干净终止；
+  - 修复：停止后若端口仍监听（taskkill 树杀不净），按端口查实际监听 PID 逐个强杀直到
+    端口释放（最多 5 轮兑底清剿）；
+  - 前端 resolveWebUrl 轮询从 3 秒延长至 10 秒（dsh 冷启动 + token 打印时间），
+    并依赖 Rust 侧内存捕获 → 日志兜底双链路。
+
 ## [0.4.1] - 2026-09-03
 
 ### 修复

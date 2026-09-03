@@ -170,8 +170,10 @@ export default function StatusCard() {
   // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器（opener 插件）
   // 用带 token 的完整 URL 打开（dsh web 要求认证，裸 URL 会 401）
   async function resolveWebUrl(): Promise<string> {
-    // 优先取启动器捕获的完整 URL（含 token）；启动初期可能未捕获，轮询等待
-    for (let i = 0; i < 6; i++) {
+    // 优先取启动器捕获的完整 URL（含 token）。dsh 冷启动 + token 打印需数秒
+    // （直接 node 启动后 stdout 实时入内存 + 实时落盘，get_web_url 内存→日志双兑底），
+    // 轮询最长 10 秒；拿不到才回退裸 URL（仍可能 401，窗口内会提示重新打开）
+    for (let i = 0; i < 20; i++) {
       try {
         const full = await getWebUrl();
         if (full) return full;
