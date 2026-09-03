@@ -22,6 +22,47 @@ use std::sync::Arc;
 /// GitHub 仓库
 const REPO: &str = "deepseek-ai/deepseek-harness";
 
+/// 定位 git 可执行文件并返回已配 CREATE_NO_WINDOW 的 Command。
+///
+/// 分发机器修复（v0.4.5）：Git 由启动器"工具链一键安装"装入后，写入的是
+/// 注册表 PATH；而启动器进程（及 Explorer 拉起的进程）的 PATH 快照不刷新，
+/// 直接 `spawn git` 报 "program not found"（版本列表/克隆全挂）。
+/// 这里 PATH 探测失败时回退 Git for Windows 常见安装目录的绝对路径。
+fn git_command() -> Result<std::process::Command, String> {
+    let resolved = resolve_git_exe().ok_or_else(|| {
+        "找不到 git（PATH 中无 git 且未发现 Git for Windows 安装目录）。请在工具链管理中安装 Git".to_string()
+    })?;
+    Ok(command::hidden(&resolved))
+}
+
+/// 解析 git.exe：PATH 探测优先（where git），失败回退常见安装目录
+fn resolve_git_exe() -> Option<std::path::PathBuf> {
+    let mut probe = command::hidden_cmd("where");
+    probe.arg("git");
+    if let Ok(out) = probe.output() {
+        if out.status.success() {
+            let text = crate::core::text::decode(&out.stdout);
+            if let Some(line) = text.lines().next() {
+                let p = std::path::PathBuf::from(line.trim());
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    for cand in [
+        "C:\\Program Files\\Git\\cmd\\git.exe",
+        "C:\\Program Files\\Git\\bin\\git.exe",
+        "C:\\Program Files (x86)\\Git\\cmd\\git.exe",
+    ] {
+        let p = std::path::PathBuf::from(cand);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// 若配置了 GitHub Token，返回注入 git 的 `-c http.extraheader=AUTHORIZATION: bearer <token>`
 /// 参数（避免 token 出现在 URL / 日志中）；未配置返回空 vec。
 fn git_auth_args() -> Vec<String> {
@@ -79,7 +120,7 @@ pub fn list_releases() -> Result<Vec<String>, String> {
 
     // 主路径：git ls-remote --tags（不受 GitHub API 限流影响）
     // 配置了 Token 时注入认证头（防限流 / 私有仓库）
-    let mut cmd = command::hidden("git");
+    let mut cmd = git_command()?;
     let auth = git_auth_args();
     cmd.args(&auth);
     cmd.args(["ls-remote", "--tags", &repo_url]);
@@ -178,7 +219,7 @@ pub fn install_version(
         })
     };
     {
-        let mut c = command::hidden("git");
+        let mut c = git_command()?;
         let auth = git_auth_args();
         c.args(&auth);
         c.args([

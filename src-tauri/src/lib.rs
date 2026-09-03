@@ -18,12 +18,83 @@ pub struct AppState {
     pub process: Arc<ProcessManager>,
 }
 
-/// 打开内嵌 Web GUI 窗口（桌面快捷方式 --web-gui 触发时调用）
-/// URL 从日志兜底提取（含 token 认证）；dsh 未运行时窗口加载会 401（可提示用户先启动）
+/// 打开内嵌 Web GUI 窗口（桌面快捷方式 --web-gui / 自动打开 / 托盘唤醒时调用）
+///
+/// 分发机器修复（v0.4.4）：
+/// - 不再"立刻打开一个很可能打不开/未认证的窗口"：
+///   dsh 冷启动时端口可能尚未监听（窗口显示 ERR_CONNECTION_REFUSED），
+///   token URL 可能要等 dsh web 就绪后数秒才输出（过早打开 → 裸 URL → 401 认证页）。
+/// - 本函数放到后台线程：先等端口监听（≤8s），再等带 token 的完整 URL（≤10s），
+///   拿到才开窗；dsh 未运行/始终无 URL 时聚焦主窗口并落日志提示，不再开死窗口。
+/// - 窗口创建仍回主线程（Tauri 窗口非线程安全），见 run_on_main_thread。
 fn open_web_gui_window(app: &tauri::AppHandle) {
-    // 从最新日志提取带 token 的 web URL，失败回退裸 URL
-    let url = crate::core::logging::extract_latest_web_url()
-        .unwrap_or_else(|| "http://127.0.0.1:3080".to_string());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        use std::time::{Duration, Instant};
+
+        let logger = app.state::<AppState>().logger.clone();
+        let process: Arc<ProcessManager> = app.state::<AppState>().process.clone();
+
+        // 目标端口：配置端口（旧配置可能存 0，兜底 3080）
+        let cfg_port = crate::core::config::AppConfig::load().port;
+        let port = if crate::core::port::validate_port(cfg_port) { cfg_port } else { 3080 };
+
+        // ① 等端口监听（dsh 冷启动 / 直接 node 预热需数秒）
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut listening = false;
+        while Instant::now() < deadline {
+            if crate::core::port::probe(port) == Some(true) {
+                listening = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+
+        if !listening {
+            // dsh 未在运行/未就绪：不开"连接被拒绝"的窗口，聚焦主窗口让用户先启动
+            logger.log(
+                crate::core::logging::LogSource::Launcher,
+                crate::core::logging::LogLevel::Warn,
+                &format!("打开 Web GUI：dsh 未监听端口 {port}（可能未启动），请在启动器中先启动 dsh"),
+            );
+            let app2 = app.clone();
+            let app2_inner = app2.clone();
+            let _ = app2.run_on_main_thread(move || {
+                if let Some(win) = app2_inner.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            });
+            return;
+        }
+
+        // ② 等带 token 的完整 URL（内存捕获优先，日志兜底；≤10s）
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut url: Option<String> = None;
+        while Instant::now() < deadline {
+            let mem = process.web_url();
+            if !mem.is_empty() {
+                url = Some(mem);
+                break;
+            }
+            if let Some(u) = crate::core::logging::extract_latest_web_url() {
+                url = Some(u);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let url = url.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
+
+        // ③ 主线程创建内嵌窗口（带高清图标）
+        let app3 = app.clone();
+        let app3_inner = app3.clone();
+        let _ = app3.run_on_main_thread(move || build_web_gui_window(&app3_inner, &url));
+    });
+}
+
+/// 主线程上真正创建内嵌 Web GUI 窗口（label 唯一化 + 图标双保险）
+fn build_web_gui_window(app: &tauri::AppHandle, url: &str) {
     let parsed: tauri::Url = url
         .parse()
         .unwrap_or_else(|_| "http://127.0.0.1:3080".parse().unwrap());
@@ -140,18 +211,10 @@ pub fn run() {
                             &format!("自动启动 dsh（autoStartDsh），端口 {port}"),
                         );
                         if open_gui {
-                            // 等待端口就绪（最多 8s）后打开内嵌 Web GUI
-                            // 窗口操作须回主线程（Tauri 窗口非线程安全）
-                            for _ in 0..16 {
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-                                if crate::core::port::probe(port) == Some(true) {
-                                    let app2 = app_handle.clone();
-                                    let _ = app_handle.run_on_main_thread(move || {
-                                        open_web_gui_window(&app2);
-                                    });
-                                    break;
-                                }
-                            }
+                            // 自动打开内嵌 Web GUI：open_web_gui_window 内部会
+                            // 等端口监听 + 等带 token 的完整 URL，拿到才开窗
+                            // （分发机器修复：不再在 dsh 未就绪时打开 → 401/连接拒绝）
+                            open_web_gui_window(&app_handle);
                         }
                     });
                 }

@@ -9,7 +9,7 @@
 use crate::core::command;
 use crate::core::logging::{LogLevel, LogSource, Logger};
 use crate::core::port;
-use std::io::BufReader;
+use std::io::Read;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -200,8 +200,30 @@ impl ProcessManager {
             );
             return Err("未找到 dsh（PATH 无 dsh 且无 GitHub 安装目录），请先安装 dsh".to_string());
         };
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        // v0.4.5：dsh 子进程 stdout/stderr 重定向到文件而非管道。
+        // 分发机器实测：GUI（Tauri）父进程 + CREATE_NO_WINDOW 创建的匿名管道在部分
+        // Windows 客户机上输出不实时到达（dsh web 的 token URL stdout 直到进程被杀才
+        // 出现 → 启动器永远捕获不到 → Web GUI 裸 URL → 401 认证页 / 连接拒绝）。
+        // node 对普通文件的写入实时落盘（无管道缓冲问题），启动器轮询 tail 文件即可
+        // 实时得到 token URL 与 dsh 日志（见 spawn_monitor / tail_output_file）。
+        let stdout_file = open_redirect_file(&dsh_output_path(true)).map_err(|e| {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                &format!("创建 dsh stdout 落盘文件失败: {e}"),
+            );
+            format!("创建 dsh stdout 落盘文件失败: {e}")
+        })?;
+        let stderr_file = open_redirect_file(&dsh_output_path(false)).map_err(|e| {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                &format!("创建 dsh stderr 落盘文件失败: {e}"),
+            );
+            format!("创建 dsh stderr 落盘文件失败: {e}")
+        })?;
+        cmd.stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
             .stdin(Stdio::null());
 
         // 注入工具链 PATH（DESIGN §4.3）：若系统 PATH 无 node 但启动器已装用户级 Node，
@@ -563,7 +585,7 @@ impl ProcessManager {
         }
     }
 
-    /// 后台监视线程：读输出写日志 + 进程退出时更新状态
+    /// 后台监视线程：tail dsh 输出落盘文件写日志/捕获 URL + 进程退出时更新状态
     fn spawn_monitor(&self, pid: u32) {
         let logger = Arc::clone(&self.logger);
         let child_arc = Arc::clone(&self.child);
@@ -579,50 +601,35 @@ impl ProcessManager {
             let Some(mut child) = child else {
                 return;
             };
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
 
-            // 两个独立线程并行读取 stdout/stderr，避免管道互堵：
-            // 原实现"先读完全部 stdout 再读 stderr"，若 stdout 长期无数据且进程存活，
-            // stderr 输出永远不会被读取 → 日志流缺失（v0.1.7 修复）。
+            // v0.4.5：stdout/stderr 已重定向到落盘文件（见 start_locked），
+            // 这里开两个轮询线程 tail 文件（各自独立，避免相互阻塞）。
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop_out = Arc::clone(&stop);
+            let stop_err = Arc::clone(&stop);
             let logger_out = Arc::clone(&logger);
             let logger_err = Arc::clone(&logger);
-            let t_out = stdout.map(|pipe| {
-                thread::spawn(move || {
-                    // v0.4.0：逐行用统一解码（UTF-8 优先 + 代码页回退），
-                    // 修复 dsh 在中文系统输出 GBK 中文时的日志乱码
-                    let reader = BufReader::new(pipe);
-                    for line in read_lines_decoded(reader) {
-                        let line = line.trim_end_matches('\r').to_string();
-                        // 捕获 dsh web 完整 URL（含 token），供内嵌/外部打开免认证
-                        if let Some(url) = extract_web_url(&line) {
-                            if let Ok(mut u) = self_url.lock() {
-                                *u = url;
-                            }
-                        }
-                        logger_out.log(LogSource::Dsh, LogLevel::Info, &line);
-                    }
-                })
+            let out_url = Arc::clone(&self_url);
+            let t_out = thread::spawn(move || {
+                tail_output_file(
+                    &dsh_output_path(true),
+                    LogLevel::Info,
+                    logger_out,
+                    Some(out_url),
+                    stop_out,
+                );
             });
-            let t_err = stderr.map(|pipe| {
-                thread::spawn(move || {
-                    let reader = BufReader::new(pipe);
-                    for line in read_lines_decoded(reader) {
-                        let line = line.trim_end_matches('\r').to_string();
-                        logger_err.log(LogSource::Dsh, LogLevel::Warn, &line);
-                    }
-                })
+            let t_err = thread::spawn(move || {
+                tail_output_file(&dsh_output_path(false), LogLevel::Warn, logger_err, None, stop_err);
             });
-            // 等待两个读取线程收尾（stdout/stderr 管道 EOF 后返回）
-            if let Some(t) = t_out {
-                let _ = t.join();
-            }
-            if let Some(t) = t_err {
-                let _ = t.join();
-            }
 
             // 进程退出后：回收子进程
             let wait_res = child.wait();
+            // 停止 tail 线程（它们 150ms 轮询一次，很快退出）
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = t_out.join();
+            let _ = t_err.join();
+
             logger.log(
                 LogSource::Launcher,
                 LogLevel::Info,
@@ -643,6 +650,104 @@ impl ProcessManager {
             let mut url_slot = cleanup_url.lock().unwrap();
             *url_slot = String::new();
         });
+    }
+}
+
+/// dsh web 输出落盘文件路径（v0.4.5，stdout/stderr 分文件）
+/// stdout=true → dsh-web-stdout.log；false → dsh-web-stderr.log
+fn dsh_output_path(stdout: bool) -> std::path::PathBuf {
+    let name = if stdout {
+        "dsh-web-stdout.log"
+    } else {
+        "dsh-web-stderr.log"
+    };
+    crate::core::logging::logs_dir().join(name)
+}
+
+/// 打开 dsh 输出落盘文件（每次启动截断重建；返回可写 File 供 Stdio::from）
+fn open_redirect_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+}
+
+/// 轮询读取 dsh 输出落盘文件的新增内容（tail），逐行：
+/// - 落日志（stdout=Info / stderr=Warn，与旧管道实现一致）
+/// - stdout 行做 token URL 捕获（内存 web_url）
+/// 150ms 轮询间隔足够实时（node 对普通文件的写入即写即落盘）。
+fn tail_output_file(
+    path: &std::path::Path,
+    level: LogLevel,
+    logger: Arc<Logger>,
+    url_slot: Option<Arc<Mutex<String>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(path) else {
+        return;
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        match file.read(&mut chunk) {
+            Ok(0) => {
+                // 暂无新数据：进程可能仍在写；短暂轮询
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            Ok(n) => {
+                for &b in &chunk[..n] {
+                    if b == b'\n' {
+                        if !buf.is_empty() {
+                            // v0.4.0：统一解码（UTF-8 优先 + 代码页回退），修复 GBK 乱码
+                            let raw = crate::core::text::decode(&buf);
+                            buf.clear();
+                            let line = raw.trim_end_matches('\r').to_string();
+                            // 捕获 dsh web 完整 URL（含 token），供内嵌/外部打开免认证
+                            if level == LogLevel::Info {
+                                if let Some(url) = extract_web_url(&line) {
+                                    if let Some(slot) = url_slot.as_ref() {
+                                        if let Ok(mut u) = slot.lock() {
+                                            *u = url;
+                                        }
+                                    }
+                                }
+                            }
+                            logger.log(LogSource::Dsh, level, &line);
+                        }
+                    } else {
+                        buf.push(b);
+                    }
+                }
+            }
+            Err(_) => {
+                // 读取失败（文件被删等）：稍后重试
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+    }
+    // 退出前排空剩余未换行的内容（进程被杀时最后一行可能无 \n）
+    if !buf.is_empty() {
+        let raw = crate::core::text::decode(&buf);
+        let line = raw.trim_end_matches('\r').to_string();
+        if !line.is_empty() {
+            if level == LogLevel::Info {
+                if let Some(url) = extract_web_url(&line) {
+                    if let Some(slot) = url_slot.as_ref() {
+                        if let Ok(mut u) = slot.lock() {
+                            *u = url;
+                        }
+                    }
+                }
+            }
+            logger.log(LogSource::Dsh, level, &line);
+        }
     }
 }
 
@@ -705,35 +810,6 @@ fn extract_web_url(line: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-/// 按行读取并统一解码（UTF-8 优先 + 代码页回退）。
-/// BufRead::lines() 内部用 String::from_utf8 硬解 → GBK 中文乱码；
-/// 这里用字节级行切分 + core::text::decode。
-fn read_lines_decoded<R: std::io::Read>(mut reader: R) -> impl Iterator<Item = String> {
-    let mut lines = Vec::new();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = reader.read(&mut chunk).unwrap_or(0);
-        if n == 0 {
-            break;
-        }
-        for &b in &chunk[..n] {
-            if b == b'\n' {
-                if !buf.is_empty() {
-                    lines.push(crate::core::text::decode(&buf));
-                    buf.clear();
-                }
-            } else {
-                buf.push(b);
-            }
-        }
-    }
-    if !buf.is_empty() {
-        lines.push(crate::core::text::decode(&buf));
-    }
-    lines.into_iter()
 }
 
 /// 解码 Windows 控制台输出（UTF-8 优先，失败回退代码页 GBK/OEM）

@@ -39,6 +39,8 @@ export default function StatusCard() {
   const [status, setStatus] = useState<Status>("stopped");
   const [port, setPort] = useState("3080");
   const [busy, setBusy] = useState(false);
+  // Web GUI 打开中（等待 URL 期间禁用按钮防重复点击）
+  const [guiBusy, setGuiBusy] = useState(false);
   // 是否已安装 dsh（卸载按钮可用性）
   const [hasInstalled, setHasInstalled] = useState(false);
   // 卸载进行中（独立于启动/停止 busy，避免互斥）
@@ -168,26 +170,38 @@ export default function StatusCard() {
   const running = status === "running" || status === "starting";
 
   // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器（opener 插件）
-  // 用带 token 的完整 URL 打开（dsh web 要求认证，裸 URL 会 401）
-  async function resolveWebUrl(): Promise<string> {
-    // 优先取启动器捕获的完整 URL（含 token）。dsh 冷启动 + token 打印需数秒
-    // （直接 node 启动后 stdout 实时入内存 + 实时落盘，get_web_url 内存→日志双兑底），
-    // 轮询最长 10 秒；拿不到才回退裸 URL（仍可能 401，窗口内会提示重新打开）
-    for (let i = 0; i < 20; i++) {
+  // 用带 token 的完整 URL 打开（dsh web 要求认证，裸 URL 会 401）。
+  // 分发机器修复（v0.4.4）：dsh 冷启动后 token 需要数秒~数十秒才从 stdout
+  // 实时到达启动器。这里轮询等待完整 URL（最多 40s），拿不到就不打开窗口，
+  // 避免两种"死窗口"：端口未监听 → ERR_CONNECTION_REFUSED；
+  // 裸 URL → 401 "dsh web authentication required"。
+  async function waitForWebUrl(timeoutMs: number): Promise<string | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       try {
         const full = await getWebUrl();
         if (full) return full;
-      } catch {
-        // 忽略，继续重试
+      } catch (e) {
+        console.error("获取 Web URL 失败（重试）", e);
       }
       await new Promise((r) => setTimeout(r, 500));
     }
-    return `http://127.0.0.1:${port}`;
+    return null;
   }
 
   async function openWebGui() {
+    if (guiBusy) return;
+    setGuiBusy(true);
     try {
-      const url = await resolveWebUrl();
+      if (status === "stopped" || status === "error") {
+        toast.error("dsh 未在运行，请先点击「启动」");
+        return;
+      }
+      const url = await waitForWebUrl(40_000);
+      if (!url) {
+        toast.error("尚未获取 dsh Web 访问地址（token 未输出）。dsh 可能仍在启动，请稍后重试；若持续如此请先停止再启动 dsh");
+        return;
+      }
       // 每次使用唯一 label 创建（修复：窗口关闭后 getByLabel 残留导致无法重建）
       const label = `dsh-web-gui-${Date.now()}`;
       const win = new WebviewWindow(label, { url, title: "deepseek-harness Web UI", width: 1600, height: 900 });
@@ -206,6 +220,8 @@ export default function StatusCard() {
     } catch (e) {
       console.error("打开内嵌 Web GUI 失败", e);
       toast.error(`打开内嵌 Web GUI 失败: ${e}`);
+    } finally {
+      setGuiBusy(false);
     }
   }
 
@@ -219,13 +235,25 @@ export default function StatusCard() {
   }
 
   async function openExternal() {
+    if (guiBusy) return;
+    setGuiBusy(true);
     try {
+      if (status === "stopped" || status === "error") {
+        toast.error("dsh 未在运行，请先点击「启动」");
+        return;
+      }
       // 用 opener 插件打开系统浏览器（window.open 在 Tauri 沙箱内被拦截 → 无反应）
-      const url = await resolveWebUrl();
+      const url = await waitForWebUrl(40_000);
+      if (!url) {
+        toast.error("尚未获取 dsh Web 访问地址（token 未输出）。dsh 可能仍在启动，请稍后重试；若持续如此请先停止再启动 dsh");
+        return;
+      }
       await openUrl(url);
     } catch (e) {
       console.error("打开外部浏览器失败", e);
       toast.error(`打开外部浏览器失败: ${e}`);
+    } finally {
+      setGuiBusy(false);
     }
   }
 
@@ -289,10 +317,10 @@ export default function StatusCard() {
             <Badge variant="outline">端口 {port}</Badge>
           </div>
           <div className="flex gap-2">
-            <Button size="sm" onClick={openWebGui}>
-              <MonitorUp /> 内嵌打开
+            <Button size="sm" onClick={openWebGui} disabled={guiBusy} title={guiBusy ? "正在等待 dsh Web 就绪（获取访问地址）…" : undefined}>
+              <MonitorUp /> {guiBusy ? "等待 Web 就绪…" : "内嵌打开"}
             </Button>
-            <Button size="sm" variant="outline" onClick={openExternal}>
+            <Button size="sm" variant="outline" onClick={openExternal} disabled={guiBusy}>
               <ExternalLink /> 外部浏览器
             </Button>
             <Button size="sm" variant="outline" onClick={handleDesktopShortcut}>
