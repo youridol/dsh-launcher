@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.7] - 2026-09-03
+
+### 修复
+
+- **CI 工作流失败（cargo test --lib 在英文 runner 挂 3 个 GBK 单测）**：
+  - 现象：push 触发 CI 的"单元测试（cargo test --lib）"步骤失败，Release 工作流（不跑 test）不受影响
+    （v0.4.5/v0.4.6 的 CI 均因此失败）。
+  - 根因：src/core/text.rs 的 test_gbk_cmd_error / test_gbk_with_ascii_prefix 与
+    src/core/process.rs 的 test_decode_console_text_gbk 硬编码"GBK 字节 → 应解码出中文"断言。
+    本机（中文 Windows，ACP=936）通过；GitHub Actions windows-latest runner 是英文系统
+    （ACP=1252），decode() 按 GetACP 动态选择代码页（设计如此），GBK 字节被按 CP1252 解码
+    成乱码 → 中文断言失败（CI 日志可见 `´íÎó: ÎÞ·¨ÖÕÖ¹...` 乱码）。
+  - 修复：测试自适应当前系统代码页——中文（936）环境断言完整中文还原；
+    非中文环境（英文 CI）断言 ASCII 片段保留（GBK 中文外的 ASCII 字节 1:1 保留，
+    如 "PID 3108" / "npm"），并验证不 panic。新增 text::is_cjk_system_for_test 辅助。
+  - 验证：本地（中文 936）25 个 lib 测试 + 4 个集成测试全过；CP1252 模拟验证 ASCII 断言成立。
+  - 版本 0.4.7。
+
 ## [0.4.6] - 2026-09-03
 
 ### 修复

@@ -69,9 +69,24 @@ pub fn decode_line(bytes: &[u8]) -> String {
     decode(bytes)
 }
 
+/// 当前系统是否中文（ACP=936/GBK）——仅测试辅助（跨模块 GBK 测试用）。
+/// 生产代码不依赖系统语言分支，统一按 GetACP 动态解码。
+#[cfg(test)]
+pub fn is_cjk_system_for_test() -> bool {
+    ansi_code_page() == 936
+}
+
 #[cfg(test)]
 mod tests {
+    use super::ansi_code_page;
     use super::decode;
+
+    /// 当前系统是否为中文（ACP=936/GBK）环境。
+    /// GBK 解码单测仅在中文环境断言中文还原；非中文环境（CI 英文 runner ACP=1252）
+    /// 下 GBK 字节按本机代码页解码是符合设计的（见 decode 策略），只验证不崩溃。
+    fn is_cjk_system() -> bool {
+        ansi_code_page() == 936
+    }
 
     #[test]
     fn test_utf8_passthrough() {
@@ -86,8 +101,14 @@ mod tests {
         let msg = "'npm' 不是内部或外部命令，也不是可运行的程序或批处理文件。\r\n请检查输入的拼写是否正确。";
         let gbk = encoding_rs::GBK.encode(msg).0;
         let decoded = decode(&gbk);
-        assert!(decoded.contains("不是内部或外部命令"), "GBK 解码应得中文: {decoded:?}");
-        assert!(decoded.contains("请检查输入的拼写"), "应包含提示: {decoded:?}");
+        if is_cjk_system() {
+            assert!(decoded.contains("不是内部或外部命令"), "中文系统 GBK 解码应得中文: {decoded:?}");
+            assert!(decoded.contains("请检查输入的拼写"), "应包含提示: {decoded:?}");
+        } else {
+            // 非中文系统（英文 CI runner）：GBK 字节按本机代码页解码（符合设计），
+            // 仅验证解码不 panic 且保留 ASCII 前缀
+            assert!(decoded.contains("npm"), "非中文系统也应保留 ASCII 片段: {decoded:?}");
+        }
     }
 
     #[test]
@@ -96,7 +117,12 @@ mod tests {
         let msg = "npm : 无法将“npm”项识别为 cmdlet、函数、脚本文件或可运行程序的名称。";
         let gbk = encoding_rs::GBK.encode(msg).0;
         let decoded = decode(&gbk);
-        assert!(decoded.contains("无法将"), "混合字节也应正确解码: {decoded:?}");
+        if is_cjk_system() {
+            assert!(decoded.contains("无法将"), "中文系统混合字节应正确解码: {decoded:?}");
+        } else {
+            // 非中文系统：仅验证解码不 panic 且保留 ASCII 前缀
+            assert!(decoded.contains("npm"), "非中文系统也应保留 ASCII 片段: {decoded:?}");
+        }
     }
 
     #[test]

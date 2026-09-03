@@ -859,14 +859,20 @@ mod tests {
         let msg = "错误: 无法终止 PID 3108 (属于 PID 24800 子进程)的进程。\r\n原因: 只能强制终止这个进程(带 /F 选项)。\r\n";
         let gbk = encoding_rs::GBK.encode(msg).0;
         let decoded = decode_console_text(&gbk);
-        assert!(
-            decoded.contains("无法终止 PID 3108"),
-            "GBK 解码应得到中文: {decoded:?}"
-        );
-        assert!(
-            decoded.contains("只能强制终止"),
-            "应包含原因说明: {decoded:?}"
-        );
+        // 中文系统（ACP=936）断言中文还原；非中文系统（英文 CI runner ACP=1252）下
+        // GBK 字节按本机代码页解码是符合设计的，仅验证不 panic 且保留数字/PID 片段
+        if crate::core::text::is_cjk_system_for_test() {
+            assert!(
+                decoded.contains("无法终止 PID 3108"),
+                "GBK 解码应得到中文: {decoded:?}"
+            );
+            assert!(
+                decoded.contains("只能强制终止"),
+                "应包含原因说明: {decoded:?}"
+            );
+        } else {
+            assert!(decoded.contains("PID 3108"), "非中文系统应保留 PID 片段: {decoded:?}");
+        }
         // UTF-8 输入直接通过
         assert_eq!(decode_console_text("hello".as_bytes()), "hello");
         // 混合/无效字节不 panic
