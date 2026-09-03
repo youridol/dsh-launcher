@@ -138,8 +138,11 @@ fn build_web_gui_window(app: &tauri::AppHandle, url: &str) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let logger = Arc::new(Logger::init().expect("初始化日志失败"));
+    // v0.4.13（审计修复 2.9）：Logger::init 内部已带目录降级，不再 expect panic
+    let logger = Arc::new(Logger::init());
     let process = Arc::new(ProcessManager::new(Arc::clone(&logger)));
+    // v0.4.13（审计修复 2.11）：后端 5s 状态对账（收养实例退出/外部启停收敛）
+    process.spawn_reconcile();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -176,6 +179,8 @@ pub fn run() {
                 // 创建系统托盘
                 core::tray::setup_tray(app.handle(), Arc::clone(&process), Arc::clone(&logger));
                 // v0.3.5：启动时探测配置端口——dsh 已在运行（上次退出驻留）则恢复状态
+                // v0.4.13（审计修复 2.2）：adopt_running 内部先校验监听进程是否形如
+                // dsh；端口被非 dsh 进程占用时返回 false 且仅落警告（不标记 Running）。
                 let cfg = crate::core::config::AppConfig::load();
                 if cfg.port != 0 && crate::core::port::is_port_in_use(cfg.port) {
                     process.adopt_running(cfg.port);
@@ -259,5 +264,10 @@ pub fn run() {
             commands::logs::read_log,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // v0.4.13（审计修复 2.9）：release 无控制台时 panic 不可见，改为
+        // 显式落错误并退出（错误码 1），便于日志/进程退出码排查。
+        .unwrap_or_else(|e| {
+            eprintln!("[dsh-launcher] Tauri 应用运行失败: {e}");
+            std::process::exit(1);
+        });
 }

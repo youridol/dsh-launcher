@@ -51,8 +51,8 @@ src-tauri/src/
 ### 4.1 工具链检测与补齐
 1. 检测清单：Node.js(22.19+/24+)、npm(随 Node)、pnpm、Git(2.26+)、Python(可选)。
 2. 状态：`present` / `missing` / `mismatch`；缺失或版本不符 → UI 列出 + "一键安装"。
-3. 安装走**官方通道**、**系统全局**；需提权的步骤（Git 装 Program Files）spawn `runas` 子进程，主进程不常驻管理员。
-4. 网络问题由镜像源解决（npm registry / GitHub 加速独立配置，默认官方源 + 常用镜像下拉）。
+3. 安装走**官方通道**：Node 为用户级目录（免 UAC，写入用户 PATH）；Git/Python 用官方安装器、需提权（runas 子进程），主进程不常驻管理员。
+4. 网络问题由镜像源解决（npm registry / GitHub 加速 / Node 镜像独立配置，默认官方源 + 常用镜像下拉）。
 
 ### 4.2 dsh 安装（双入口 + 全局单版本）
 - **npm 通道**：`npm i -g @deepseek-ai/dsh@<version>`（registry 现有版本）。
@@ -61,9 +61,9 @@ src-tauri/src/
 
 ### 4.3 生命周期
 - **启动**：spawn `dsh web --port <p>`，CWD = dsh 官方默认（不干预 workspace root），注入全局工具链 PATH。
-- **停止**：SIGTERM（Windows 下 taskkill /PID /T）→ 优雅排空 ≤5s → 二次信号强杀。
+- **停止**：Windows `taskkill /PID /T` 模拟优雅停止 → 等 ≤1s 未退则 `/F` 强杀；随后按端口兜底清剿（清剿前校验监听进程确为 dsh，防误杀无关进程，v0.4.13）。
 - **重启**：停止后用相同配置（端口 + CWD）重启；端口被占则提示手动改。
-- **状态检测**：事件驱动（进程句柄退出即推送）+ 端口探活 5s 兜底轮询。
+- **状态检测**：事件驱动（进程句柄退出即收状态）+ 端口探活（收养/停止前校验）+ 后端 5s 对账线程兜底（v0.4.13）。
 
 ### 4.4 日志
 - 采集：dsh stdout/stderr + 启动器自身日志，统一时间戳格式。
@@ -74,7 +74,7 @@ src-tauri/src/
 - 内嵌 WebView2 渲染 `http://127.0.0.1:<port>`（含 token 免认证）+ "外部浏览器打开"兜底按钮（opener 插件）。
 - 内嵌窗口任务栏图标：Rust 侧设置 SMALL + ICON_BIG（多尺寸 ICO 最大帧，防模糊）。
 - 托盘菜单：打开主窗口 / 启动 / 停止 / 重启 / 退出。
-- 滑动开关：① 关闭直接退出（含 dsh）② 最小化到托盘 ③ 退出时驻留 dsh ④ 卸载保留 DSH_HOME（默认保留）。
+- 滑动开关（6 项）：① 关闭直接退出（含 dsh）② 最小化到托盘 ③ 退出时驻留 dsh ④ 卸载保留 DSH_HOME（默认保留）⑤ 启动时自动启动 dsh ⑥ 启动时自动打开 Web GUI。
 
 ## 5. 数据与配置
 

@@ -24,27 +24,59 @@ const MENU_RESTART: &str = "restart";
 const MENU_QUIT: &str = "quit";
 
 /// 构建系统托盘
+///
+/// v0.4.13（审计修复 2.10）：任何一步失败只降级（跳过托盘）并落警告，
+/// 不再 `.expect()` 直接 panic —— release 无控制台时 panic 等于静默闪退。
 pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Logger>) {
-    let show = MenuItemBuilder::with_id(MENU_SHOW, "打开主窗口")
-        .build(app)
-        .expect("创建托盘菜单项失败");
-    let start = MenuItemBuilder::with_id(MENU_START, "启动 dsh")
-        .build(app)
-        .expect("创建托盘菜单项失败");
-    let stop = MenuItemBuilder::with_id(MENU_STOP, "停止 dsh")
-        .build(app)
-        .expect("创建托盘菜单项失败");
-    let restart = MenuItemBuilder::with_id(MENU_RESTART, "重启 dsh")
-        .build(app)
-        .expect("创建托盘菜单项失败");
-    let quit = MenuItemBuilder::with_id(MENU_QUIT, "退出")
-        .build(app)
-        .expect("创建托盘菜单项失败");
+    let build_item = |id: &str, text: &str| {
+        MenuItemBuilder::with_id(id, text).build(app).map_err(|e| e.to_string())
+    };
+    let show = match build_item(MENU_SHOW, "打开主窗口") {
+        Ok(i) => i,
+        Err(e) => {
+            logger.warn(&format!("创建托盘菜单项失败（跳过托盘）: {e}"));
+            return;
+        }
+    };
+    let start = match build_item(MENU_START, "启动 dsh") {
+        Ok(i) => i,
+        Err(e) => {
+            logger.warn(&format!("创建托盘菜单项失败（跳过托盘）: {e}"));
+            return;
+        }
+    };
+    let stop = match build_item(MENU_STOP, "停止 dsh") {
+        Ok(i) => i,
+        Err(e) => {
+            logger.warn(&format!("创建托盘菜单项失败（跳过托盘）: {e}"));
+            return;
+        }
+    };
+    let restart = match build_item(MENU_RESTART, "重启 dsh") {
+        Ok(i) => i,
+        Err(e) => {
+            logger.warn(&format!("创建托盘菜单项失败（跳过托盘）: {e}"));
+            return;
+        }
+    };
+    let quit = match build_item(MENU_QUIT, "退出") {
+        Ok(i) => i,
+        Err(e) => {
+            logger.warn(&format!("创建托盘菜单项失败（跳过托盘）: {e}"));
+            return;
+        }
+    };
 
-    let menu = MenuBuilder::new(app)
+    let menu = match MenuBuilder::new(app)
         .items(&[&show, &start, &stop, &restart, &quit])
         .build()
-        .expect("构建托盘菜单失败");
+    {
+        Ok(m) => m,
+        Err(e) => {
+            logger.warn(&format!("构建托盘菜单失败（跳过托盘）: {e}"));
+            return;
+        }
+    };
 
     let mut tray_builder = TrayIconBuilder::with_id("dsh-launcher-tray")
         .tooltip("dsh-launcher")
@@ -59,7 +91,9 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
         }
     }
 
-    let _tray = tray_builder
+    // logger/process 将被 move 进菜单事件闭包，先各留一份用于闭包外部收尾日志
+    let logger_ev = Arc::clone(&logger);
+    if let Err(e) = tray_builder
         // 左键单击/双击托盘图标 → 唤起主窗口（恢复显示/还原/聚焦）
         .on_tray_icon_event(|tray, event| {
             let is_left_click = matches!(
@@ -97,7 +131,7 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
                 MENU_START => {
                     // 异步启动：不阻塞托盘事件循环
                     let p = Arc::clone(&process);
-                    let logger = Arc::clone(&logger);
+                    let logger = Arc::clone(&logger_ev);
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = p.start(AppConfig::load().port) {
                             logger.log(
@@ -111,7 +145,7 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
                 MENU_STOP => {
                     // 异步停止：stop 内部有 ≤5s 等待，必须放后台避免卡托盘
                     let p = Arc::clone(&process);
-                    let logger = Arc::clone(&logger);
+                    let logger = Arc::clone(&logger_ev);
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = p.stop() {
                             logger.log(
@@ -125,7 +159,7 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
                 MENU_RESTART => {
                     // 异步重启：内部含 stop(≤5s) + start
                     let p = Arc::clone(&process);
-                    let logger = Arc::clone(&logger);
+                    let logger = Arc::clone(&logger_ev);
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = p.restart() {
                             logger.log(
@@ -143,7 +177,9 @@ pub fn setup_tray(app: &AppHandle, process: Arc<ProcessManager>, logger: Arc<Log
             }
         })
         .build(app)
-        .expect("创建系统托盘失败");
+    {
+        logger.warn(&format!("创建系统托盘失败（降级为无托盘运行）: {e}"));
+    }
 }
 
 /// 退出应用：先优雅停止 dsh（除非配置"退出时驻留"），再退出

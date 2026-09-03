@@ -284,19 +284,9 @@ fn run_cmd(bin: &str, args: &[&str]) -> Option<String> {
     if !fallback.exists() {
         return None;
     }
-    let mut c = if is_cmd_script {
-        // 绝对路径 .cmd 也需 cmd /C 包装
-        let mut cc = std::process::Command::new("cmd.exe");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cc.creation_flags(0x0800_0000);
-        }
-        cc.arg("/D").arg("/C").arg(&fallback);
-        cc
-    } else {
-        command::hidden(&fallback)
-    };
+    // v0.4.13（审计修复 2.13）：统一走 command::hidden_cmd（含 CREATE_NO_WINDOW 与
+    // node_dir PATH 注入），此前在此内联重建 cmd /C + 硬编码 0x08000000 魔法数
+    let mut c = command::hidden_cmd(&fallback);
     c.args(args);
     let out = c.output().ok()?;
     if !out.status.success() {
@@ -316,13 +306,79 @@ fn parse_stdout(bytes: &[u8]) -> Option<String> {
     }
 }
 
+// ===================== 版本门槛（审计修复 2.3）=====================
+// 此前 detect_* 只判"存在"，CONTEXT/DESIGN 声明的 mismatch 状态从不产生。
+// 这里按 required 声明做数值比较：Node 22.19+/24+、Git 2.26+、Python 3.10+。
+
+/// 从子进程版本输出解析首个 major.minor[.patch]（容忍 v 前缀/前后缀文字）。
+/// 例：`v22.19.0` → (22,19,0)；`git version 2.47.1.windows.1` → (2,47,1)；
+/// `Python 3.13.9` → (3,13,9)；解析失败返回 None（视为 unknown，不误判 mismatch）。
+fn parse_first_mmp(text: &str) -> Option<(u32, u32, u32)> {
+    let chars: Vec<char> = text.trim().chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == '-')
+            {
+                i += 1;
+            }
+            let token: String = chars[start..i].iter().collect();
+            let parts: Vec<u32> = token
+                .split(['.', '-'])
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+            if parts.len() >= 2 {
+                return Some((parts[0], parts[1], parts.get(2).copied().unwrap_or(0)));
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn node_meets_requirement(ver: &str) -> bool {
+    match parse_first_mmp(ver) {
+        Some((22, minor, _)) => minor >= 19,
+        Some((major, _, _)) => major >= 24,
+        None => true, // 版本无法解析：不误报 mismatch，维持 present
+    }
+}
+
+fn git_meets_requirement(ver: &str) -> bool {
+    match parse_first_mmp(ver) {
+        Some((2, minor, _)) => minor >= 26,
+        Some((major, _, _)) => major > 2,
+        None => true,
+    }
+}
+
+fn python_meets_requirement(ver: &str) -> bool {
+    match parse_first_mmp(ver) {
+        Some((3, minor, _)) => minor >= 10,
+        Some((major, _, _)) => major > 3,
+        None => true,
+    }
+}
+
+/// 统一三态判定：missing（无） / mismatch（有但版本不达标） / present
+fn tri_state(ver: &Option<String>, meets: fn(&str) -> bool) -> &'static str {
+    match ver {
+        None => "missing",
+        Some(v) if meets(v) => "present",
+        Some(_) => "mismatch",
+    }
+}
+
 fn detect_node() -> ToolchainItem {
     let ver = run_cmd("node", &["--version"]);
     ToolchainItem {
         name: "node",
         installed_version: ver.clone(),
         required: "22.19+ / 24+",
-        state: if ver.is_some() { "present" } else { "missing" },
+        state: tri_state(&ver, node_meets_requirement),
     }
 }
 
@@ -355,7 +411,7 @@ fn detect_git() -> ToolchainItem {
         name: "git",
         installed_version: ver.clone(),
         required: "2.26+",
-        state: if ver.is_some() { "present" } else { "missing" },
+        state: tri_state(&ver, git_meets_requirement),
     }
 }
 
@@ -397,7 +453,7 @@ fn detect_python() -> ToolchainItem {
         name: "python",
         installed_version: ver.clone(),
         required: "3.10+（可选，SDK 用）",
-        state: if ver.is_some() { "present" } else { "missing" },
+        state: tri_state(&ver, python_meets_requirement),
     }
 }
 
@@ -485,6 +541,10 @@ fn install_pnpm(logger: &Arc<Logger>) -> Result<String, String> {
     // 注入 node_dir 到 PATH（npm 的子进程 node 也要能找到）
     crate::core::pathutil::inject_node_path_into(&mut c);
     c.args(["i", "-g", "pnpm"]);
+    // 审计修复 2.1：npm registry 镜像配置此前从未生效，此处注入
+    if let Some(reg) = crate::core::config::current_npm_registry() {
+        c.arg("--registry").arg(reg);
+    }
     crate::core::stream::run_streamed(
         logger,
         c,
@@ -500,4 +560,50 @@ fn install_pnpm(logger: &Arc<Logger>) -> Result<String, String> {
 /// 安装 Python：官方完整安装包静默安装（提权；写 PATH）
 fn install_python(logger: &Arc<Logger>) -> Result<String, String> {
     core_toolchain::install_python(logger)
+}
+
+#[cfg(test)]
+mod version_gate_tests {
+    use super::{
+        git_meets_requirement, node_meets_requirement, parse_first_mmp, python_meets_requirement,
+    };
+
+    #[test]
+    fn test_parse_first_mmp() {
+        assert_eq!(parse_first_mmp("v22.19.0"), Some((22, 19, 0)));
+        assert_eq!(parse_first_mmp("v20.11.1"), Some((20, 11, 1)));
+        assert_eq!(parse_first_mmp("git version 2.47.1.windows.1"), Some((2, 47, 1)));
+        assert_eq!(parse_first_mmp("git version 2.25.1"), Some((2, 25, 1)));
+        assert_eq!(parse_first_mmp("Python 3.13.9"), Some((3, 13, 9)));
+        assert_eq!(parse_first_mmp("Python 3.9.13 (64-bit)"), Some((3, 9, 13)));
+        // 无法解析 → None
+        assert_eq!(parse_first_mmp(""), None);
+        assert_eq!(parse_first_mmp("not a version"), None);
+        assert_eq!(parse_first_mmp("v"), None);
+    }
+
+    #[test]
+    fn test_node_gate() {
+        assert!(node_meets_requirement("v22.19.0"));
+        assert!(node_meets_requirement("v22.19.1"));
+        assert!(!node_meets_requirement("v22.18.2"));
+        assert!(node_meets_requirement("v24.0.0"));
+        assert!(node_meets_requirement("v25.0.0"));
+        assert!(!node_meets_requirement("v20.11.1"));
+        assert!(!node_meets_requirement("v23.5.0"));
+        // 无法解析 → 不误报 mismatch
+        assert!(node_meets_requirement("unknown"));
+    }
+
+    #[test]
+    fn test_git_python_gate() {
+        assert!(git_meets_requirement("git version 2.47.1.windows.1"));
+        assert!(git_meets_requirement("git version 2.26.0"));
+        assert!(!git_meets_requirement("git version 2.25.1"));
+        assert!(git_meets_requirement("git version 3.0.0"));
+        assert!(python_meets_requirement("Python 3.13.9"));
+        assert!(python_meets_requirement("Python 3.10.0"));
+        assert!(!python_meets_requirement("Python 3.9.13 (64-bit)"));
+        assert!(python_meets_requirement("Python 4.0.0"));
+    }
 }

@@ -62,13 +62,6 @@ fn ansi_code_page() -> u32 {
     }
 }
 
-/// 流式逐行解码（每行一个 UTF-8 校验单位）。
-/// 行可能是 ASCII 与 GBK 字节的混合（如 cmd 的 "xxx 不是内部或外部命令"）；
-/// 整行 UTF-8 合法 → 直接用；否则按代码页解码。
-pub fn decode_line(bytes: &[u8]) -> String {
-    decode(bytes)
-}
-
 /// 当前系统是否中文（ACP=936/GBK）——仅测试辅助（跨模块 GBK 测试用）。
 /// 生产代码不依赖系统语言分支，统一按 GetACP 动态解码。
 #[cfg(test)]

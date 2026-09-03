@@ -3,7 +3,7 @@
 // v0.4.9：双通道列表融合——顶部按钮组切换 GitHub/npm，单一刷新按钮，默认 GitHub。
 //   两通道列表在进入时并发预加载（refresh 一次性拉齐），切换 Tab 零网络开销、零状态丢失，
 //   保证来回切换无 bug。安装任意通道版本时 Rust 端自动先卸载对侧通道（全局单版本）。
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,6 +59,17 @@ export default function VersionPanel() {
   const [refreshing, setRefreshing] = useState(false);
   // 安装进度（当前安装任务）
   const [progress, setProgress] = useState<InstallProgress | null>(null);
+  // 进度条延迟清理定时器句柄（v0.4.13，审计修复 L1：卸载时清理，避免卸载后 setState）
+  const clearTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (clearTimerRef.current !== null) {
+        window.clearTimeout(clearTimerRef.current);
+        clearTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // 最新版本置顶（npm 原始顺序是旧→新，需反转；GitHub 已是降序但统一处理）
   const sortedNpm = useMemo(
@@ -188,8 +199,12 @@ export default function VersionPanel() {
       toast.error(`安装失败: ${e}`);
     } finally {
       setBusy(false);
-      // 完成后延迟清除进度条（让用户看到 100%）
-      setTimeout(() => setProgress((p) => (p?.phase === "done" ? null : p)), 2500);
+      // 完成后延迟清除进度条（让用户看到 100%）——句柄登记，卸载时清理（审计修复 L1）
+      if (clearTimerRef.current !== null) window.clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = window.setTimeout(
+        () => setProgress((p) => (p?.phase === "done" ? null : p)),
+        2500,
+      );
     }
   }
 

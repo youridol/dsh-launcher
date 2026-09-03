@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.13] - 2026-09-04
+
+### 变更
+
+- **全链路审计修复（依据 AUDIT_REPORT §2–§5）**：
+  - **进程安全**：收养/停止/端口清剿前校验监听进程确为 dsh（命令行特征），不再强杀占用同端口的无关进程。
+  - **假功能修复**：npm registry 镜像真正生效（npm view / npm install -g / pnpm install 注入 --registry）；GitHub tag 列表改 semver 数值排序（0.9<0.10、rc.9<rc.10）；工具链检测产出 `mismatch`（Node 22.19+/24+、Git 2.26+、Python 3.10+ 门槛比较）。
+  - **凭据安全**：GitHub Token 落盘 DPAPI 加密（Windows）、不再回传前端明文、git 认证改环境变量注入（不进命令行）；dsh web token 不再明文进日志/日志流（日志打码 + 独立缓存文件）。
+  - **可靠性**：子进程/网络操作全部加超时与强杀（查询/下载/安装/UAC 分档 60s~20min，流式命令 30min 看门狗）；配置读写加互斥与原子写；Logger/托盘构建失败降级不再 panic；新增后端每 5s 状态对账（收养实例退出收敛/外部启动自动接管）；monitor 收尾按 pid 归属复位，防覆盖重启新实例。
+  - **前端**：面板宽度与对侧开关联动重算（reclamp 接线）；日志流增量格式化消除 O(n²)；贴顶滚动不再打断阅读；进度清理定时器登记、打开流程取消令牌下渗；版本平局比较按 semver 数值化（rc.9<rc.10）；开关/token 表单陈旧闭包与明文回显修正。
+  - **构建/CI/发布**：`tsc -p tsconfig.node.json --noEmit` 纳入（vite.config.ts 首获类型检查，补 @types/node）；cargo check --all-targets；补离线集成测试，网络测试 `#[ignore]`；release 流程 bump 后显式打 tag、决策前同步远端 master、skip-release 不再自动递增；构建期依赖归入 devDependencies；清理死代码/重复实现与注释/文档漂移（AGENTS.md 悬空引用等）。
+  - 验证：tsc / vite build / cargo check --all-targets（0 警告）/ cargo test --lib 35 通过 / 6 个离线集成测试通过。
+
 ## [0.4.12] - 2026-09-03
 
 ### 变更

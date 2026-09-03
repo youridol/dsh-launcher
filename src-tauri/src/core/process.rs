@@ -86,7 +86,23 @@ impl ProcessManager {
 
     /// 启动时收养已在运行的 dsh（v0.3.5：退出驻留后重开启动器，
     /// 探测到端口监听则恢复 Running 状态，使停止/重启可用）
-    pub fn adopt_running(&self, port: u16) {
+    ///
+    /// v0.4.13（审计修复 2.2）：收养前必须先做进程身份校验 —— 端口被**非 dsh**
+    /// 进程（数据库/代理等）占用时不得标记为 Running（否则"停止"会误杀该进程）。
+    /// 仅当监听者命令行形如 dsh 时才收养；否则返回 false 由调用方提示端口冲突。
+    pub fn adopt_running(&self, port: u16) -> bool {
+        // 端口上当前监听 PID 是否形如 dsh（读不到/不匹配一律拒绝收养，宁可保守）
+        if !port_listener_looks_like_dsh(port) {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Warn,
+                &format!(
+                    "端口 {port} 被占用，但监听进程不是 dsh（已跳过收养）。\
+                     若该进程确为外部手动启动的 dsh 且识别失败，请使用启动按钮重新拉起",
+                ),
+            );
+            return false;
+        }
         let mut st = self.status.lock().unwrap();
         *st = DshStatus::Running;
         drop(st);
@@ -101,6 +117,7 @@ impl ProcessManager {
             LogLevel::Info,
             &format!("检测到 dsh 已在运行（端口 {port}），恢复运行状态"),
         );
+        true
     }
 
     /// 按端口查找监听进程 PID（Windows Get-NetTCPConnection）
@@ -110,7 +127,8 @@ impl ProcessManager {
         );
         let mut c = crate::core::command::hidden("powershell");
         c.args(["-NoProfile", "-Command", &ps]);
-        let out = c.output().ok()?;
+        // v0.4.13（审计修复 2.8）：加 15s 兜底（CIM 首次调用偶发慢）
+        let out = crate::core::command::run_with_timeout(c, Duration::from_secs(15)).ok()?;
         if !out.status.success() {
             return None;
         }
@@ -240,29 +258,17 @@ impl ProcessManager {
             .stdin(Stdio::null());
 
         // 注入工具链 PATH（DESIGN §4.3）：若系统 PATH 无 node 但启动器已装用户级 Node，
-        // 前缀注入 node_dir（含 npm/pnpm），否则依赖 node 的 dsh/pnpm 子进程无法启动
+        // 前缀注入 node_dir（含 npm/pnpm），否则依赖 node 的 dsh/pnpm 子进程无法启动。
+        // v0.4.13（审计修复 2.13）：与 core/pathutil.rs 唯一实现对齐（此前此处重复内联一份）。
         #[cfg(windows)]
         {
-            let mut probe = command::hidden("where");
-            probe.arg("node");
-            let node_in_path = probe
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !node_in_path {
-                let node_dir = crate::core::toolchain::node_dir();
-                if node_dir.join("node.exe").exists() {
-                    let current = std::env::var("PATH").unwrap_or_default();
-                    let node_path = node_dir.to_string_lossy().to_string();
-                    if !current.contains(&node_path) {
-                        cmd.env("PATH", format!("{node_path};{current}"));
-                        self.logger.log(
-                            LogSource::Launcher,
-                            LogLevel::Info,
-                            &format!("已注入用户级 Node 到子进程 PATH: {node_path}"),
-                        );
-                    }
-                }
+            if let Some(node_path) = crate::core::pathutil::node_dir_injection() {
+                crate::core::pathutil::inject_node_path_into(&mut cmd);
+                self.logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Info,
+                    &format!("已注入用户级 Node 到子进程 PATH: {node_path}"),
+                );
             }
         }
 
@@ -320,16 +326,28 @@ impl ProcessManager {
 
         // 用记录的 PID（v0.2.5：child 句柄被监视线程 take 走，stop 依赖 pid 字段）；
         // v0.3.5：pid 为 0 但端口在监听（收养的外部 dsh）→ 按端口查 PID
+        // v0.4.13（审计修复 2.2）：按端口反查的 PID 必须先做 dsh 身份校验，
+        // 防止 taskkill 误杀占用同一端口的无关进程。
         let mut pid = *self.pid.lock().unwrap();
         if pid == 0 {
             let port = *self.port.lock().unwrap();
             if port != 0 && port::is_port_in_use(port) {
-                pid = Self::pid_by_port(port).unwrap_or(0);
-                if pid != 0 {
+                let candidate = Self::pid_by_port(port).unwrap_or(0);
+                if candidate != 0 && process_looks_like_dsh(candidate) {
+                    pid = candidate;
                     self.logger.log(
                         LogSource::Launcher,
                         LogLevel::Info,
                         &format!("按端口 {port} 找到 dsh 进程 pid={pid}"),
+                    );
+                } else if candidate != 0 {
+                    // 监听者不是 dsh（疑似其他服务占用端口）：不停止该进程
+                    self.logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Warn,
+                        &format!(
+                            "端口 {port} 的监听进程 pid={candidate} 不是 dsh，已放弃停止（避免误杀无关进程）"
+                        ),
                     );
                 }
             }
@@ -384,6 +402,8 @@ impl ProcessManager {
 
         // v0.4.2：端口级兑底清剿 —— taskkill /T 对 pnpm 深嵌套进程树可能杀不净
         // （远程实测残留 dsh web node 孤儿进程继续占端口，持有旧 token → 401）。
+        // v0.4.13（审计修复 2.2）：清剿前逐一校验残留监听进程**形如 dsh**，
+        // 非 dsh 监听者（其他服务占端口）一律不强杀，避免误杀无关进程。
         // 若端口仍监听，按端口查实际监听 PID 逐个强杀，直到端口释放（最多 5 轮）。
         let port_now = *self.port.lock().unwrap();
         if port_now != 0 && port::is_port_in_use(port_now) {
@@ -392,16 +412,26 @@ impl ProcessManager {
                 LogLevel::Warn,
                 &format!("停止后端口 {port_now} 仍被占用（taskkill 树杀不净），按端口清剿残留进程…"),
             );
-            for round in 1..=5 {
+            for _round in 1..=5u32 {
                 let Some(listener) = Self::pid_by_port(port_now) else {
                     break;
                 };
-                // 避免误杀刚重启的新实例：仅当监听者不是当前托管的 pid 链时强杀
-                let _ = round;
+                // 身份校验：残留监听进程必须形如 dsh 才强杀（防误杀第三方进程）
+                if !process_looks_like_dsh(listener) {
+                    self.logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Warn,
+                        &format!(
+                            "端口 {port_now} 残留监听进程 pid={listener} 不是 dsh（疑似其他服务占用），\
+                             已停止清剿避免误杀，请确认该进程归属后手动处理"
+                        ),
+                    );
+                    break;
+                }
                 self.logger.log(
                     LogSource::Launcher,
                     LogLevel::Warn,
-                    &format!("端口 {port_now} 残留监听进程 pid={listener}，强制终止…"),
+                    &format!("端口 {port_now} 残留 dsh 监听进程 pid={listener}，强制终止…"),
                 );
                 let mut c = command::hidden("taskkill");
                 c.args(["/PID", &listener.to_string(), "/T", "/F"])
@@ -450,6 +480,8 @@ impl ProcessManager {
         *self.pid.lock().unwrap() = 0;
         *self.port.lock().unwrap() = 0;
         *self.web_url.lock().unwrap() = String::new();
+        // 审计修复 2.5：停止 dsh 后清除 URL 缓存（避免重启后误用旧 token）
+        crate::core::logging::clear_latest_web_url();
         self.stopping.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -648,22 +680,166 @@ impl ProcessManager {
                 LogLevel::Info,
                 &format!("dsh 进程 (pid={pid}) 已退出: {wait_res:?}"),
             );
-            // 更新状态（若 stop() 已置 Stopping，这里不覆盖）
-            let mut s = status_arc.lock().unwrap();
-            if *s != DshStatus::Stopping {
-                *s = DshStatus::Stopped;
+            // v0.4.13（审计修复 2.11）：仅在“当前托管 pid 仍是本进程”时才复位共享
+            // 状态并清 URL 缓存 —— 避免旧监视线程收尾时覆盖“停止后立刻重启”的新实例
+            // 状态/端口/URL（restart 场景的竞态）。
+            let still_owner = *self_pid.lock().unwrap() == pid;
+            if still_owner {
+                // 更新状态（若 stop() 已置 Stopping，这里不覆盖）
+                let mut s = status_arc.lock().unwrap();
+                if *s != DshStatus::Stopping {
+                    *s = DshStatus::Stopped;
+                }
+                drop(s);
+                *self_pid.lock().unwrap() = 0;
+                *port_arc.lock().unwrap() = 0;
+                *cleanup_url.lock().unwrap() = String::new();
+                // 审计修复 2.5：进程退出（非停止路径）时同步清除 URL 缓存，
+                // 防止陈旧 token 被后续启动/收养复用。
+                crate::core::logging::clear_latest_web_url();
             }
-            drop(s);
-            let mut p = port_arc.lock().unwrap();
-            *p = 0;
-            let mut pid_slot = self_pid.lock().unwrap();
-            if *pid_slot == pid {
-                *pid_slot = 0;
-            }
-            let mut url_slot = cleanup_url.lock().unwrap();
-            *url_slot = String::new();
         });
     }
+
+    /// 后台状态对账线程（v0.4.13，审计修复 2.11）。
+    /// 每 5 秒兜底探活一次，覆盖三类此前无法收敛的场景：
+    /// 1. 收养的外部 dsh 被外部终止 → Running 复位为 Stopped；
+    /// 2. 收养实例端口被其他程序抢占 → 不再接管该端口（防误杀，见 2.2）；
+    /// 3. 外部手动启动 dsh（Stopped + 端口出现 dsh 监听）→ 自动收养。
+    pub fn spawn_reconcile(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(5));
+            me.reconcile_once();
+        });
+    }
+
+    /// 单次对账（见 spawn_reconcile）
+    fn reconcile_once(&self) {
+        // 停止/切换中不介入（避免与 stop/start 竞态）
+        if self.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        let (st, pid, port, cfg_port) = {
+            let st = *self.status.lock().unwrap();
+            let pid = *self.pid.lock().unwrap();
+            let port = *self.port.lock().unwrap();
+            let cfg_port = crate::core::config::AppConfig::load().port;
+            (st, pid, port, cfg_port)
+        };
+        match st {
+            // 收养实例（pid==0）：端口探活对账
+            DshStatus::Running if pid == 0 && port != 0 => {
+                if !port::is_port_in_use(port) {
+                    self.logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Info,
+                        &format!("端口探活：外部 dsh（端口 {port}）已退出，状态复位为未运行"),
+                    );
+                    *self.status.lock().unwrap() = DshStatus::Stopped;
+                    *self.web_url.lock().unwrap() = String::new();
+                } else if !port_listener_looks_like_dsh(port) {
+                    // 端口监听者已不是 dsh（被其他服务抢占）：解除接管（勿误杀）
+                    self.logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Warn,
+                        &format!(
+                            "端口 {port} 监听进程已不是 dsh，解除运行状态接管（避免停止时误杀无关进程）"
+                        ),
+                    );
+                    *self.status.lock().unwrap() = DshStatus::Stopped;
+                    *self.web_url.lock().unwrap() = String::new();
+                }
+            }
+            // 外部手动启动 dsh：自动收养（内部含身份校验，非 dsh 不收养）
+            DshStatus::Stopped
+                if pid == 0
+                    && cfg_port != 0
+                    && port::is_port_in_use(cfg_port)
+                    && port_listener_looks_like_dsh(cfg_port) =>
+            {
+                self.adopt_running(cfg_port);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 查询进程命令行（Win32_Process.CommandLine；失败/不可读返回 None）
+fn process_command_line(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let ps = format!(
+        "(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" | Select-Object -ExpandProperty CommandLine)"
+    );
+    let mut c = crate::core::command::hidden("powershell");
+    c.args(["-NoProfile", "-Command", &ps]);
+    let out = c.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = crate::core::text::decode(&out.stdout);
+    let t = text.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+/// 进程是否“形如 dsh”（身份校验，防误杀无关进程）。
+/// 读取失败/无法判定一律视为非 dsh（保守：宁可残留也不误杀）。
+fn process_looks_like_dsh(pid: u32) -> bool {
+    process_command_line(pid)
+        .map(|cmd| cmdline_looks_like_dsh(&cmd))
+        .unwrap_or(false)
+}
+
+/// 端口监听进程是否形如 dsh（收养/清剿前校验用）
+fn port_listener_looks_like_dsh(port: u16) -> bool {
+    if port == 0 || !port::is_port_in_use(port) {
+        return false;
+    }
+    let Some(pid) = ProcessManager::pid_by_port(port) else {
+        return false;
+    };
+    process_looks_like_dsh(pid)
+}
+
+/// 纯函数：按命令行文本判定是否形如 dsh web（单元测试直接覆盖）。
+///
+/// 判定依据（小写匹配）：
+/// - 强特征（路径级，命中即真）：`deepseek-harness`、`bin.ts`、`@deepseek-ai`
+///   （覆盖启动器 GitHub 通道直接 node 启动与 npm 全局包两种来源）；
+/// - 弱特征（需同时满足，避免误杀）：命令片段为 dsh/dsh.cmd 且带 `web` 子命令
+///   （外部手动 `dsh web`），或带独立 `web` 参数且含 `--no-open`
+///   （启动器 npm 通道启动参数）。均按整词匹配，`webpack`/`--web` 不命中。
+fn cmdline_looks_like_dsh(cmdline: &str) -> bool {
+    let c = cmdline.to_lowercase();
+    if c.trim().is_empty() {
+        return false;
+    }
+    // 强特征：路径/包名级命中即可确认
+    const STRONG: [&str; 3] = ["deepseek-harness", "bin.ts", "@deepseek-ai"];
+    if STRONG.iter().any(|m| c.contains(m)) {
+        return true;
+    }
+    let tokens: Vec<&str> = c
+        .split_whitespace()
+        .map(|t| t.trim_matches('"'))
+        .collect();
+    let has_dsh_cmd = tokens.iter().any(|t| {
+        *t == "dsh" || *t == "dsh.cmd" || t.ends_with("\\dsh") || t.ends_with("\\dsh.cmd")
+    });
+    let has_web_token = tokens.iter().any(|t| *t == "web");
+    if has_dsh_cmd && has_web_token {
+        return true;
+    }
+    if has_web_token && c.contains("--no-open") {
+        return true;
+    }
+    false
 }
 
 /// dsh web 输出落盘文件路径（v0.4.5，stdout/stderr 分文件）
@@ -689,9 +865,34 @@ fn open_redirect_file(path: &std::path::Path) -> std::io::Result<std::fs::File> 
         .open(path)
 }
 
+/// 处理一行 dsh 输出：
+/// - stdout 行捕获 token URL → 内存 web_url + 独立缓存文件（不清文进日志）；
+/// - 落日志前对 token 打码（审计修复 2.5：令牌不再明文写入日志/推送前端）。
+fn process_dsh_output_line(
+    line: &str,
+    level: LogLevel,
+    logger: &Arc<Logger>,
+    url_slot: Option<&Arc<Mutex<String>>>,
+) {
+    if level == LogLevel::Info {
+        if let Some(url) = extract_web_url(line) {
+            if let Some(slot) = url_slot {
+                if let Ok(mut u) = slot.lock() {
+                    *u = url.clone();
+                }
+            }
+            // 独立缓存文件（仅本机用户可读），供重启后免认证恢复
+            crate::core::logging::save_latest_web_url(&url);
+        }
+    }
+    // 落盘 + 前端推送一律使用打码后的行（token 值不泄漏进日志/日志流）
+    let safe = crate::core::logging::redact_web_token(line);
+    logger.log(LogSource::Dsh, level, &safe);
+}
+
 /// 轮询读取 dsh 输出落盘文件的新增内容（tail），逐行：
 /// - 落日志（stdout=Info / stderr=Warn，与旧管道实现一致）
-/// - stdout 行做 token URL 捕获（内存 web_url）
+/// - stdout 行做 token URL 捕获（内存 web_url + 独立缓存文件）
 /// 150ms 轮询间隔足够实时（node 对普通文件的写入即写即落盘）。
 fn tail_output_file(
     path: &std::path::Path,
@@ -721,18 +922,12 @@ fn tail_output_file(
                             // v0.4.0：统一解码（UTF-8 优先 + 代码页回退），修复 GBK 乱码
                             let raw = crate::core::text::decode(&buf);
                             buf.clear();
-                            let line = raw.trim_end_matches('\r').to_string();
-                            // 捕获 dsh web 完整 URL（含 token），供内嵌/外部打开免认证
-                            if level == LogLevel::Info {
-                                if let Some(url) = extract_web_url(&line) {
-                                    if let Some(slot) = url_slot.as_ref() {
-                                        if let Ok(mut u) = slot.lock() {
-                                            *u = url;
-                                        }
-                                    }
-                                }
-                            }
-                            logger.log(LogSource::Dsh, level, &line);
+                            process_dsh_output_line(
+                                raw.trim_end_matches('\r'),
+                                level,
+                                &logger,
+                                url_slot.as_ref(),
+                            );
                         }
                     } else {
                         buf.push(b);
@@ -750,16 +945,7 @@ fn tail_output_file(
         let raw = crate::core::text::decode(&buf);
         let line = raw.trim_end_matches('\r').to_string();
         if !line.is_empty() {
-            if level == LogLevel::Info {
-                if let Some(url) = extract_web_url(&line) {
-                    if let Some(slot) = url_slot.as_ref() {
-                        if let Ok(mut u) = slot.lock() {
-                            *u = url;
-                        }
-                    }
-                }
-            }
-            logger.log(LogSource::Dsh, level, &line);
+            process_dsh_output_line(&line, level, &logger, url_slot.as_ref());
         }
     }
 }
@@ -850,8 +1036,46 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::cmdline_looks_like_dsh;
     use super::decode_console_text;
     use super::extract_web_url;
+
+    #[test]
+    fn test_cmdline_looks_like_dsh_positive() {
+        // 启动器直接 node 启动（GitHub 通道）：含 bin.ts / 安装目录 / --no-open
+        assert!(cmdline_looks_like_dsh(
+            r#""C:\Users\x\AppData\Local\dsh-launcher\toolchain\node\node.exe" --import tsx/esm apps/cli/src/bin.ts web --port 3080 --no-open"#,
+        ));
+        assert!(cmdline_looks_like_dsh(
+            r#""C:\Program Files\nodejs\node.exe" "C:\Users\x\AppData\Local\dsh-launcher\github-dsh\deepseek-harness\apps\cli\src\bin.ts" web --port 3080 --no-open"#,
+        ));
+        // npm 全局包：@deepseek-ai 路径特征
+        assert!(cmdline_looks_like_dsh(
+            r#""C:\node\node.exe" "C:\Users\x\AppData\Local\node\node_modules\@deepseek-ai\dsh\bin\dsh.mjs" web --port 3080 --no-open"#,
+        ));
+        // 外部手动 dsh web（cmd 包装行）
+        assert!(cmdline_looks_like_dsh(
+            r#"cmd.exe /D /C dsh web --port 3080"#,
+        ));
+        assert!(cmdline_looks_like_dsh(
+            r#""C:\node\dsh.cmd" web --port 3080"#,
+        ));
+    }
+
+    #[test]
+    fn test_cmdline_looks_like_dsh_negative() {
+        // 无关进程绝不误判
+        assert!(!cmdline_looks_like_dsh(""));
+        assert!(!cmdline_looks_like_dsh(r#""C:\Windows\System32\sqlservr.exe" -sMSSQLSERVER"#));
+        assert!(!cmdline_looks_like_dsh(r#""C:\Python39\python.exe" -m http.server 3080"#));
+        assert!(!cmdline_looks_like_dsh(r#""C:\Program Files\nodejs\node.exe" C:\server\app.js --port 3080"#));
+        // 弱特征需同时满足"dsh 命令 + web 整词"
+        assert!(!cmdline_looks_like_dsh(r#"cmd.exe /D /C where dsh"#));
+        assert!(!cmdline_looks_like_dsh(r#"node.exe C:\node_modules\webpack\bin\webpack.js build --no-open"#));
+        assert!(!cmdline_looks_like_dsh(r#"node.exe C:\node_modules\webpack\bin\webpack.js web build"#));
+        // node 输出过 dsh 字样但非 dsh 命令（如日志查看）不应误判
+        assert!(!cmdline_looks_like_dsh(r#"powershell.exe Get-Content dsh.log"#));
+    }
 
     #[test]
     fn test_decode_console_text_gbk() {

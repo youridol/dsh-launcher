@@ -15,6 +15,7 @@ fn npm_cmd() -> Command {
 }
 
 #[test]
+#[ignore = "需要网络（npm registry）"]
 fn test_npm_list_versions_full() {
     // 复刻 commands/version.rs list_npm_versions 逻辑
     let mut c = npm_cmd();
@@ -29,6 +30,7 @@ fn test_npm_list_versions_full() {
 }
 
 #[test]
+#[ignore = "需要网络（npm registry）"]
 fn test_npm_install_dry() {
     // 验证 npm install 命令能正确执行（用 --dry-run 避免真装）
     let mut c = npm_cmd();

@@ -2,6 +2,7 @@
 use dsh_launcher_lib::core::github;
 
 #[test]
+#[ignore = "需要网络（git ls-remote github.com）"]
 fn test_github_tag_passthrough() {
     // 模拟前端传入的版本（来自 list_releases 的 tag_name）
     let version = "dsh-v0.1.2-alpha.1";
@@ -29,6 +30,7 @@ fn test_github_tag_passthrough() {
 }
 
 #[test]
+#[ignore = "仅本地校验目录结构（无网络要求但非关键路径）"]
 fn test_list_releases_format() {
     // list_releases 返回 tag_name（dsh- 前缀），install_version 应原样消费
     // 这里验证 github_dsh_dir 路径构造不含多余前缀

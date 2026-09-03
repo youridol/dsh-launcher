@@ -120,6 +120,20 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
     widthRef: rightPanelWidthRef,
   });
 
+  // M1（审计修复 2.13/front M1）：面板宽度与对侧 open 状态联动 ——
+  // 侧栏/右栏切换展开收起后，重新 clamp 对侧已持久化宽度，
+  // 防止主内容被压破设计最小宽度（此前 reclampWidth 无任何调用方）。
+  // 注：effect 闭包每次随右栏/侧栏状态渲染重建，天然持有最新 resizer 实例。
+  useEffect(() => {
+    sidebarResizer.reclampWidth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rightOpen]);
+
+  useEffect(() => {
+    rightResizer.reclampWidth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarOpen]);
+
   // 进入移动端自动收起侧栏（drawer 默认收起）
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);

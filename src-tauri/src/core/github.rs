@@ -63,18 +63,20 @@ fn resolve_git_exe() -> Option<std::path::PathBuf> {
     None
 }
 
-/// 若配置了 GitHub Token，返回注入 git 的 `-c http.extraheader=AUTHORIZATION: bearer <token>`
-/// 参数（避免 token 出现在 URL / 日志中）；未配置返回空 vec。
-fn git_auth_args() -> Vec<String> {
+/// 若配置了 GitHub Token，通过**环境变量**注入 git 认证
+/// （`GIT_CONFIG_COUNT/GIT_CONFIG_KEY_0/GIT_CONFIG_VALUE_0`），避免 PAT 出现在
+/// 子进程命令行/日志（审计修复 2.4）。未配置则无操作。
+/// 注：该注入方式要求 git ≥ 2.31（2021-03 发布）；更低版本 git 会忽略这些
+/// 环境变量、退化为匿名访问（不影响公开仓库）。
+fn apply_git_auth(cmd: &mut std::process::Command) {
     let cfg = AppConfig::load();
     let token = cfg.github_token.trim();
     if token.is_empty() {
-        return Vec::new();
+        return;
     }
-    vec![
-        "-c".to_string(),
-        format!("http.extraheader=AUTHORIZATION: bearer {token}"),
-    ]
+    cmd.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.extraheader")
+        .env("GIT_CONFIG_VALUE_0", format!("AUTHORIZATION: bearer {token}"));
 }
 
 /// GitHub 通道源码目录根：%LOCALAPPDATA%\dsh-launcher\github-dsh
@@ -104,12 +106,10 @@ pub fn github_installed() -> bool {
 
 /// 查询 GitHub 可用版本（tags）
 ///
-/// v0.2.1 修复：改用 `git ls-remote --tags` 作为主路径。
-/// - 原 API 路径（curl api.github.com）未认证限流 60 次/小时，403 时整个列表不可用
-///   （表现为 "curl: (22) ... 403" / "GitHub API 返回非数组"）；
-///   git 走 HTTPS 协议不受 API 限流影响，1~2 秒即可返回全部 tag。
+/// 主路径：`git ls-remote --tags`（HTTPS 协议不受 GitHub API 60 次/小时未认证限流影响）。
 /// - 附带收益：API /releases 只含 release，ls-remote 能拿到全部 tag（含 rc），列表更全。
-/// - 配置了镜像源时仍走 curl（镜像代理 API 或 git 均可），失败时给出明确原因。
+/// - 镜像源通过仓库 URL 前缀生效（git 协议路径）；失败时返回带原因的 Err。
+/// （历史曾计划 curl API 兜底路径，已废弃——2026 审计修正注释与实现一致。）
 pub fn list_releases() -> Result<Vec<String>, String> {
     let cfg = AppConfig::load();
     let repo_url = if cfg.github_mirror.is_empty() {
@@ -119,13 +119,12 @@ pub fn list_releases() -> Result<Vec<String>, String> {
     };
 
     // 主路径：git ls-remote --tags（不受 GitHub API 限流影响）
-    // 配置了 Token 时注入认证头（防限流 / 私有仓库）
+    // 配置了 Token 时通过环境变量注入认证头（防限流 / 私有仓库，见 apply_git_auth）
     let mut cmd = git_command()?;
-    let auth = git_auth_args();
-    cmd.args(&auth);
+    apply_git_auth(&mut cmd);
     cmd.args(["ls-remote", "--tags", &repo_url]);
-    let out = cmd
-        .output()
+    // v0.4.13（审计修复 2.8）：网络查询加超时（此前无任何超时，网络黑洞会永久挂起）
+    let out = command::run_with_timeout(cmd, std::time::Duration::from_secs(90))
         .map_err(|e| format!("git ls-remote 执行失败: {e}"))?;
     if out.status.success() {
         let text = crate::core::text::decode(&out.stdout);
@@ -168,9 +167,97 @@ fn parse_tags_from_ls_remote(text: &str) -> Vec<String> {
     // 去重（ peeled ^{} 与轻量 tag 指向同 sha 时 git 会输出两条）
     tags.sort();
     tags.dedup();
-    // 按 tag 名降序（最新在前）；alpha/rc 版本自然排序即可
-    tags.sort_by(|a, b| b.cmp(a));
+    // v0.4.13（审计修复 2.3）：此前用字典序 b.cmp(a) 排序，跨 10 位版本/预发布
+    // 多位数时排序错误（0.9 > 0.10、rc.9 > rc.10）。改为 semver 数值比较降序。
+    tags.sort_by(|a, b| cmp_semver_desc(a, b));
     tags
+}
+
+/// 预发布标识符：数字段或字符串段（semver 规则：数字 < 字母）
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreId {
+    Num(u64),
+    Str(String),
+}
+
+/// 将 tag 解析为 (核心数字段, 预发布标识符)。
+/// 支持 `dsh-v0.1.2-alpha.1` / `v1.2.3` / `1.2.3-beta+build` 等形态；
+/// 无法解析数字的输入按 0 处理（不 panic）。
+fn parse_semver_parts(v: &str) -> (Vec<u64>, Vec<PreId>) {
+    let core = v
+        .strip_prefix("dsh-")
+        .or_else(|| v.strip_prefix("Dsh-"))
+        .or_else(|| v.strip_prefix('v'))
+        .or_else(|| v.strip_prefix('V'))
+        .unwrap_or(v);
+    let (main, pre) = match core.find(['-', '+']) {
+        Some(i) => (&core[..i], Some(&core[i + 1..])),
+        None => (core, None),
+    };
+    let nums: Vec<u64> = main
+        .split('.')
+        .filter_map(|seg| seg.parse::<u64>().ok())
+        .collect();
+    let pre_ids: Vec<PreId> = pre
+        .map(|p| {
+            p.split('.')
+                .map(|seg| match seg.parse::<u64>() {
+                    Ok(n) => PreId::Num(n),
+                    Err(_) => PreId::Str(seg.to_ascii_lowercase()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (nums, pre_ids)
+}
+
+/// semver 降序比较（返回 a 是否应排在 b 之前，即 a 更新则 Less… 见 sort_by 语义）。
+/// sort_by 的比较器：返回 Ordering 表示 a 相对 b 的顺序，降序 = 更新版本排前。
+fn cmp_semver_desc(a: &str, b: &str) -> std::cmp::Ordering {
+    cmp_semver_asc(b, a)
+}
+
+/// semver 升序比较
+fn cmp_semver_asc(a: &str, b: &str) -> std::cmp::Ordering {
+    let (nums_a, pre_a) = parse_semver_parts(a);
+    let (nums_b, pre_b) = parse_semver_parts(b);
+    for i in 0..nums_a.len().max(nums_b.len()) {
+        let na = nums_a.get(i).copied().unwrap_or(0);
+        let nb = nums_b.get(i).copied().unwrap_or(0);
+        match na.cmp(&nb) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    // 核心相同：比较预发布。无预发布（正式版）> 有预发布
+    match (pre_a.is_empty(), pre_b.is_empty()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => cmp_pre_ids(&pre_a, &pre_b),
+    }
+}
+
+/// 预发布标识符列表比较（semver：数字标识符 < 字母标识符；逐段比较；
+/// 前缀相同而一个更长时，更长者更大）
+fn cmp_pre_ids(a: &[PreId], b: &[PreId]) -> std::cmp::Ordering {
+    for i in 0..a.len().max(b.len()) {
+        let (Some(x), Some(y)) = (a.get(i), b.get(i)) else {
+            // 前缀相同：更长的列表更大（如 alpha < alpha.1）
+            return a.len().cmp(&b.len());
+        };
+        let ord = match (x, y) {
+            (PreId::Num(nx), PreId::Num(ny)) => nx.cmp(ny),
+            (PreId::Num(_), PreId::Str(_)) => std::cmp::Ordering::Less, // 数字 < 字母
+            (PreId::Str(_), PreId::Num(_)) => std::cmp::Ordering::Greater,
+            (PreId::Str(sx), PreId::Str(sy)) => sx.cmp(sy),
+        };
+        match ord {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 /// 安装指定版本：clone 源码 + pnpm install + build
@@ -220,8 +307,7 @@ pub fn install_version(
     };
     {
         let mut c = git_command()?;
-        let auth = git_auth_args();
-        c.args(&auth);
+        apply_git_auth(&mut c);
         c.args([
             "clone",
             "--depth",
@@ -257,10 +343,18 @@ pub fn install_version(
             logger.progress("github", InstallPhase::Install, s, "正在安装依赖…");
         })
     };
+    // 审计修复 2.1：npm registry 镜像配置此前对 GitHub 通道 pnpm install 不生效，
+    // 这里显式注入 --registry（pnpm 与 npm 共用同一 registry 配置语义）。
+    let mut pnpm_install_args: Vec<String> = Vec::new();
+    if let Some(reg) = crate::core::config::current_npm_registry() {
+        pnpm_install_args.push("--registry".to_string());
+        pnpm_install_args.push(reg);
+    }
+    pnpm_install_args.push("install".to_string());
     stream::run_cmd_script(
         logger,
         "pnpm",
-        &["install".to_string()],
+        &pnpm_install_args,
         Some(&dest),
         LogLevel::Info,
         Some(cb_install),
@@ -333,42 +427,7 @@ pub fn global_shim_path() -> Option<PathBuf> {
     }
 }
 
-/// PATH 中的 dsh.cmd 是否为**本启动器创建**的 GitHub shim（内容含 github 安装目录 + pnpm dsh）。
-/// 用于启动决策：本启动器 shim 走直接 node 启动（避免 pnpm 嵌套），
-/// npm 全局真 dsh（node_modules 链接）用 dsh web 启动。探测 PATH 首个 dsh.cmd 内容。
-///
-/// v0.4.3 修复：探测必须与真实 dsh spawn（command::hidden_cmd）使用**同一 PATH**。
-/// hidden_cmd 在系统 PATH 无 node 时会把用户级 node_dir（npm/pnpm/dsh 所在目录，
-/// 分发机器上 npm 全局 prefix 即 node_dir）前缀注入子进程 PATH；此前这里用
-/// command::hidden("where")（不注入）探测 → 分发机器启动器进程的 PATH 快照不含 node_dir
-/// → 本启动器刚创建的 dsh.cmd shim 探测不到 → process.rs 误判为 npm 全局包 → 用裸 dsh
-/// （不带 profile）启动 → dsh CLI 报 "--profile <name> is required" 后退出。
-pub fn global_shim_is_ours() -> bool {
-    // PATH 中首个 dsh.cmd 的完整路径（用 where 探测；hidden_cmd 注入与 dsh spawn 相同的 PATH）
-    let mut probe = command::hidden_cmd("where");
-    probe.arg("dsh.cmd");
-    let Ok(out) = probe.output() else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
-    }
-    let text = crate::core::text::decode(&out.stdout);
-    let Some(first) = text.lines().next() else {
-        return false;
-    };
-    shim_path_is_ours(&PathBuf::from(first.trim()))
-}
-
-/// dsh.cmd 是否为本启动器 GitHub shim（按文件内容识别）
-fn shim_path_is_ours(p: &std::path::Path) -> bool {
-    match fs::read_to_string(p) {
-        Ok(content) => shim_content_is_ours(&content),
-        Err(_) => false,
-    }
-}
-
-/// PATH 中 dsh 命令的可安全执行性判定结果
+/// PATH 中的 dsh 命令的可安全执行性判定结果
 ///
 /// 背景（v0.4.6 修复进程爆炸）：dsh.cmd shim 内容是
 /// `cd /d <github 安装目录> && pnpm dsh %*`。当该安装目录被卸载/清空（残留空目录）时，
@@ -392,8 +451,6 @@ pub enum DshProbe {
 /// 探测 PATH 中 dsh 命令类型（不执行 dsh，仅静态解析 dsh.cmd 内容 + 目录存在性）。
 /// 必须在任何 `dsh --version` / `dsh web` 之前调用：
 /// 若返回 OwnedShimBroken，继续执行 dsh 会触发 pnpm 递归进程爆炸（见 DshProbe 注释）。
-///
-/// 与 global_shim_is_ours 同款 PATH 探测方式（command::hidden_cmd 注入 node_dir）。
 pub fn probe_dsh_command() -> DshProbe {
     let mut probe = command::hidden_cmd("where");
     probe.arg("dsh.cmd");
@@ -536,6 +593,30 @@ b150a551b8d465e31e418e1b2eaf5e79bbb7d28e	refs/tags/dsh-v0.1.1-rc.2
         assert!(parse_tags_from_ls_remote("").is_empty());
         // 无 tags 前缀的行忽略
         assert!(parse_tags_from_ls_remote("abc123	HEAD\n").is_empty());
+    }
+
+    #[test]
+    fn test_tag_sort_semver_numeric() {
+        use super::parse_tags_from_ls_remote;
+        // v0.4.13（审计修复 2.3）：跨 10 位与多位数预发布的排序回归
+        let sample = "\
+a\trefs/tags/dsh-v0.1.1-rc.9
+b\trefs/tags/dsh-v0.1.1-rc.10
+c\trefs/tags/dsh-v0.10.0
+d\trefs/tags/dsh-v0.9.0
+e\trefs/tags/dsh-v0.1.2-alpha.1
+f\trefs/tags/dsh-v0.1.1-rc.2
+";
+        let tags = parse_tags_from_ls_remote(sample);
+        let expect = [
+            "dsh-v0.10.0",
+            "dsh-v0.9.0",
+            "dsh-v0.1.2-alpha.1",
+            "dsh-v0.1.1-rc.10",
+            "dsh-v0.1.1-rc.9",
+            "dsh-v0.1.1-rc.2",
+        ];
+        assert_eq!(tags, expect, "semver 降序应正确: {tags:?}");
     }
 
     #[test]

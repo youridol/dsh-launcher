@@ -3,7 +3,8 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
-// @ts-expect-error process is a nodejs global
+// v0.4.13（审计修复 T2）：devDependencies 已含 @types/node，process 有类型，
+// 移除原 @ts-expect-error（此前该文件从不被类型检查，残留两个潜在类型错误）。
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/

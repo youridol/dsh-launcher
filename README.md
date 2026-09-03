@@ -33,7 +33,7 @@ Rust 后端入口在 `src-tauri/src/`（`core/` 核心逻辑 + `commands/` Tauri
 - **CI**（`.github/workflows/ci.yml`）：每次 push / PR 自动执行 tsc 类型检查、前端构建、cargo check、单元与离线集成测试
 - **Release**（`.github/workflows/release.yml`）：每次 push 到 master 自动迭代 PATCH 版本、更新 CHANGELOG、构建 NSIS 安装包并发布 GitHub Release
 
-版本迭代由 `scripts/bump-version.mjs` 同步四文件（package.json / Cargo.toml / tauri.conf.json / package-lock.json），幂等防重复发布。
+版本迭代由 `scripts/bump-version.mjs` 同步五文件（package.json / package-lock.json / Cargo.toml / Cargo.lock / tauri.conf.json，见 ADR-0004），幂等防重复发布。
 
 ## 文档
 
@@ -48,4 +48,3 @@ Tauri 2 · Rust · React 19 · TypeScript · Vite · Tailwind CSS 4 · shadcn/ui
 ## 许可
 
 [MIT](LICENSE) © 2026 dsh-launcher contributors
-- 自动发布：每次提交自动迭代版本并发布 GitHub Release

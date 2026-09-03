@@ -1,6 +1,6 @@
 //! dsh 生命周期 IPC 命令：启动 / 停止 / 重启 / 状态查询 + 内嵌 Web GUI 窗口图标
 //!
-//! 并发策略（AGENTS.md 六、并发）：
+//! 并发策略（设计文档 docs/DESIGN.md §并发）：
 //! - 所有命令 async（不占 Tauri IPC 线程）
 //! - 阻塞操作（spawn/等待进程退出）经 spawn_blocking 跑在独立线程池
 //! - 启动/停止/重启互不阻塞（各自独立任务）

@@ -1,5 +1,5 @@
 // 设置面板：镜像源配置 + 滑动开关 + 版本管理入口
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,7 +47,9 @@ export default function SettingsPanel({
   const [githubMirror, setGithubMirror] = useState("");
   const [nodeMirror, setNodeMirror] = useState("");
   // GitHub Token（防限流）
+  // v0.4.13（审计修复 2.4）：Rust 不再回传明文 token，只回传是否已设置
   const [githubToken, setGithubTokenState] = useState("");
+  const [tokenSet, setTokenSet] = useState(false);
 
   // 滑动开关
   const [switches, setSwitchesState] = useState({
@@ -58,6 +60,9 @@ export default function SettingsPanel({
     autoStartDsh: false,
     autoOpenBrowser: true,
   });
+  // 最新开关快照（供异步提交与失败回滚使用，避免陈旧闭包）
+  const switchesRef = useRef(switches);
+  switchesRef.current = switches;
 
   const refresh = useCallback(async () => {
     try {
@@ -65,7 +70,9 @@ export default function SettingsPanel({
       setNpmRegistry(c.npmRegistry);
       setGithubMirror(c.githubMirror);
       setNodeMirror(c.nodeMirror);
-      setGithubTokenState(c.githubToken);
+      setTokenSet(c.githubTokenSet);
+      // 不回显明文 token：输入框恒为空，placeholder 提示是否已设置
+      setGithubTokenState("");
       setSwitchesState({
         closeExits: c.closeExits,
         minimizeToTray: c.minimizeToTray,
@@ -98,16 +105,25 @@ export default function SettingsPanel({
   }
 
   async function saveToken() {
+    const t = githubToken.trim();
+    if (!t) {
+      // 留空 = 不修改（后端同样语义；避免覆盖已保存 token）
+      toast.info(tokenSet ? "Token 未修改（已保存的保持不变）" : "未输入 Token");
+      return;
+    }
     try {
-      await setGithubToken(githubToken);
-      toast.success("GitHub Token 已保存");
+      await setGithubToken(t);
+      setTokenSet(true);
+      setGithubTokenState("");
+      toast.success("GitHub Token 已保存（仅存本机，不再回显）");
     } catch (e) {
       toast.error(`保存失败: ${e}`);
     }
   }
 
   async function toggleSwitch(key: keyof typeof switches, value: boolean) {
-    const next = { ...switches, [key]: value };
+    // 基于最新快照构造（v0.4.13，审计修复 I11）：避免连续切换时陈旧闭包覆盖
+    const next = { ...switchesRef.current, [key]: value };
     setSwitchesState(next);
     try {
       await setSwitches(next);
@@ -222,11 +238,16 @@ export default function SettingsPanel({
               type="password"
               value={githubToken}
               onChange={(e) => setGithubTokenState(e.target.value)}
-              placeholder="ghp_xxx（Personal Access Token，可选）"
+              placeholder={
+                tokenSet
+                  ? "已保存（输入新值覆盖；留空保持不变）"
+                  : "ghp_xxx（Personal Access Token，可选）"
+              }
               className="text-xs"
             />
             <p className="text-[11px] text-muted-foreground">
               用于 git 认证增强，避免 GitHub API/克隆限流；留空为匿名访问
+              {tokenSet && "（已保存，出于安全不回显）"}
             </p>
             <Button variant="secondary" size="sm" onClick={saveToken}>
               保存 Token

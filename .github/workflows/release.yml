@@ -6,7 +6,9 @@
 #   4. 构建产物由 tauri-action 上传到 GitHub Release
 # 手动触发（workflow_dispatch）：
 #   version-bump: minor/major → 强制按指定类型递增后再构建
-#   skip-release: true        → 只递增版本并提交，不构建
+#   skip-release: true        → 只跳过发布；不再自动递增（避免无 Release 的版本跳跃，见 T7）
+# v0.4.13（审计修复 T5/T6）：bump 提交推送后显式打 tag（指向含对应 CHANGELOG 的提交），
+# 并在决策前同步到最新远端 master（防排队 run 基于旧 SHA 重复发布）。
 
 name: Release
 
@@ -68,6 +70,14 @@ jobs:
           npm run build
           cargo check --manifest-path src-tauri/Cargo.toml
 
+      # 审计修复 T6：排队/延迟触发的 run 可能检出了旧 SHA，
+      # 先同步到最新远端 master（含 tags），避免基于过期状态重复 bump/冲突。
+      - name: 同步到最新远端 master（防排队竞态）
+        shell: bash
+        run: |
+          git fetch origin master --tags
+          git reset --hard origin/master
+
       # 决策：当前版本是否已发布（tag 存在）
       - name: 判断当前版本是否已发布
         id: published
@@ -88,8 +98,11 @@ jobs:
         run: |
           $manual = "${{ inputs.version-bump }}"
           $isPublished = "${{ steps.published.outputs.is-published }}"
+          $skipRelease = "${{ inputs.skip-release }}"
           if ($manual -ne "" -and $manual -ne "none") {
             node scripts/bump-version.mjs --$manual
+          } elseif ($skipRelease -eq "true") {
+            Write-Host "skip-release=true：跳过自动版本递增（避免无 Release 的版本跳跃，T7）"
           } elseif ($isPublished -eq "true") {
             node scripts/bump-version.mjs --patch
           } else {
@@ -178,10 +191,18 @@ jobs:
           git commit -m "v${{ steps.bump.outputs.new }}: 自动版本迭代 [skip ci]" || echo "无版本变更提交"
 
       # 推送 bump 提交回 master：保证远端版本与已发布版本一致（避免下次重复 bump）
-      - name: 推送版本变更回 master
+      # v0.4.13（审计修复 T5）：推送后显式创建并推送 tag，使其指向含对应
+      # CHANGELOG 条目的提交（此前由 tauri-action 建在缺少该条目的检出提交上）。
+      - name: 推送版本变更与 tag 回 master
         shell: bash
         run: |
           git push origin HEAD:master || echo "无变更可推送（远端已是最新）"
+          NEW_TAG="v${{ steps.bump.outputs.new }}"
+          if git tag "$NEW_TAG" HEAD 2>/dev/null; then
+            git push origin "$NEW_TAG" || echo "tag 推送失败（远端已存在则忽略）"
+          else
+            echo "tag $NEW_TAG 已存在，跳过创建"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -211,7 +232,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # 便携包（portable zip）：tauri bundler 不产 zip，这里把 release exe 压 zip 上传，
-      # 与安装包（setup.exe）一并作为发布产物（AGENTS.md：报告安装包 + 便携包）
+      # 与安装包（setup.exe）一并作为发布产物（安装包 + 便携包）。
       # 用 pwsh（默认 shell）：路径天然 Windows 格式，无 bash/路径转换问题
       - name: 打包并上传便携包
         if: ${{ !inputs.skip-release }}

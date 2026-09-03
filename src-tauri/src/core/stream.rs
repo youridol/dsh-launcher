@@ -17,6 +17,14 @@ use std::io::BufReader;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
+
+/// 流式命令总执行时长上限（30 分钟）。
+/// v0.4.13（审计修复 2.7/2.8）：npm/pnpm/git 等安装/构建此前无任何超时，
+/// 网络卡死时前端永久挂起；超时由看门狗强杀进程树。
+const STREAMED_MAX_DURATION: Duration = Duration::from_secs(30 * 60);
+/// 进程退出后等待读线程收尾的宽限（孙进程偶发持有管道时避免永久 join）
+const DRAIN_GRACE: Duration = Duration::from_secs(8);
 
 /// 行回调：安装流程可在此解析输出行（如 git clone 百分比）并推进度事件。
 /// 返回 false 可提前终止读取（一般不用）。
@@ -78,21 +86,74 @@ pub fn run_streamed(
         })
     });
 
-    // 等待子进程结束（不依赖读取线程，避免管道阻塞时 wait 挂起）
-    let status = child.wait().map_err(|e| format!("等待命令退出失败: {e}"))?;
+    // 等待子进程结束（不依赖读取线程，避免管道阻塞时 wait 挂起）；
+    // v0.4.13：看门狗轮询 + 总时长上限，超时强杀进程树（防永久挂起）。
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {}
+            Err(e) => return Err(format!("等待命令退出失败: {e}")),
+        }
+        if Instant::now() - started >= STREAMED_MAX_DURATION {
+            timed_out = true;
+            logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                &format!(
+                    "命令执行超过 {} 分钟，强制终止（pid={}）",
+                    STREAMED_MAX_DURATION.as_secs() / 60,
+                    child.id()
+                ),
+            );
+            command::kill_process_tree(child.id());
+            // 强杀后等待进程真正退出（回收句柄）
+            loop {
+                if child
+                    .try_wait()
+                    .map_err(|e| format!("等待命令退出失败: {e}"))?
+                    .is_some()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            continue;
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
 
-    // 等待两个读取线程收尾
+    // 等待两个读取线程收尾（带宽限，避免孙进程持有管道时永久 join）
     if let Some(t) = t_out {
-        let _ = t.join();
+        join_with_grace(t, "stdout 读取线程");
     }
     if let Some(t) = t_err {
-        let _ = t.join();
+        join_with_grace(t, "stderr 读取线程");
     }
 
+    if timed_out {
+        return Err("命令执行超时已被强制终止（见日志）".to_string());
+    }
     if status.success() {
         Ok(())
     } else {
         Err(format!("命令退出码: {}", status.code().unwrap_or(-1)))
+    }
+}
+
+/// 带宽限的线程 join：正常情况 8s 内未结束则放弃等待（drop 句柄）。
+/// 触发条件极罕见（子进程的孙进程继承了输出管道句柄），放弃等待可避免
+/// 安装/构建流程被一个残留后台进程永久卡住；进程树被杀后管道最终会关闭。
+fn join_with_grace(handle: thread::JoinHandle<()>, what: &str) {
+    let deadline = Instant::now() + DRAIN_GRACE;
+    while !handle.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+    } else {
+        eprintln!("[dsh-launcher] {what} 未在宽限内结束，放弃等待（避免永久挂起）");
     }
 }
 

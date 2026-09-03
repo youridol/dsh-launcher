@@ -1,6 +1,6 @@
 [package]
 name = "dsh-launcher"
-version = "0.4.12"
+version = "0.4.13"
 description = "deepseek-harness 启动器与运行环境管理器"
 authors = ["dsh-launcher"]
 edition = "2021"
@@ -24,8 +24,9 @@ serde_json = "1"
 encoding_rs = "0.8"
 
 [target.'cfg(windows)'.dependencies]
-# Windows 原生 API：设置任务栏大图标（ICON_BIG，RGBA→CreateIcon，修复内嵌窗口任务栏图标模糊）+ 注册表/环境变量/代码页
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Environment", "Win32_Globalization"] }
+# Windows 原生 API：设置任务栏大图标（ICON_BIG，RGBA→CreateIcon，修复内嵌窗口任务栏图标模糊）
+# + 注册表/环境变量/代码页 + DPAPI（GitHub Token 落盘加密，审计修复 2.4）
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Environment", "Win32_Globalization", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "time", "macros"] }

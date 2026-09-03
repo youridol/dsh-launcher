@@ -117,16 +117,16 @@ pub fn download_with_progress(
         }
     });
 
-    // 3. 执行实际下载（Invoke-WebRequest）
+    // 3. 执行实际下载（Invoke-WebRequest，-TimeoutSec 防单请求卡死；
+    //    外层 run_with_timeout 兜底总时长）
     let ps = format!(
-        "Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
+        "Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing -TimeoutSec 300",
         url.replace('\'', "''"),
         dest.to_string_lossy().replace('\'', "''")
     );
     let mut cmd = command::hidden("powershell");
     cmd.args(["-NoProfile", "-Command", &ps]);
-    let out = cmd
-        .output()
+    let out = command::run_with_timeout(cmd, Duration::from_secs(600))
         .map_err(|e| format!("启动 PowerShell 下载失败: {e}"))?;
     // 下载结束 → 停轮询线程
     stop.store(true, Ordering::SeqCst);
@@ -153,12 +153,13 @@ pub fn download_with_progress(
 /// 失败返回 0（下载进度退化为不定量消息）。
 fn fetch_content_length(url: &str) -> u64 {
     let ps = format!(
-        "try {{ (Invoke-WebRequest -Uri '{}' -Method Head -UseBasicParsing).Headers['Content-Length'] }} catch {{ '' }}",
+        "try {{ (Invoke-WebRequest -Uri '{}' -Method Head -UseBasicParsing -TimeoutSec 60).Headers['Content-Length'] }} catch {{ '' }}",
         url.replace('\'', "''")
     );
     let mut cmd = command::hidden("powershell");
     cmd.args(["-NoProfile", "-Command", &ps]);
-    if let Ok(out) = cmd.output() {
+    // v0.4.13（审计修复 2.8）：网络请求加超时（此前无任何超时）
+    if let Ok(out) = command::run_with_timeout(cmd, std::time::Duration::from_secs(90)) {
         if out.status.success() {
             let text = crate::core::text::decode(&out.stdout);
             if let Ok(n) = text.trim().parse::<u64>() {
@@ -189,8 +190,8 @@ fn unzip(logger: &Arc<Logger>, zip: &Path, dest: &Path) -> Result<(), String> {
     );
     let mut cmd = command::hidden("powershell");
     cmd.args(["-NoProfile", "-Command", &ps]);
-    let out = cmd
-        .output()
+    // v0.4.13（审计修复 2.8）：解压为本地操作，仍加 3 分钟兜底
+    let out = command::run_with_timeout(cmd, std::time::Duration::from_secs(180))
         .map_err(|e| format!("启动 PowerShell 解压失败: {e}"))?;
     if !out.status.success() {
         return Err(format!(
@@ -389,8 +390,9 @@ fn read_reg_string(hkey: windows::Win32::System::Registry::HKEY, value_name: &st
 }
 
 /// 下载 Node zip 并解压到 node_dir（用户级，免管理员）
-/// v0.4.0：安装成功后把 node_dir 写入**用户 PATH**（HKCU），
-/// 并回写 npm/pnpm 全局 prefix 到 node_dir —— 修复分发机器"npm/pnpm 找不到 / 装到别处"。
+/// v0.4.0：安装成功后把 node_dir 写入**用户 PATH**（HKCU）——
+/// npm/pnpm 随 Node zip 自带于同一 node_dir（npm i -g 也装入该目录），
+/// 写入 PATH 即可让分发机器"npm/pnpm/dsh 找到且装到本启动器管理的目录"。
 pub fn install_node(logger: &Arc<Logger>) -> Result<String, String> {
     let cfg = AppConfig::load();
     // Node 官方 zip 地址；镜像源可通过配置覆盖
@@ -551,8 +553,8 @@ pub fn uninstall_git(logger: &Arc<Logger>) -> Result<String, String> {
             );
             let mut c = command::hidden("powershell");
             c.args(["-NoProfile", "-Command", &ps]);
-            let out = c
-                .output()
+            // v0.4.13（审计修复 2.8）：UAC 卸载器 -Wait 场景给 20 分钟兜底
+            let out = command::run_with_timeout(c, std::time::Duration::from_secs(1200))
                 .map_err(|e| format!("启动 Git 卸载失败: {e}"))?;
             if !out.status.success() {
                 return Err(format!(
@@ -601,8 +603,8 @@ pub fn uninstall_python(logger: &Arc<Logger>) -> Result<String, String> {
             };
             let mut c = command::hidden("powershell");
             c.args(["-NoProfile", "-Command", &ps]);
-            let out = c
-                .output()
+            // v0.4.13（审计修复 2.8）：UAC 卸载器 -Wait 场景给 20 分钟兜底
+            let out = command::run_with_timeout(c, std::time::Duration::from_secs(1200))
                 .map_err(|e| format!("启动 Python 卸载失败: {e}"))?;
             if !out.status.success() {
                 return Err(format!(
@@ -675,8 +677,8 @@ pub fn install_python(logger: &Arc<Logger>) -> Result<String, String> {
         }
     });
 
-    let out = c
-        .output()
+    // v0.4.13（审计修复 2.8）：安装器 -Wait 给 20 分钟兜底（UAC 无响应/安装器卡死）
+    let out = command::run_with_timeout(c, std::time::Duration::from_secs(1200))
         .map_err(|e| format!("启动 Python 安装失败: {e}"))?;
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = poller.join();

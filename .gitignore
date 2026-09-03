@@ -26,3 +26,6 @@ dist-ssr
 # dsh-launcher 构建产物
 dist-bundles
 src-tauri/target
+
+# TypeScript build info (tsc -b / project refs)
+*.tsbuildinfo

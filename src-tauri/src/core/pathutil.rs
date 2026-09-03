@@ -401,15 +401,50 @@ pub fn python_install_dirs() -> Vec<PathBuf> {
                 }
             }
         }
-        // 版本降序（最新版本优先探测，与 py launcher 行为一致）
-        dirs.sort_by(|a, b| b.cmp(a));
+        // 版本降序（最新版本优先探测，与 py launcher 行为一致）。
+        // v0.4.13（审计修复 2.12）：此前按路径字符串降序，Python39 会被排到
+        // Python310/313 之前（'9' > '1'）→ 多版本共存时误选旧版。改为数值比较。
+        dirs.sort_by(|a, b| python_dir_ver(b).cmp(&python_dir_ver(a)));
     }
     dirs
+}
+
+/// 从 python 安装目录名解析版本元组（如 Python313 → (3,13)、Python39 → (3,9)）。
+/// 解析失败返回 (0,0,0)（排序时垫底）。
+fn python_dir_ver(p: &PathBuf) -> (u32, u32, u32) {
+    let name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let Some(pos) = name.find("python") else {
+        return (0, 0, 0);
+    };
+    let digits: String = name[pos + "python".len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.len() < 2 {
+        return (0, 0, 0);
+    }
+    let major: u32 = digits[..1].parse().unwrap_or(0);
+    let minor: u32 = digits[1..].parse().unwrap_or(0);
+    (major, minor, 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::path_contains;
+    use super::python_dir_ver;
+
+    #[test]
+    fn test_python_dir_version_sort_key() {
+        // v0.4.13（审计修复 2.12）：数值排序键
+        assert_eq!(python_dir_ver(&std::path::PathBuf::from("C:\\Python313")), (3, 13, 0));
+        assert_eq!(python_dir_ver(&std::path::PathBuf::from("C:\\Python310")), (3, 10, 0));
+        assert_eq!(python_dir_ver(&std::path::PathBuf::from("C:\\Python39")), (3, 9, 0));
+        // 无法解析 → (0,0,0)（垫底）
+        assert_eq!(python_dir_ver(&std::path::PathBuf::from("C:\\whatever")), (0, 0, 0));
+    }
 
     #[test]
     fn test_path_contains() {

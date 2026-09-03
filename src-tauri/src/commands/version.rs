@@ -1,8 +1,8 @@
 //! 版本与通道管理 IPC
 //!
 //! 双通道模型（ADR-0001）：
-//! - npm 通道：registry 现有版本（当前最新 0.1.1-rc.2）
-//! - GitHub 通道：v0.1.2-alpha.1 及更新源码 tag（core/github.rs）
+//! - npm 通道：registry 现有版本（实时查询，见 list_npm_versions）
+//! - GitHub 通道：源码 tag（实时查询，见 core/github.rs）
 //!
 //! 全局单版本（ADR-0003）：切换 = 先卸载再装
 //!
@@ -107,7 +107,9 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
         //    不能直接 spawn（program not found），必须 cmd.exe /C 包装
         let mut c = command::hidden_cmd("dsh");
         c.arg("--version");
-        let out = c.output().map_err(|e| format!("dsh 未安装或不可用: {e}"))?;
+        // v0.4.13（审计修复 2.8）：dsh --version 加 60s 兜底
+        let out = crate::core::command::run_with_timeout(c, std::time::Duration::from_secs(60))
+            .map_err(|e| format!("dsh 未安装或不可用: {e}"))?;
         if !out.status.success() {
             return Ok(None);
         }
@@ -182,7 +184,8 @@ fn uninstall_npm_global(logger: &Arc<crate::core::logging::Logger>) -> Result<()
     let npm_result = {
         let mut c = command::hidden_cmd("npm");
         c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
-        c.output()
+        // v0.4.13（审计修复 2.8）：npm 卸载加 10 分钟兜底
+        crate::core::command::run_with_timeout(c, std::time::Duration::from_secs(600))
     };
     match &npm_result {
         Ok(out) if out.status.success() => {
@@ -294,8 +297,12 @@ pub async fn uninstall(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
 fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
     let mut c = command::hidden_cmd("npm");
     c.args(["view", "@deepseek-ai/dsh", "versions", "--json"]);
-    let out = c
-        .output()
+    // 审计修复 2.1：npm registry 镜像配置此前从未生效，此处注入
+    if let Some(reg) = crate::core::config::current_npm_registry() {
+        c.arg("--registry").arg(reg);
+    }
+    // v0.4.13（审计修复 2.8）：网络查询加超时（此前无任何超时）
+    let out = crate::core::command::run_with_timeout(c, std::time::Duration::from_secs(120))
         .map_err(|e| format!("npm view 执行失败: {e}"))?;
     if !out.status.success() {
         return Err(format!(
@@ -385,6 +392,10 @@ fn install_npm_version(logger: &Arc<crate::core::logging::Logger>, version: &str
     };
     let mut c = command::hidden_cmd("npm");
     c.args(["install", "-g", &spec]);
+    // 审计修复 2.1：npm registry 镜像配置此前从未生效，此处注入
+    if let Some(reg) = crate::core::config::current_npm_registry() {
+        c.arg("--registry").arg(reg);
+    }
     stream::run_streamed(logger, c, LogLevel::Info, LogLevel::Warn, Some(cb))
         .map_err(|e| format!("npm 安装失败: {e}"))?;
     logger.progress(

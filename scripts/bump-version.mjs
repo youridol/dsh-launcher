@@ -1,8 +1,9 @@
-// 版本递增脚本：master 每次提交自动迭代 PATCH 版本（0.3.x → 0.3.(x+1)）
-// 同步 4 处版本号：package.json / src-tauri/Cargo.toml / src-tauri/tauri.conf.json / package-lock.json
+// 版本递增脚本：master 每次提交自动迭代版本（默认 patch）
+// 同步 5 处版本号：package.json / src-tauri/Cargo.toml / src-tauri/tauri.conf.json /
+//                package-lock.json / src-tauri/Cargo.lock（见 ADR-0004）
 // 用法：node scripts/bump-version.mjs [--major|--minor|--patch]
 // 默认 patch；--minor 升次版本号（新功能）；--major 升主版本号（破坏性变更）。
-// 注：是否已发布（对应 tag 已存在）由调用方（发布工作流）判断；本脚本只做版本递增与四文件同步。
+// 注：是否已发布（对应 tag 已存在）由调用方（发布工作流）判断；本脚本只做版本递增与五文件同步。
 
 import { readFileSync, writeFileSync } from "node:fs";
 

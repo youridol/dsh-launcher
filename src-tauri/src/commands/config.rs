@@ -4,7 +4,19 @@
 
 use crate::core::config::AppConfig;
 use serde::Serialize;
+use std::sync::Mutex;
 use tauri::State;
+
+/// 配置读-改-写互斥锁（进程级单例）。
+/// v0.4.13（审计修复 2.6）：set_* 命令此前各自 load→改→save 全量写回，
+/// 并发保存（端口/镜像/开关）会互相覆盖丢失更新。统一在此串行化。
+fn cfg_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    static CFG_MUTEX: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    CFG_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 /// 完整配置视图（给前端）
 #[derive(Debug, Clone, Serialize)]
@@ -13,6 +25,9 @@ pub struct ConfigView {
     pub port: u16,
     pub npm_registry: String,
     pub github_mirror: String,
+    /// v0.4.13（审计修复 2.4）：不再回传明文 token，只回传“是否已设置”
+    pub github_token_set: bool,
+    /// 恒为空串（兼容旧字段，避免前端读到明文）
     pub github_token: String,
     pub node_mirror: String,
     pub close_exits: bool,
@@ -29,7 +44,8 @@ impl From<AppConfig> for ConfigView {
             port: c.port,
             npm_registry: c.npm_registry,
             github_mirror: c.github_mirror,
-            github_token: c.github_token,
+            github_token_set: !c.github_token.is_empty(),
+            github_token: String::new(),
             node_mirror: c.node_mirror,
             close_exits: c.close_exits,
             minimize_to_tray: c.minimize_to_tray,
@@ -53,6 +69,7 @@ pub fn set_port(state: State<'_, crate::AppState>, port: u16) -> Result<(), Stri
     if !(1..=65535).contains(&port) {
         return Err(format!("端口 {port} 非法"));
     }
+    let _guard = cfg_write_lock();
     let mut cfg = AppConfig::load();
     cfg.port = port;
     cfg.save()?;
@@ -64,8 +81,15 @@ pub fn set_port(state: State<'_, crate::AppState>, port: u16) -> Result<(), Stri
 /// token 内容不落日志（打码提示），避免敏感信息泄露
 #[tauri::command]
 pub fn set_github_token(state: State<'_, crate::AppState>, token: String) -> Result<(), String> {
+    let token = token.trim().to_string();
+    let _guard = cfg_write_lock();
     let mut cfg = AppConfig::load();
-    cfg.github_token = token.trim().to_string();
+    // v0.4.13（审计修复 2.4）：空串 = 不修改（前端“留空保持原值”语义），
+    // 避免旧 UI 把已保存 token 误清空。
+    if token.is_empty() {
+        return Ok(());
+    }
+    cfg.github_token = token;
     cfg.save()?;
     state
         .logger
@@ -96,6 +120,7 @@ pub fn set_mirrors(
     } else {
         node_mirror.clone()
     };
+    let _guard = cfg_write_lock();
     let mut cfg = AppConfig::load();
     cfg.npm_registry = npm_registry;
     cfg.github_mirror = github_mirror;
@@ -118,6 +143,7 @@ pub fn set_switches(
     auto_start_dsh: bool,
     auto_open_browser: bool,
 ) -> Result<(), String> {
+    let _guard = cfg_write_lock();
     let mut cfg = AppConfig::load();
     cfg.close_exits = close_exits;
     cfg.minimize_to_tray = minimize_to_tray;

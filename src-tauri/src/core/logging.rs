@@ -85,10 +85,20 @@ pub struct LogLine {
 }
 
 impl Logger {
-    /// 初始化日志系统，返回全局单例
-    pub fn init() -> std::io::Result<Self> {
-        let dir = logs_dir();
-        fs::create_dir_all(&dir)?;
+    /// 初始化日志系统，返回全局单例。
+    ///
+    /// v0.4.13（审计修复 2.9）：不再返回 Result —— 首选日志目录创建失败时
+    /// 自动降级到系统临时目录（仅 eprintln 提示，不 panic/不阻断启动）；
+    /// 极端情况下（临时目录也失败）仍构造对象，写入会静默跳过，应用可继续运行。
+    pub fn init() -> Self {
+        let primary = logs_dir();
+        let fallback = std::env::temp_dir().join("dsh-launcher-logs");
+        let mut dir = primary.clone();
+        if fs::create_dir_all(&primary).is_err() {
+            eprintln!("[dsh-launcher] 创建日志目录失败，降级到临时目录: {}", fallback.display());
+            dir = fallback.clone();
+            let _ = fs::create_dir_all(&fallback);
+        }
         let logger = Logger {
             inner: Mutex::new(LoggerInner {
                 dir,
@@ -98,7 +108,7 @@ impl Logger {
             emitter: Mutex::new(None),
         };
         logger.cleanup_old();
-        Ok(logger)
+        logger
     }
 
     /// 关联 Tauri AppHandle（启动时调用一次）
@@ -314,16 +324,75 @@ fn is_leap(y: i64) -> bool {
 /// 日志根目录：%LOCALAPPDATA%\dsh-launcher\logs
 /// pub：commands/logs.rs 列表/读取复用（唯一实现，避免两处重复）
 pub fn logs_dir() -> PathBuf {
+    data_dir().join("logs")
+}
+
+/// 数据目录：%LOCALAPPDATA%\dsh-launcher
+fn data_dir() -> PathBuf {
     std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("dsh-launcher")
-        .join("logs")
 }
 
-/// 从最新日志文件中提取最近一次 dsh web 启动的完整 URL（含 token）
-/// 兜底方案：内存捕获失败时（如重启后）从落盘日志恢复。
+/// dsh web 完整访问 URL 的独立缓存文件（含 token）。
+/// v0.4.13（审计修复 2.5）：带 token 的 URL 不再明文写入轮转日志，改存此
+/// 单文件（仅本机用户可读的 LOCALAPPDATA 内），供重启后恢复 URL 使用；
+/// dsh 停止/退出时由 process.rs 清除，避免使用陈旧 token。
+pub fn web_url_cache_file() -> PathBuf {
+    data_dir().join("last-web-url")
+}
+
+/// 保存最新 dsh web URL（含 token）到独立缓存文件；空值不写。
+pub fn save_latest_web_url(url: &str) {
+    if url.trim().is_empty() {
+        return;
+    }
+    let path = web_url_cache_file();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, url.as_bytes());
+}
+
+/// 清除 dsh web URL 缓存（停止/进程退出时调用，防陈旧 token 复用）
+pub fn clear_latest_web_url() {
+    let _ = fs::remove_file(web_url_cache_file());
+}
+
+/// 将文本中的 `token=<值>` 打码为 `token=***`（值取到空白/`&`/`\r` 为止），
+/// 保留其余内容原样返回。供日志落盘与前端推送前调用（审计修复 2.5）。
+pub fn redact_web_token(line: &str) -> String {
+    const TOKEN_PREFIX: &str = "token=";
+    const MASK: &str = "token=***";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(idx) = rest.find(TOKEN_PREFIX) {
+        out.push_str(&rest[..idx]);
+        out.push_str(MASK);
+        let after = &rest[idx + TOKEN_PREFIX.len()..];
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == '&' || c == '\r')
+            .unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 从最新日志文件中提取最近一次 dsh web 启动的完整 URL（含 token）。
+/// 兜底方案：内存捕获失败时（如重启后）从**独立缓存文件**恢复；
+/// v0.4.13 起日志正文已对 token 打码，不再从轮转日志全文扫描明文令牌，
+/// 仅保留对历史（未打码）日志的兼容扫描作为最后手段。
 pub fn extract_latest_web_url() -> Option<String> {
+    // 首选：独立缓存文件（本版本及以后写入的唯一明文源）
+    if let Ok(content) = fs::read_to_string(web_url_cache_file()) {
+        let t = content.trim();
+        if !t.is_empty() && t.contains("token=") {
+            return Some(t.to_string());
+        }
+    }
+    // 兼容历史：扫描今天日志中的明文 URL（升级前版本写入）
     let dir = logs_dir();
     let today = chrono_now().date;
     let path = dir.join(format!("{today}.log"));
@@ -457,6 +526,37 @@ mod tests {
         assert_eq!(fs::read_to_string(path.with_extension("log.1")).unwrap(), "hello");
         assert!(!path.exists());
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_redact_web_token() {
+        use super::redact_web_token;
+        // 真实 dsh 启动行：token 值应被打码
+        let line = "dsh web: http://127.0.0.1:3080/?token=abc123def456";
+        assert_eq!(
+            redact_web_token(line),
+            "dsh web: http://127.0.0.1:3080/?token=***"
+        );
+        // 值后带 & 参数：只打码 token 值，保留其余
+        assert_eq!(
+            redact_web_token("http://127.0.0.1:1/?token=sec&mode=x"),
+            "http://127.0.0.1:1/?token=***&mode=x"
+        );
+        // 带空格后续文字
+        assert_eq!(
+            redact_web_token("http://127.0.0.1:3080/?token=abc next"),
+            "http://127.0.0.1:3080/?token=*** next"
+        );
+        // 无关行原样返回
+        assert_eq!(redact_web_token("hello world"), "hello world");
+        assert_eq!(redact_web_token("token 无等号"), "token 无等号");
+        // 多个 token 均打码
+        assert_eq!(
+            redact_web_token("a=1&token=x&b=2 token=y"),
+            "a=1&token=***&b=2 token=***"
+        );
+        // 空输入
+        assert_eq!(redact_web_token(""), "");
     }
 
     #[test]

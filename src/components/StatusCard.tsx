@@ -215,15 +215,22 @@ export default function StatusCard() {
   // 实时到达启动器。这里轮询等待完整 URL（最多 40s），拿不到就不打开窗口，
   // 避免两种"死窗口"：端口未监听 → ERR_CONNECTION_REFUSED；
   // 裸 URL → 401 "dsh web authentication required"。
-  async function waitForWebUrl(timeoutMs: number): Promise<string | null> {
+  // v0.4.13（审计修复 L2）：取消令牌（alive）下渗到内层轮询——
+  // 弹窗被取消/重开后立即停止空转 IPC，不再等到 40s 超时。
+  async function waitForWebUrl(
+    timeoutMs: number,
+    isAlive: () => boolean,
+  ): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (!isAlive()) return null;
       try {
         const full = await getWebUrl();
         if (full) return full;
       } catch (e) {
         console.error("获取 Web URL 失败（重试）", e);
       }
+      if (!isAlive()) return null;
       await new Promise((r) => setTimeout(r, 500));
     }
     return null;
@@ -362,7 +369,7 @@ export default function StatusCard() {
 
       // ④ 等带 token 的完整 URL（≤40s），拿不到不开死窗口
       setStageIdx(3);
-      const url = await waitForWebUrl(40_000);
+      const url = await waitForWebUrl(40_000, alive);
       if (!alive()) return;
       if (!url) {
         setOpenErr("尚未获取 dsh Web 访问地址（token 未输出）。dsh 可能仍在启动，请稍后重试");

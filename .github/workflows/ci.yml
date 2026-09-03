@@ -46,18 +46,23 @@ jobs:
       - name: 类型检查（tsc）
         run: npx tsc --noEmit
 
+      - name: 类型检查 vite.config.ts（审计修复 T2：此前从未被检查）
+        run: npx tsc -p tsconfig.node.json --noEmit
+
       - name: 前端构建（vite build）
         run: npm run build
 
-      - name: Rust 检查（cargo check 零警告）
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Rust 检查（cargo check 零警告，含全部 target）
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: 单元测试（cargo test --lib）
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
-      - name: 集成测试（离线部分：配置默认值 / 托盘图标 / 并发 / 窗口图标）
+      - name: 集成测试（离线部分：配置默认值 / 托盘图标 / 并发 / 窗口图标 / 通道互斥 / PATH 注入）
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --test config_default_test
           cargo test --manifest-path src-tauri/Cargo.toml --test tray_icon_test
           cargo test --manifest-path src-tauri/Cargo.toml --test concurrency_test
           cargo test --manifest-path src-tauri/Cargo.toml --test icon_window_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test channel_mutex_logic_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test path_inject_test

@@ -77,6 +77,7 @@ fn kill_tree(child: &mut Child) {
 }
 
 #[test]
+#[ignore = "需要真实 deepseek-harness 安装目录 + node 环境（本地集成验证用）"]
 fn test_direct_node_captures_token_url() {
     let Some(node) = node_exe() else {
         eprintln!("无 node.exe，跳过（非失败）");
@@ -114,7 +115,7 @@ fn test_direct_node_captures_token_url() {
     // stdout 读线程：逐行发 channel（命中 token= 即退出）
     let stdout = child.stdout.take().expect("stdout 管道");
     let (tx, rx) = mpsc::channel::<String>();
-    let mut tx2 = tx.clone();
+    let tx2 = tx.clone();
     let reader_thread = std::thread::spawn(move || {
         let mut r = std::io::BufReader::new(stdout);
         let mut buf = Vec::new();

@@ -157,6 +157,8 @@ export interface AppConfig {
   port: number;
   npmRegistry: string;
   githubMirror: string;
+  /** v0.4.13：Rust 不再回传明文 token，只回传是否已设置 */
+  githubTokenSet: boolean;
   githubToken: string;
   nodeMirror: string;
   closeExits: boolean;

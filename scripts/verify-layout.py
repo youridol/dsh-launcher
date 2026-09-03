@@ -1,4 +1,8 @@
 # 布局验证脚本（仅开发验证用）
+# ⚠️ v0.4.13 标注：本脚本的期望值与当前实现已脱节（审计 T18）——
+#   面板默认宽度已改为 340/340（panel-layout.ts）、localStorage 键带 -v3 后缀
+#   （AppShell.tsx），按脚本运行必然 FAIL，请勿当作回归依据。
+#   需要重新使用时请按 src/lib/panel-layout.ts 与 AppShell.tsx 的当前常量/键名重写断言。
 # 验证：titlebar(窗口标题栏) / 右下日志贯穿 / 展开收起 / 拖拽 resize / 持久化 / 响应式断点
 from playwright.sync_api import sync_playwright
 
