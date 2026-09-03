@@ -29,15 +29,95 @@ pub fn node_dir() -> PathBuf {
     toolchain_dir().join("node")
 }
 
-/// 下载文件到本地
-/// base_url 可为镜像源；返回下载后本地路径
-/// pub：commands/toolchain.rs 的 Git 安装包下载复用本实现（避免两处重复）
-pub fn download(logger: &Arc<Logger>, url: &str, dest: &Path) -> Result<(), String> {
+/// 带实时进度的下载：Invoke-WebRequest + 后台线程轮询目标文件大小，
+/// 按 Content-Length 占比推送 install://progress 事件（channel=toolchain）。
+///
+/// 背景（v0.4.8 修复）：此前 Python/Node/Git 大文件下载用一次性同步等待，
+/// 期间前端进度条停在 0% 不动（几十 MB 安装包下载无任何反馈）→ 用户感知"卡死"。
+/// 本实现：
+/// 1. 先 Invoke-WebRequest -Method Head 拿 Content-Length（总字节）；
+/// 2. 后台线程每 200ms stat 目标文件大小 → progress(Download, bytes/total*100)；
+/// 3. 下载进程退出后停轮询；拿不到总长度时显示已下载 MB（不定量消息）。
+///
+/// 幂等：全部调用方（Node/Git/Python 下载）都用本函数获得实时进度。
+pub fn download_with_progress(
+    logger: &Arc<Logger>,
+    url: &str,
+    dest: &Path,
+    tool_label: &str,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    // 旧文件残留先清（避免轮询把上次数当本次进度）
+    let _ = fs::remove_file(dest);
     logger.info(&format!("下载 {url} → {}", dest.display()));
-    // 用 PowerShell 的 Invoke-WebRequest 下载（Windows 自带，无需额外依赖）
+
+    // 1. HEAD 请求拿 Content-Length（失败则 total=0，退化为"已下载 MB"不定量消息）
+    let total = fetch_content_length(url);
+    if total > 0 {
+        logger.progress(
+            "toolchain",
+            crate::core::events::InstallPhase::Download,
+            0,
+            format!("{tool_label} 下载中…（共 {:.1} MB）", total as f64 / 1_048_576.0),
+        );
+    } else {
+        logger.progress(
+            "toolchain",
+            crate::core::events::InstallPhase::Download,
+            0,
+            format!("{tool_label} 下载中…"),
+        );
+    }
+
+    // 2. 后台轮询线程（下载期间持续推进度）
+    let stop = Arc::new(AtomicBool::new(false));
+    let dest_owned = dest.to_path_buf();
+    let logger_t = Arc::clone(logger);
+    let label = tool_label.to_string();
+    let stop_t = Arc::clone(&stop);
+    let poller = std::thread::spawn(move || {
+        let mut last_pct: i32 = -1;
+        let mut last_len: u64 = 0;
+        while !stop_t.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(200));
+            let len = fs::metadata(&dest_owned).map(|m| m.len()).unwrap_or(0);
+            // 下载完成（总字节已知且已到达）→ 结束轮询（100 由主线程下载完成后统一推）
+            if total > 0 && len >= total {
+                break;
+            }
+            if total > 0 {
+                let pct = download_percent(len, total);
+                if pct != last_pct {
+                    last_pct = pct;
+                    logger_t.progress(
+                        "toolchain",
+                        crate::core::events::InstallPhase::Download,
+                        pct as u8,
+                        format!(
+                            "{label} 下载中… {:.1} MB / {:.1} MB ({pct}%)",
+                            len as f64 / 1_048_576.0,
+                            total as f64 / 1_048_576.0
+                        ),
+                    );
+                }
+            } else if len != last_len {
+                last_len = len;
+                logger_t.progress(
+                    "toolchain",
+                    crate::core::events::InstallPhase::Download,
+                    0,
+                    format!("{label} 下载中… {:.1} MB 已下载", len as f64 / 1_048_576.0),
+                );
+            }
+        }
+    });
+
+    // 3. 执行实际下载（Invoke-WebRequest）
     let ps = format!(
         "Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
         url.replace('\'', "''"),
@@ -48,14 +128,54 @@ pub fn download(logger: &Arc<Logger>, url: &str, dest: &Path) -> Result<(), Stri
     let out = cmd
         .output()
         .map_err(|e| format!("启动 PowerShell 下载失败: {e}"))?;
+    // 下载结束 → 停轮询线程
+    stop.store(true, Ordering::SeqCst);
+    let _ = poller.join();
+
     if !out.status.success() {
         return Err(format!(
             "下载失败: {}",
             crate::core::text::decode(&out.stderr).trim()
         ));
     }
-    logger.info(&format!("下载完成：{}（{} 字节）", dest.display(), dest.metadata().map(|m| m.len()).unwrap_or(0)));
+    let len = dest.metadata().map(|m| m.len()).unwrap_or(0);
+    logger.info(&format!("下载完成：{}（{} 字节）", dest.display(), len));
+    logger.progress(
+        "toolchain",
+        crate::core::events::InstallPhase::Download,
+        100,
+        format!("{tool_label} 下载完成（{:.1} MB）", len as f64 / 1_048_576.0),
+    );
     Ok(())
+}
+
+/// 用 PowerShell Invoke-WebRequest -Method Head 获取资源 Content-Length（字节）。
+/// 失败返回 0（下载进度退化为不定量消息）。
+fn fetch_content_length(url: &str) -> u64 {
+    let ps = format!(
+        "try {{ (Invoke-WebRequest -Uri '{}' -Method Head -UseBasicParsing).Headers['Content-Length'] }} catch {{ '' }}",
+        url.replace('\'', "''")
+    );
+    let mut cmd = command::hidden("powershell");
+    cmd.args(["-NoProfile", "-Command", &ps]);
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let text = crate::core::text::decode(&out.stdout);
+            if let Ok(n) = text.trim().parse::<u64>() {
+                return n;
+            }
+        }
+    }
+    0
+}
+
+/// 计算下载进度百分比（0-99，不含 100：100 由完成路径单独推）
+/// len=已下载字节，total=总字节；total=0（未知）时不适用（调用方走不定量分支）。
+fn download_percent(len: u64, total: u64) -> i32 {
+    if total == 0 {
+        return 0;
+    }
+    ((len as f64 / total as f64) * 100.0).min(99.0) as i32
 }
 
 /// 解压 zip 到目标目录（PowerShell Expand-Archive）
@@ -279,8 +399,8 @@ pub fn install_node(logger: &Arc<Logger>) -> Result<String, String> {
 
     let zip_path = toolchain_dir().join(&file);
     logger.progress("toolchain", crate::core::events::InstallPhase::Download, 0, "下载 Node…");
-    download(logger, &url, &zip_path)?;
-    logger.progress("toolchain", crate::core::events::InstallPhase::Download, 50, "Node 下载完成，解压中…");
+    download_with_progress(logger, &url, &zip_path, "Node")?;
+    logger.progress("toolchain", crate::core::events::InstallPhase::Download, 100, "Node 下载完成，解压中…");
 
     // 解压到临时目录，再把 node 目录提取出来
     let tmp_dir = toolchain_dir().join("tmp-node");
@@ -500,20 +620,61 @@ pub fn install_python(logger: &Arc<Logger>) -> Result<String, String> {
     let dest = toolchain_dir().join(&exe_name);
     let url = format!("https://www.python.org/ftp/python/{version}/{exe_name}");
     logger.progress("toolchain", crate::core::events::InstallPhase::Download, 0, "下载 Python…");
-    download(logger, &url, &dest)?;
-    logger.progress("toolchain", crate::core::events::InstallPhase::Download, 100, "Python 下载完成，启动安装…");
+    // 下载带实时进度（轮询文件大小 + Content-Length 占比）
+    download_with_progress(logger, &url, &dest, "Python")?;
+    logger.progress("toolchain", crate::core::events::InstallPhase::Install, 0, "Python 下载完成，启动安装（UAC 确认后开始）…");
     // 静默安装：当前用户 + 加入 PATH + pip
     // /quiet /InstallAllUsers=0 /PrependPath=1 /Include_pip=1
     // -Wait：同步等待安装器退出（UAC 确认 + 静默安装全程），返回即安装完成
+    //
+    // v0.4.8：安装期间无法从 python.org 静默安装器取内部进度（/quiet 无 stdout），
+    // 改用后台线程周期推送"已等待 N 秒 + 注册表 PythonCore 是否已写入"的实时反馈，
+    // 避免前端进度条停在 0 不动被误判卡死。
     let ps = format!(
         "Start-Process -FilePath '{}' -ArgumentList '/quiet','/InstallAllUsers=0','/PrependPath=1','/Include_pip=1' -Verb RunAs -Wait",
         dest.to_string_lossy().replace('\'', "''")
     );
     let mut c = command::hidden("powershell");
     c.args(["-NoProfile", "-Command", &ps]);
+
+    // 安装轮询线程：期间每 1s 推一次进度（阶段 install，消息带等待秒数 + 注册表状态）
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let logger_t = Arc::clone(logger);
+    let stop_t = std::sync::Arc::clone(&stop);
+    let poller = std::thread::spawn(move || {
+        let mut secs: u32 = 0;
+        loop {
+            if stop_t.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            secs += 1;
+            // 注册表 PythonCore 已写入 → 安装基本完成（贴 90，等安装器退出跳 100）
+            let reg_ok = !crate::core::pathutil::python_install_dirs().is_empty();
+            if reg_ok {
+                logger_t.progress(
+                    "toolchain",
+                    crate::core::events::InstallPhase::Install,
+                    90,
+                    "Python 安装写入系统已完成，正在收尾…",
+                );
+            } else if secs % 3 == 0 {
+                logger_t.progress(
+                    "toolchain",
+                    crate::core::events::InstallPhase::Install,
+                    0,
+                    format!("Python 安装中… 已等待 {secs} 秒（请在 UAC 弹窗确认）"),
+                );
+            }
+        }
+    });
+
     let out = c
         .output()
         .map_err(|e| format!("启动 Python 安装失败: {e}"))?;
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = poller.join();
+
     if !out.status.success() {
         return Err(format!(
             "Python 安装启动失败: {}",
@@ -591,5 +752,23 @@ mod tests {
         let (exe4, args4) = split_uninstall_cmd("C:\\unins000.exe");
         assert_eq!(exe4, "C:\\unins000.exe");
         assert!(args4.is_empty());
+    }
+
+    #[test]
+    fn test_download_percent() {
+        use super::download_percent;
+        // 0% / 中间 / 99% 封顶（100 由完成路径单独推）
+        assert_eq!(download_percent(0, 100), 0);
+        assert_eq!(download_percent(50, 100), 50);
+        assert_eq!(download_percent(99, 100), 99);
+        // 已下载=总长 → 封顶 99（避免提前 100 与完成事件竞争）
+        assert_eq!(download_percent(100, 100), 99);
+        assert_eq!(download_percent(1000, 1000), 99);
+        // 超总量（异常）→ 仍封顶 99
+        assert_eq!(download_percent(1500, 1000), 99);
+        // 未知总量 → 0（调用方走不定量分支）
+        assert_eq!(download_percent(500, 0), 0);
+        // 真实 Python 27.4MB：中点≈50
+        assert_eq!(download_percent(14_380_888, 28_761_776), 50);
     }
 }

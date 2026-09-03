@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.4.8] - 2026-09-03
+
+### 修复
+
+- **工具链（Python/Node/Git）安装时进度条无法实时跟踪下载进度**：
+  - 现象：点击安装 Python/Node/Git，进度条停在 0% 不动，直到几十 MB 下载完才跳到
+    100%，安装阶段也无任何反馈 → 用户感知“卡死/无响应”。
+  - 根因：core/toolchain.rs 的 download() 用 PowerShell Invoke-WebRequest **一次性同步
+    等待**（Command::output() 阻塞至下载结束），期间不推任何 install://progress 事件；
+    Python 安装阶段 Start-Process -Wait 同样静默等待安装器退出。
+  - 修复：
+    - 新增 download_with_progress()：先 Invoke-WebRequest -Method Head 拿
+      Content-Length（总字节），后台线程每 200ms 轮询目标文件已下载字节，按占比推
+      progress(Download, pct, "下载中 x.xMB / y.yMB (pct%)")；拿不到总长度时退化
+      为“已下载 x.x MB”不定量消息。下载结束统一推 100。
+    - install_python()：安装阶段（Start-Process -Wait 期间）后台线程每 1s 轮询注册表
+      PythonCore 是否已写入：已写入推 90%（收尾中），否则每 3s 推“已等待 N 秒（请在
+      UAC 弹窗确认）”——安装全程有实时反馈，不再静默卡住。
+    - Node/Git 下载统一改走 download_with_progress（三处调用全部迁移）；
+    - 新增 download_percent 纯函数 + 单测（封顶 99，100 由完成路径推）。
+  - 验证：真实下载 27.4MB Python 包，200ms 轮询捕获 11 个中间进度点（1%→99%）；
+    HEAD Content-Length 解析正确；26 个 lib 单测 + 4 个离线集成测试全过；
+    tsc / cargo release 构建通过。版本 0.4.8。
+
 ## [0.4.7] - 2026-09-03
 
 ### 修复

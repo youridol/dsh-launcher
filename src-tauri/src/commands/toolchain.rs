@@ -433,7 +433,8 @@ fn install_git(logger: &Arc<Logger>) -> Result<String, String> {
     let url = core_toolchain::git_installer_url();
     let dest = core_toolchain::git_installer_path();
     logger.progress("toolchain", InstallPhase::Download, 0, "下载 Git 安装包…");
-    core_toolchain::download(logger, &url, &dest)?;
+    // 下载带实时进度（轮询文件大小 + Content-Length 占比）
+    core_toolchain::download_with_progress(logger, &url, &dest, "Git")?;
     logger.progress("toolchain", InstallPhase::Download, 100, "Git 安装包下载完成");
     logger.info("启动 Git 静默安装（请在弹出的 UAC 中确认）…");
     logger.progress("toolchain", InstallPhase::Install, 0, "等待 UAC 确认…");
