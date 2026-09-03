@@ -294,10 +294,17 @@ pub fn global_shim_path() -> Option<PathBuf> {
 
 /// PATH 中的 dsh.cmd 是否为**本启动器创建**的 GitHub shim（内容含 github 安装目录 + pnpm dsh）。
 /// 用于启动决策：本启动器 shim 走直接 node 启动（避免 pnpm 嵌套），
-/// npm 全局真 dsh（node_modules 链接）直接用。探测 PATH 首个 dsh.cmd 内容。
+/// npm 全局真 dsh（node_modules 链接）用 dsh web 启动。探测 PATH 首个 dsh.cmd 内容。
+///
+/// v0.4.3 修复：探测必须与真实 dsh spawn（command::hidden_cmd）使用**同一 PATH**。
+/// hidden_cmd 在系统 PATH 无 node 时会把用户级 node_dir（npm/pnpm/dsh 所在目录，
+/// 分发机器上 npm 全局 prefix 即 node_dir）前缀注入子进程 PATH；此前这里用
+/// command::hidden("where")（不注入）探测 → 分发机器启动器进程的 PATH 快照不含 node_dir
+/// → 本启动器刚创建的 dsh.cmd shim 探测不到 → process.rs 误判为 npm 全局包 → 用裸 dsh
+/// （不带 profile）启动 → dsh CLI 报 "--profile <name> is required" 后退出。
 pub fn global_shim_is_ours() -> bool {
-    // PATH 中首个 dsh.cmd 的完整路径（用 where 探测）
-    let mut probe = command::hidden("where");
+    // PATH 中首个 dsh.cmd 的完整路径（用 where 探测；hidden_cmd 注入与 dsh spawn 相同的 PATH）
+    let mut probe = command::hidden_cmd("where");
     probe.arg("dsh.cmd");
     let Ok(out) = probe.output() else {
         return false;
@@ -309,11 +316,20 @@ pub fn global_shim_is_ours() -> bool {
     let Some(first) = text.lines().next() else {
         return false;
     };
-    let p = PathBuf::from(first.trim());
-    // 本启动器 shim 特征：内容包含 github-dsh 安装目录与 `pnpm dsh`
-    let Ok(content) = fs::read_to_string(&p) else {
-        return false;
-    };
+    shim_path_is_ours(&PathBuf::from(first.trim()))
+}
+
+/// dsh.cmd 是否为本启动器 GitHub shim（按文件内容识别）
+fn shim_path_is_ours(p: &std::path::Path) -> bool {
+    match fs::read_to_string(p) {
+        Ok(content) => shim_content_is_ours(&content),
+        Err(_) => false,
+    }
+}
+
+/// 本启动器 dsh.cmd shim 的内容特征：cd 到 github-dsh 安装目录后执行 pnpm dsh %*
+/// （install_global_shim 写入；npm 全局包生成的 dsh.cmd 指向 node_modules，不含这两个特征）
+fn shim_content_is_ours(content: &str) -> bool {
     content.contains("github-dsh") && content.contains("pnpm dsh")
 }
 
@@ -361,6 +377,7 @@ fn parse_git_percent(line: &str) -> Option<u8> {
 mod tests {
     use super::parse_git_percent;
     use super::parse_tags_from_ls_remote;
+    use super::shim_content_is_ours;
 
     #[test]
     fn test_parse_git_percent() {
@@ -401,5 +418,24 @@ b150a551b8d465e31e418e1b2eaf5e79bbb7d28e	refs/tags/dsh-v0.1.1-rc.2
         assert!(parse_tags_from_ls_remote("").is_empty());
         // 无 tags 前缀的行忽略
         assert!(parse_tags_from_ls_remote("abc123	HEAD\n").is_empty());
+    }
+
+    #[test]
+    fn test_shim_content_is_ours() {
+        // 本启动器 install_global_shim 写入的 dsh.cmd（cd 到 github-dsh 安装目录 + pnpm dsh %*）
+        let ours = r#"@echo off
+cd /d "C:\Users\Administrator\AppData\Local\dsh-launcher\github-dsh\deepseek-harness"
+pnpm dsh %*
+"#;
+        assert!(shim_content_is_ours(ours), "本启动器 GitHub shim 应被识别");
+        // npm 全局包（@deepseek-ai/dsh）生成的 dsh.cmd：指向 node_modules，不含两个特征
+        let npm_shim = r#"@ECHO off
+SETLOCAL
+CALL "C:\Users\Administrator\AppData\Local\dsh-launcher\toolchain\node\node_modules\@deepseek-ai\dsh\bin\dsh.cmd" %*
+"#;
+        assert!(!shim_content_is_ours(npm_shim), "npm 全局 shim 不应误判为本启动器 shim");
+        // 内容不可读 / 无特征内容
+        assert!(!shim_content_is_ours(""));
+        assert!(!shim_content_is_ours("echo dsh"));
     }
 }

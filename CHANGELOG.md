@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.3] - 2026-09-03
+
+### 修复
+
+- **分发到其他 Windows 客户机后 dsh 服务启动失败**（dsh CLI 报
+  “--profile <name> is required”、退出码 1，真实客户机 192.168.3.124 实测）：
+  - 根因 1（npm 全局分支丢参数）：v0.4.2 重构时，“PATH 中 dsh 为 npm 全局包，直接用其启动”
+    分支改为直接启动 dsh，却丢失了 “web --port <p> --no-open” 参数 → dsh 裸跑不带 profile
+    → CLI 报 “--profile <name> is required” 后退出 → 启动器探测到端口未监听，误入
+    “自动修复不兼容插件”流程（实际与插件无关）；
+  - 根因 2（本启动器 shim 被误判为 npm 包）：shim 归属探测用不注入 PATH 的 where 探测；
+    分发机器上 npm 全局 prefix 被固定为启动器管理的 node_dir（LOCALAPPDATA 下 dsh-launcher
+    的 toolchain node 目录，不在启动器进程的 PATH 快照里）→ 启动器刚创建的 GitHub 通道
+    dsh.cmd shim 探测不到 → 被误判成“npm 全局包” → 再次踩根因 1；
+  - 修复：① npm 全局真 dsh 分支补全 “web --port <p> --no-open” 参数；
+    ② shim 探测改用与真实 dsh spawn 相同的 PATH（注入 node_dir），分发机器也能识别
+    本启动器 shim；③ 启动决策重构：GitHub 安装目录存在（apps/cli/src/bin.ts）时一律
+    直接 node 启动 bin.ts（本启动器 shim / PATH 无 dsh 也走此路，进程浅、token 实时、
+    taskkill 干净）；仅 PATH 中 dsh.cmd 确为 npm 全局包时才走 cmd 包装的 dsh web；
+    shim 指向的安装目录缺失时报明确错误（不再误启）。
+
 ## [0.4.2] - 2026-09-03
 
 ### 修复

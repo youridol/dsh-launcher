@@ -140,47 +140,58 @@ impl ProcessManager {
             return Err(format!("端口 {port} 已被占用，请在设置中修改端口后重试"));
         }
 
-        // 启动命令：优先 PATH 中的 dsh（npm 全局 / 启动器创建的 dsh.cmd shim）；
-        // 找不到则用 GitHub 安装目录内的直接 node 启动（见下）。
+        // 启动命令决策（v0.4.3 重构，修复分发机器启动失败 "--profile <name> is required"）：
         // --no-open：不自动弹外部浏览器（Web GUI 由用户通过内嵌窗口/桌面快捷方式打开）
-        // Windows 上 npm 全局 dsh 是 .cmd（npm shim），不能直接 spawn，必须 cmd /C 包装；
-        // 但 GitHub 通道 dsh.cmd shim（cd 目录 && pnpm dsh）嵌套过深会引发两类问题：
-        //   ① token stdout 多层缓冲不实时 → 内嵌窗口拿不到新 token → 401 authentication required
-        //   ② 进程树 5 层 taskkill /T 杀不净 → 残留孤儿占端口 + 旧 token 错乱
-        // 因此 GitHub 通道改为**直接 node 启动 bin.ts**（进程浅、stdout 实时、taskkill 干净）。
+        // 两种 dsh 来源、两种启动方式：
+        // ① GitHub 通道（安装目录 apps/cli/src/bin.ts 存在）→ **直接 node 启动 bin.ts**
+        //    （node.exe 绝对路径 + cwd=安装目录，进程树浅、token stdout 实时、taskkill 干净）。
+        //    启动器 GitHub 通道安装的是 dsh.cmd shim（cd 安装目录 && pnpm dsh），pnpm 在 Windows
+        //    经多层 cmd/node 嵌套会引发：token stdout 多层缓冲不实时 → 401 authentication required；
+        //    进程树 5 层 taskkill /T 杀不净 → 残留孤儿占端口 + 旧 token 错乱。因此本启动器 shim
+        //    一律绕开、走直接 node（与 npm 全局包区分见下）。
+        // ② npm 全局真 dsh（PATH 中的 dsh.cmd **不是**本启动器创建，为真实 npm 包）→ 必须带
+        //    web --port <p> --no-open 启动（v0.4.3 修复：此前直接裸跑 dsh 不带 profile 参数，
+        //    dsh CLI 报 "error: --profile <name> is required" 后退出码 1 → 分发机器启动失败）。
+        // Windows 上 npm 全局 dsh / 本启动器 shim 都是 .cmd，spawn 必须 cmd /C 包装；
+        // dsh 存在性探测与 shim 归属探测必须与真实 spawn 用同一 PATH（含 node_dir 注入），
+        // 否则分发机器（node_dir 不在当前进程 PATH 快照）会把本启动器 shim 误判成 npm 包。
         let github_dir = crate::core::github::github_clone_dir();
+        let clone_ok = github_dir.join("apps/cli/src/bin.ts").exists();
         let dsh_in_path = command::hidden_cmd("dsh")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        // npm 全局真 dsh 优先（PATH 中非本启动器 shim 的真实 dsh）
-        let mut cmd = if dsh_in_path {
-            // 探测 PATH 中 dsh 是否为本启动器 shim（cd github 目录 && pnpm dsh）
-            let shim_owned = crate::core::github::global_shim_is_ours();
-            if !shim_owned && github_dir.join("apps/cli/src/bin.ts").exists() {
-                self.logger.log(
-                    LogSource::Launcher,
-                    LogLevel::Info,
-                    &format!("PATH 中 dsh 为 npm 全局包，直接用其启动"),
-                );
-                command::hidden_cmd("dsh")
-            } else {
-                // 本启动器 shim → 走直接 node（避免嵌套）
-                self.logger.log(
-                    LogSource::Launcher,
-                    LogLevel::Info,
-                    "dsh 为本启动器 GitHub shim，改用直接 node 启动（避免 pnpm 嵌套）",
-                );
-                direct_node_cmd(&github_dir, port)
-            }
-        } else if github_dir.join("package.json").exists() {
+        // 探测 PATH 中的 dsh.cmd 是否为本启动器创建的 GitHub shim（cd github 目录 && pnpm dsh）
+        let shim_owned = crate::core::github::global_shim_is_ours();
+        let mut cmd;
+        if dsh_in_path && !shim_owned {
+            // PATH 中 dsh 为真实 npm 全局包 → dsh web --port <p> --no-open
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Info,
-                &format!("PATH 中无 dsh，直接用安装目录启动: {}", github_dir.display()),
+                "PATH 中 dsh 为 npm 全局包，用 dsh web 启动",
             );
-            direct_node_cmd(&github_dir, port)
+            let mut c = command::hidden_cmd("dsh");
+            c.args(["web", "--port", &port.to_string(), "--no-open"]);
+            cmd = c;
+        } else if clone_ok {
+            // GitHub 安装目录存在 → 直接 node 启动（PATH 中为本启动器 shim 或无 dsh 都走这里）
+            let msg = if dsh_in_path {
+                "dsh 为本启动器 GitHub shim，改用直接 node 启动（避免 pnpm 嵌套）".to_string()
+            } else {
+                format!("PATH 中无 dsh，直接用安装目录启动: {}", github_dir.display())
+            };
+            self.logger.log(LogSource::Launcher, LogLevel::Info, &msg);
+            cmd = direct_node_cmd(&github_dir, port);
+        } else if dsh_in_path {
+            // PATH 中有 dsh 且不是 npm 包（本启动器 shim 特征），但安装目录已不存在
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                &format!("dsh.cmd 指向的 GitHub 安装目录不存在: {}", github_dir.display()),
+            );
+            return Err("dsh 安装目录缺失（GitHub shim 指向的目录已不存在），请在版本管理中重新安装 dsh".to_string());
         } else {
             self.logger.log(
                 LogSource::Launcher,
