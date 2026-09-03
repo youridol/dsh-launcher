@@ -268,9 +268,6 @@ export default function VersionPanel() {
                   )}
                 >
                   {t.label}
-                  <span className="ml-1.5 tabular-nums text-[10px] opacity-70">
-                    {(t.key === "github" ? ghVersions : npmVersions).length}
-                  </span>
                 </Button>
               );
             })}
