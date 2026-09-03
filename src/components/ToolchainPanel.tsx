@@ -127,11 +127,15 @@ export default function ToolchainPanel() {
     });
   }
 
-  // 异步 UAC（git/python）触发的提示逻辑
-  function markUacIfNeeded(name: string, msg: string) {
-    if (name === "git" || name === "python") {
+  // UAC 提示语义细分（v0.4.1 修复）：
+  // - install_git：Start-Process 无 -Wait → 真正异步（UAC 确认后后台安装，未完成即返回）→ 需提示
+  // - 其余（node/pnpm 安装、python 安装/卸载、git 卸载、node 卸载）：Rust 端均为 -Wait 同步，
+  //   返回时操作已完成 → 直接成功提示，不再显示“等待 UAC 后手动刷新”
+  function handleSyncDone(name: string, msg: string) {
+    setBusyName(null);
+    if (name === "git") {
+      // 仅 git 安装为异步（由 install_toolchain 广播排除 git 佐证）
       setUacPending(true);
-      setBusyName(null);
       toast.success(msg, { description: UAC_HINT });
     } else {
       toast.success(msg);
@@ -145,39 +149,30 @@ export default function ToolchainPanel() {
     setProgress({ channel: "toolchain", phase: "prepare", percent: 0, message: "准备中…" });
     try {
       const msg = await installToolchain(name);
-      markUacIfNeeded(name, msg);
-      // 同步安装（node/pnpm）完成后：变更事件触发 refresh；这里兜底一次
-      if (name === "node" || name === "pnpm") {
-        refresh();
-      }
+      handleSyncDone(name, msg);
+      // 同步安装完成（node/pnpm/python）→ 变更事件触发 refresh；这里兜底一次
+      refresh();
     } catch (e) {
       setProgress(null);
       toast.error(`安装失败: ${e}`);
+      setBusyName(null);
     } finally {
-      if (name === "node" || name === "pnpm") {
-        setBusyName(null);
-        setProgress(null);
-      } else {
-        // git/python 为 UAC 异步：完成后清进度条（不再显示停留的 100%）
-        setProgress(null);
-      }
+      // 进度条清理：python 同步安装走 done 事件（100%）；这里统一清残留
+      setProgress(null);
     }
   }
 
-  // 单项卸载（Node 同步；Git/Python UAC 异步）
+  // 单项卸载（Node/Git/Python 均为 Rust 端 -Wait 同步完成）
   async function handleUninstall(name: string) {
     setBusyName(name);
     setUacPending(false);
     try {
       const msg = await uninstallToolchain(name);
-      markUacIfNeeded(name, msg);
+      handleSyncDone(name, msg);
       refresh();
     } catch (e) {
       toast.error(`卸载失败: ${e}`);
-    } finally {
-      if (name === "node") {
-        setBusyName(null);
-      }
+      setBusyName(null);
     }
   }
 
@@ -189,6 +184,11 @@ export default function ToolchainPanel() {
     try {
       const results = await batchInstallToolchains();
       showBatchResults(results, "批量安装");
+      // git 安装为 UAC 异步（无 -Wait）：提示用户完成 UAC 后生效
+      if (results.some((r) => r.name === "git" && r.ok)) {
+        setUacPending(true);
+        toast.success("Git 安装程序已启动", { description: UAC_HINT });
+      }
       refresh();
     } catch (e) {
       toast.error(`批量安装失败: ${e}`);

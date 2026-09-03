@@ -493,8 +493,7 @@ pub fn uninstall_python(logger: &Arc<Logger>) -> Result<String, String> {
 }
 
 /// 下载并静默安装 Python（官方完整安装包；写入当前用户 + 加入 PATH）。
-/// 安装器本身会异步执行并结束；为确认完成，安装前记录 python --version 失败状态，
-/// 安装后再探测。返回提示（安装包在后台执行时可能需等待）。
+/// Start-Process -Wait 同步等待安装器结束（含 UAC 确认），返回时安装已完成。
 pub fn install_python(logger: &Arc<Logger>) -> Result<String, String> {
     let version = "3.13.9"; // 官方 python.org 3.13 系列稳定版（满足 3.10+ 要求）
     let exe_name = format!("python-{version}-amd64.exe");
@@ -505,6 +504,7 @@ pub fn install_python(logger: &Arc<Logger>) -> Result<String, String> {
     logger.progress("toolchain", crate::core::events::InstallPhase::Download, 100, "Python 下载完成，启动安装…");
     // 静默安装：当前用户 + 加入 PATH + pip
     // /quiet /InstallAllUsers=0 /PrependPath=1 /Include_pip=1
+    // -Wait：同步等待安装器退出（UAC 确认 + 静默安装全程），返回即安装完成
     let ps = format!(
         "Start-Process -FilePath '{}' -ArgumentList '/quiet','/InstallAllUsers=0','/PrependPath=1','/Include_pip=1' -Verb RunAs -Wait",
         dest.to_string_lossy().replace('\'', "''")
@@ -520,20 +520,22 @@ pub fn install_python(logger: &Arc<Logger>) -> Result<String, String> {
             crate::core::text::decode(&out.stderr).trim()
         ));
     }
-    logger.progress("toolchain", crate::core::events::InstallPhase::Install, 100, "Python 安装已启动");
-    // 探测确认（python.org 安装器写完 PATH 环境变量需要广播；当前进程内不可见，
-    // 用固定安装路径探测：%LOCALAPPDATA%\Programs\Python\Python313\python.exe）
-    let local = std::env::var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();
-    let probe = local.join("Programs").join("Python").join("Python313").join("python.exe");
-    if probe.exists() {
-        logger.info(&format!("Python 已安装确认: {}", probe.display()));
+    // 同步等待结束 → 注册表 PythonCore 已写入安装目录；探测确认安装成功
+    let dirs = crate::core::pathutil::python_install_dirs();
+    if !dirs.is_empty() {
+        let installed = dirs
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        logger.info(&format!("Python 已安装确认（注册表 PythonCore）: {installed}"));
+        logger.progress("toolchain", crate::core::events::InstallPhase::Done, 100, "Python 安装完成");
+        Ok(format!("Python {version} 已安装完成（已加入 PATH，全局可用）"))
     } else {
-        logger.info("Python 安装器已启动（等待安装完成后可在工具链面板重新检测）");
+        // 注册表未找到（异常：安装被取消/失败）→ 提示手动确认
+        logger.warn("Python 安装器已退出但注册表 PythonCore 未找到安装目录，请检查安装是否被取消");
+        Err("Python 安装可能未完成：注册表未找到安装目录，请检查是否在 UAC 弹窗中取消了安装".to_string())
     }
-    Ok(format!(
-        "Python {version} 安装程序已启动（UAC 确认后完成），安装包位于 {}",
-        dest.display()
-    ))
 }
 
 #[cfg(test)]

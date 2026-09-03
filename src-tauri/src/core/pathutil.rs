@@ -271,6 +271,142 @@ fn expand_env(input: &str) -> String {
     input.to_string()
 }
 
+/// 枚举已安装 Python 的安装目录（检测用兜底源）。
+///
+/// 为什么需要：python.org 官方安装器（per-user /PrependPath）把 python.exe 装到
+/// `%LOCALAPPDATA%\Programs\Python\Python3xx\` 并写入**用户 PATH（HKCU）**，
+/// 启动器进程的环境快照不会刷新 → `python --version` 探测 miss。
+/// 而注册表 `SOFTWARE\Python\PythonCore\<ver>\InstallPath` 的默认值 = 安装目录，
+/// **实时可见**（注册表无快照问题），是最可靠的探测源。
+///
+/// 返回所有能找到的安装目录（HKCU + HKLM，python.org 官方安装器都会写）。
+pub fn python_install_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER,
+            HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY,
+        };
+        use windows::core::{PCWSTR, PWSTR};
+
+        // python.org 官方安装器写 HKCU（per-user）或 HKLM（all-users）；两者都查
+        const ROOTS: [(HKEY, &str); 2] = [
+            (HKEY_LOCAL_MACHINE, "SOFTWARE\\Python\\PythonCore"),
+            (HKEY_CURRENT_USER, "SOFTWARE\\Python\\PythonCore"),
+        ];
+        for (root, base) in ROOTS {
+            let base_wide: Vec<u16> = base.encode_utf16().chain(std::iter::once(0)).collect();
+            // SAFETY: base_wide 为合法 NUL 结尾 UTF-16；hkey 为输出句柄
+            let mut core_key: HKEY = HKEY(std::ptr::null_mut());
+            let res = unsafe {
+                RegOpenKeyExW(
+                    root,
+                    PCWSTR(base_wide.as_ptr()),
+                    Some(0),
+                    KEY_READ | KEY_WOW64_64KEY,
+                    &mut core_key,
+                )
+            };
+            if res.is_err() {
+                continue;
+            }
+            // 枚举版本子键：3.13、3.9 …（PythonCore\<ver>\InstallPath）
+            let mut index = 0u32;
+            loop {
+                let mut name_buf = [0u16; 64];
+                let mut name_len = name_buf.len() as u32;
+                // SAFETY: name_buf 有效；RegEnumKeyExW 枚举 hkey 下子键
+                let r = unsafe {
+                    RegEnumKeyExW(
+                        core_key,
+                        index,
+                        Some(PWSTR(name_buf.as_mut_ptr())),
+                        &mut name_len,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                };
+                if r.is_err() {
+                    break;
+                }
+                index += 1;
+                // 打开 <ver>\InstallPath，读默认值（REG_SZ）= 安装目录
+                let ver = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+                let sub = format!("{base}\\{ver}\\InstallPath");
+                let sub_wide: Vec<u16> = sub.encode_utf16().chain(std::iter::once(0)).collect();
+                // SAFETY: sub_wide 合法
+                let mut inst_key: HKEY = HKEY(std::ptr::null_mut());
+                let res2 = unsafe {
+                    RegOpenKeyExW(
+                        root,
+                        PCWSTR(sub_wide.as_ptr()),
+                        Some(0),
+                        KEY_READ | KEY_WOW64_64KEY,
+                        &mut inst_key,
+                    )
+                };
+                if res2.is_err() {
+                    continue;
+                }
+                // 读 InstallPath 默认值（lpvalue = None → 默认值）
+                let mut buf = [0u16; 1024];
+                let mut len = (buf.len() * 2) as u32;
+                // SAFETY: buf 有效；长度参数正确
+                let res3 = unsafe {
+                    RegGetValueW(
+                        inst_key,
+                        None,
+                        None,
+                        windows::Win32::System::Registry::RRF_RT_REG_SZ,
+                        None,
+                        Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+                        Some(&mut len),
+                    )
+                };
+                // SAFETY: inst_key 为 RegOpenKeyExW 打开
+                let _ = unsafe { RegCloseKey(inst_key) };
+                if res3.is_ok() && len >= 2 {
+                    let raw = &buf[..(len as usize / 2)];
+                    let raw = trim_trailing_nul(raw);
+                    let dir = String::from_utf16_lossy(raw).trim().trim_end_matches('\\').to_string();
+                    if !dir.is_empty() && PathBuf::from(&dir).join("python.exe").exists() {
+                        // 去重（同版本可能 HKCU/HKLM 都有；python.exe 存在才收）
+                        let dir_pb = PathBuf::from(&dir);
+                        let lower = dir.to_lowercase();
+                        if !dirs.iter().any(|d: &PathBuf| d.to_string_lossy().to_lowercase() == lower) {
+                            dirs.push(dir_pb);
+                        }
+                    }
+                }
+            }
+            // SAFETY: core_key 为 RegOpenKeyExW 打开
+            let _ = unsafe { RegCloseKey(core_key) };
+        }
+        // 兜底：常见用户级安装路径（注册表缺失时，如被精简/手动安装）
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            if let Ok(entries) = std::fs::read_dir(
+                PathBuf::from(&local).join("Programs").join("Python"),
+            ) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.join("python.exe").exists() {
+                        let lower = p.to_string_lossy().to_lowercase();
+                        if !dirs.iter().any(|d: &PathBuf| d.to_string_lossy().to_lowercase() == lower) {
+                            dirs.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        // 版本降序（最新版本优先探测，与 py launcher 行为一致）
+        dirs.sort_by(|a, b| b.cmp(a));
+    }
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::path_contains;

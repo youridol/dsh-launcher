@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.1] - 2026-09-03
+
+### 修复
+
+- **Python 安装后仍显示缺失（状态检测不准确）**：
+  - 根因：python.org 官方安装器（per-user /PrependPath）把 python.exe 写入用户 PATH
+    （HKCU），启动器进程环境**快照不刷新** → `python --version` 探测 miss → 面板显示缺失；
+  - `detect_python` 增加多级兑底：`python` → `python3` → `py -3` → **注册表
+    PythonCore\<ver>\InstallPath 内的 python.exe**（注册表实时可见，无快照问题）；
+  - 新增 `core/pathutil::python_install_dirs`：枚举 HKCU+HKLM PythonCore 各版本安装目录
+    （python.exe 存在才收，去重，版本降序）+ 常见用户级 Programs\Python 兑底；
+  - `install_python` 安装器实为 `Start-Process -Wait` 同步完成，返回时安装已结束：
+    改为完成后读注册表确认并报“已安装完成”，不再提示“等待 UAC 后手动刷新”；
+    安装成功（含 Python）后 Rust 广播 `toolchain://changed` → 前端自动刷新为已就绪；
+  - 前端提示语义修正：仅 **Git 安装** 为真异步 UAC（无 -Wait）需提示等待，
+    Python 安装/卸载、Git 卸载均为同步完成，直接显示成功（不再误提示需手动重新检测）。
+- **Git 检测兑底**：PATH 无 git 时回退常见安装目录 `C:\Program Files\Git\cmd\git.exe`
+  （用户安装 Git 未勾选“加入 PATH”时也能识别）。
+
 ## [0.4.0] - 2026-09-03
 
 ### 新增

@@ -25,6 +25,7 @@ use crate::core::events::InstallPhase;
 use crate::core::logging::Logger;
 use crate::core::toolchain as core_toolchain;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// 工具链项
@@ -81,9 +82,11 @@ pub async fn install_toolchain(
             other => Err(format!("不支持的工具链: {other}")),
         };
         // 广播工具链变更（前端刷新条目状态 present/missing）。
-        // 例外：git/python 为 UAC 异步安装（Start-Process 立即返回或异步执行），
-        // 此时广播会误报“仍缺失”；由 ToolchainPanel 显示 UAC 提示并等用户完成后再手动刷新
-        if result.is_ok() && matches!(name.as_str(), "node" | "pnpm") {
+        // - node/pnpm/python：安装是同步等待完成的（node 解压 / npm i -g / python -Wait），
+        //   返回时安装已完成 → 可安全广播，前端立即刷新出“已就绪”；
+        // - git：UAC 异步（Start-Process 立即返回，安装未真正完成），广播会误报“仍缺失”，
+        //   由 ToolchainPanel 显示 UAC 提示并等用户完成后再手动刷新。
+        if result.is_ok() && matches!(name.as_str(), "node" | "pnpm" | "python") {
             crate::core::events::emit_toolchain_changed(&app);
         }
         result
@@ -344,7 +347,10 @@ fn detect_pnpm() -> ToolchainItem {
 }
 
 fn detect_git() -> ToolchainItem {
-    let ver = run_cmd("git", &["--version"]);
+    // 优先 PATH（git 已配 PATH 时快速返回）；失败回退常见系统安装路径
+    // （Git for Windows 默认装 C:\Program Files\Git\cmd\git.exe，Inno 安装器
+    //  会写 PATH，但部分用户安装时未勾选“加入 PATH”）
+    let ver = run_cmd("git", &["--version"]).or_else(detect_git_fallback);
     ToolchainItem {
         name: "git",
         installed_version: ver.clone(),
@@ -353,14 +359,68 @@ fn detect_git() -> ToolchainItem {
     }
 }
 
+/// Git 安装路径兜底：常见安装目录内的 git.exe（绝对路径，免 PATH）
+fn detect_git_fallback() -> Option<String> {
+    let candidates = [
+        PathBuf::from("C:\\Program Files\\Git\\cmd\\git.exe"),
+        PathBuf::from("C:\\Program Files (x86)\\Git\\cmd\\git.exe"),
+    ];
+    for c in candidates {
+        if c.exists() {
+            let mut cmd = command::hidden(&c);
+            cmd.arg("--version");
+            if let Ok(out) = cmd.output() {
+                if out.status.success() {
+                    let s = crate::core::text::decode(&out.stdout);
+                    let s = s.trim().to_string();
+                    if !s.is_empty() {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn detect_python() -> ToolchainItem {
-    let ver = run_cmd("python", &["--version"]);
+    // 依次探测：
+    // 1. PATH 中的 python（最常见；launcher 进程 PATH 快照内有则命中）
+    // 2. python3 / py -3（Linux/macOS 及 Windows py launcher）
+    // 3. 注册表 PythonCore 安装目录内的 python.exe（**python.org 安装器写用户 PATH
+    //    但当前进程快照不刷新**——注册表实时可见，见 pathutil::python_install_dirs）
+    let ver = run_cmd("python", &["--version"])
+        .or_else(|| run_cmd("python3", &["--version"]))
+        .or_else(|| run_cmd("py", &["-3", "--version"]))
+        .or_else(detect_python_fallback);
     ToolchainItem {
         name: "python",
         installed_version: ver.clone(),
         required: "3.10+（可选，SDK 用）",
         state: if ver.is_some() { "present" } else { "missing" },
     }
+}
+
+/// Python 安装路径兜底：注册表 PythonCore\<ver>\InstallPath 内的 python.exe
+/// （免 PATH，解决“安装器已写 PATH 但本进程/面板仍显示缺失”）。
+fn detect_python_fallback() -> Option<String> {
+    for dir in crate::core::pathutil::python_install_dirs() {
+        let exe = dir.join("python.exe");
+        if exe.exists() {
+            let mut cmd = command::hidden(&exe);
+            cmd.arg("--version");
+            if let Ok(out) = cmd.output() {
+                if out.status.success() {
+                    let s = crate::core::text::decode(&out.stdout);
+                    let s = s.trim().to_string();
+                    if !s.is_empty() {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 安装 Node：官方 zip 解压到用户级目录（免管理员）+ 写用户 PATH
