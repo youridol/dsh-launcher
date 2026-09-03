@@ -70,6 +70,10 @@ pub async fn list_versions(
 /// 已安装的 dsh 版本（全局单版本）
 /// v0.2.3：优先检测 GitHub 安装目录（github-dsh\deepseek-harness），
 /// 再尝试 PATH 中的 dsh --version（npm 全局）。修复 GitHub 安装后状态不更新。
+///
+/// v0.4.6：执行 dsh --version 前先 probe_dsh_command 静态解析——本启动器 shim 指向
+/// 的安装目录缺失/被清空时，执行 dsh --version 会触发 pnpm 递归进程爆炸
+/// （cmd → node(pnpm) → cmd → ... 指数增长，见 github.rs::DshProbe），必须短路返回 None。
 #[tauri::command]
 pub async fn get_installed_version() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -86,7 +90,20 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
             }
             return Ok(Some("github:已安装".to_string()));
         }
-        // 2. PATH 中的 dsh --version（npm 全局）。Windows 上 dsh 是 .cmd shim，
+        // 2. 静态解析 PATH 中 dsh.cmd：本启动器 shim 指向损坏目录 → 短路（避免递归爆炸）
+        match crate::core::github::probe_dsh_command() {
+            crate::core::github::DshProbe::OwnedShimBroken => {
+                // 安装目录已被卸载/清空：不执行 dsh（执行会 pnpm 递归爆炸），视为未安装
+                return Ok(None);
+            }
+            crate::core::github::DshProbe::None => {
+                return Ok(None);
+            }
+            // OwnedShimOk（目标目录有效，虽不应在此分支，但执行是安全的）与 Foreign 继续
+            crate::core::github::DshProbe::OwnedShimOk
+            | crate::core::github::DshProbe::Foreign => {}
+        }
+        // 3. PATH 中的 dsh --version（npm 全局）。Windows 上 dsh 是 .cmd shim，
         //    不能直接 spawn（program not found），必须 cmd.exe /C 包装
         let mut c = command::hidden_cmd("dsh");
         c.arg("--version");

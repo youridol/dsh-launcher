@@ -368,6 +368,83 @@ fn shim_path_is_ours(p: &std::path::Path) -> bool {
     }
 }
 
+/// PATH 中 dsh 命令的可安全执行性判定结果
+///
+/// 背景（v0.4.6 修复进程爆炸）：dsh.cmd shim 内容是
+/// `cd /d <github 安装目录> && pnpm dsh %*`。当该安装目录被卸载/清空（残留空目录）时，
+/// pnpm 在空目录找不到 dsh 项目定义，会把 `dsh` 当作外部命令解析 → 又命中 PATH 中的
+/// dsh.cmd → 递归 spawn `cmd → node(pnpm) → cmd → ...`，指数级进程爆炸（实测 10 秒
+/// 内积累数百个 node.exe）。因此**执行任何 `dsh` 命令前必须先静态解析其目标**，
+/// 本启动器 shim 且目标目录无效时一律短路，绝不执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DshProbe {
+    /// PATH 中无 dsh.cmd
+    None,
+    /// 本启动器 GitHub shim，且指向的安装目录完整有效（package.json + apps 存在）
+    OwnedShimOk,
+    /// 本启动器 GitHub shim，但指向的安装目录缺失/不完整（package.json 不存在）
+    /// → 执行必触发 pnpm 递归爆炸，调用方必须短路
+    OwnedShimBroken,
+    /// PATH 中 dsh.cmd 不是本启动器创建（真实 npm 全局包）→ 可安全执行
+    Foreign,
+}
+
+/// 探测 PATH 中 dsh 命令类型（不执行 dsh，仅静态解析 dsh.cmd 内容 + 目录存在性）。
+/// 必须在任何 `dsh --version` / `dsh web` 之前调用：
+/// 若返回 OwnedShimBroken，继续执行 dsh 会触发 pnpm 递归进程爆炸（见 DshProbe 注释）。
+///
+/// 与 global_shim_is_ours 同款 PATH 探测方式（command::hidden_cmd 注入 node_dir）。
+pub fn probe_dsh_command() -> DshProbe {
+    let mut probe = command::hidden_cmd("where");
+    probe.arg("dsh.cmd");
+    let Ok(out) = probe.output() else {
+        return DshProbe::None;
+    };
+    if !out.status.success() {
+        return DshProbe::None;
+    }
+    let text = crate::core::text::decode(&out.stdout);
+    let Some(first) = text.lines().next() else {
+        return DshProbe::None;
+    };
+    let path = PathBuf::from(first.trim());
+    let Ok(content) = fs::read_to_string(&path) else {
+        // 存在但不可读：非本启动器管理，按外部命令处理（保守安全，不执行判断依据不足）
+        return DshProbe::Foreign;
+    };
+    if !shim_content_is_ours(&content) {
+        // 真实 npm 全局包 shim（内容不含 github-dsh/pnpm dsh）
+        return DshProbe::Foreign;
+    }
+    // 本启动器 shim：解析其指向的安装目录（内容中 cd /d "<dir>"）
+    // 格式：@echo off\r\ncd /d "<github_dir>"\r\npnpm dsh %*\r\n
+    let Some(dir) = extract_shim_target_dir(&content) else {
+        // shim 内容异常（无法解析目标目录）：视为损坏，禁止执行
+        return DshProbe::OwnedShimBroken;
+    };
+    let install_valid = dir.join("package.json").exists() && dir.join("apps").is_dir();
+    if install_valid {
+        DshProbe::OwnedShimOk
+    } else {
+        // 目标安装目录缺失/空目录：执行 dsh 会触发 pnpm 递归爆炸，判定为损坏
+        DshProbe::OwnedShimBroken
+    }
+}
+
+/// 从本启动器 dsh.cmd shim 内容中提取其 cd 目标安装目录（无则 None）
+/// 格式：`@echo off\r\ncd /d "<github_dir>"\r\npnpm dsh %*\r\n`
+fn extract_shim_target_dir(content: &str) -> Option<std::path::PathBuf> {
+    content
+        .lines()
+        .find_map(|l| {
+            let t = l.trim();
+            let rest = t.strip_prefix("cd /d \"")?;
+            let end = rest.find('\"')?;
+            Some(&rest[..end])
+        })
+        .map(std::path::PathBuf::from)
+}
+
 /// 本启动器 dsh.cmd shim 的内容特征：cd 到 github-dsh 安装目录后执行 pnpm dsh %*
 /// （install_global_shim 写入；npm 全局包生成的 dsh.cmd 指向 node_modules，不含这两个特征）
 fn shim_content_is_ours(content: &str) -> bool {
@@ -478,5 +555,23 @@ CALL "C:\Users\Administrator\AppData\Local\dsh-launcher\toolchain\node\node_modu
         // 内容不可读 / 无特征内容
         assert!(!shim_content_is_ours(""));
         assert!(!shim_content_is_ours("echo dsh"));
+    }
+
+    #[test]
+    fn test_extract_shim_target_dir() {
+        use super::extract_shim_target_dir;
+        // 标准 shim：cd /d "<dir>"
+        let ours = "@echo off\r\ncd /d \"C:\\Users\\Administrator\\AppData\\Local\\dsh-launcher\\github-dsh\\deepseek-harness\"\r\npnpm dsh %*\r\n";
+        let dir = extract_shim_target_dir(ours).expect("应提取到安装目录");
+        assert_eq!(
+            dir.to_string_lossy(),
+            "C:\\Users\\Administrator\\AppData\\Local\\dsh-launcher\\github-dsh\\deepseek-harness"
+        );
+        // 无 cd 行 / 格式异常 → None（判定为损坏 shim）
+        assert!(extract_shim_target_dir("@echo off\r\npnpm dsh %*\r\n").is_none());
+        assert!(extract_shim_target_dir("").is_none());
+        // 非本启动器 npm shim（无 cd /d 行）→ None
+        let npm_shim = "@ECHO off\r\nSETLOCAL\r\nCALL \"...node_modules\\@deepseek-ai\\dsh\\bin\\dsh.cmd\" %*\r\n";
+        assert!(extract_shim_target_dir(npm_shim).is_none());
     }
 }

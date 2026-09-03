@@ -155,15 +155,28 @@ impl ProcessManager {
         // Windows 上 npm 全局 dsh / 本启动器 shim 都是 .cmd，spawn 必须 cmd /C 包装；
         // dsh 存在性探测与 shim 归属探测必须与真实 spawn 用同一 PATH（含 node_dir 注入），
         // 否则分发机器（node_dir 不在当前进程 PATH 快照）会把本启动器 shim 误判成 npm 包。
+        // v0.4.6：**禁止直接执行 `dsh --version` 探测**。本启动器 GitHub shim 内容为
+        // `cd /d <安装目录> && pnpm dsh %*`；当安装目录被卸载/清空（残留空目录）时，pnpm
+        // 找不到本地 dsh 定义 → 把 dsh 当外部命令 → 递归命中 dsh.cmd → pnpm 递归爆炸
+        // （cmd → node(pnpm) → cmd → ... 指数级，实测 10 秒积累数百 node.exe）。
+        // 故改用 probe_dsh_command() 纯静态解析（读文件内容 + 目录存在性，零进程开销）。
         let github_dir = crate::core::github::github_clone_dir();
         let clone_ok = github_dir.join("apps/cli/src/bin.ts").exists();
-        let dsh_in_path = command::hidden_cmd("dsh")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        // 探测 PATH 中的 dsh.cmd 是否为本启动器创建的 GitHub shim（cd github 目录 && pnpm dsh）
-        let shim_owned = crate::core::github::global_shim_is_ours();
+        let probe = crate::core::github::probe_dsh_command();
+        let dsh_in_path = probe != crate::core::github::DshProbe::None;
+        let shim_owned = matches!(
+            probe,
+            crate::core::github::DshProbe::OwnedShimOk | crate::core::github::DshProbe::OwnedShimBroken
+        );
+        // 本启动器 shim 指向损坏目录（被卸载/清空）→ 直接报错，绝不执行 dsh（会递归爆炸）
+        if probe == crate::core::github::DshProbe::OwnedShimBroken {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                &format!("dsh.cmd 指向的 GitHub 安装目录缺失: {}", github_dir.display()),
+            );
+            return Err("dsh 安装目录缺失（GitHub shim 指向的目录已不存在或为空），请在版本管理中重新安装 dsh".to_string());
+        }
         let mut cmd;
         if dsh_in_path && !shim_owned {
             // PATH 中 dsh 为真实 npm 全局包 → dsh web --port <p> --no-open

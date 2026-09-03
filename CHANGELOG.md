@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.6] - 2026-09-03
+
+### 修复
+
+- **致命 bug：启动 dsh-launcher 后 node.exe 进程指数爆炸、停不下来**（用户机实测）：
+  - 现象：启动器启动/状态刷新后，node.exe（corepack pnpm.js dsh）与 cmd.exe 数量
+    指数级增长（10 秒内数百个），任务管理器里“频繁重复打开 node.exe”；WebView2
+    进程（msedgewebview2）也随之堆积（启动器每次重试/卡顿都新建内嵌窗口进程组）。
+  - 根因：卸载 dsh（GitHub 通道）后残留了指向已清空安装目录的全局 shim
+    `dsh.cmd`（内容：`cd /d <github-dsh 安装目录> && pnpm dsh %*`）。启动器每次
+    探测 dsh（`dsh --version`）都执行该 shim → pnpm 在空目录找不到本地 dsh 定义，
+    把 `dsh` 当外部命令解析 → 又命中 PATH 中同一 dsh.cmd → 递归 spawn
+    `cmd → node(pnpm) → cmd → ...`，进程树指数爆炸（实测进程链深达 10+ 层）。
+  - 修复（core/github.rs + commands/version.rs + core/process.rs）：
+    - 新增 `DshProbe` 枚举 + `probe_dsh_command()`：**纯静态解析** PATH 中 dsh.cmd
+      内容与目标目录存在性（零进程开销），判定 OwnedShimOk / OwnedShimBroken /
+      Foreign / None；本启动器 shim 指向缺失/空目录时判定 OwnedShimBroken；
+    - `get_installed_version()`（前端挂载/轮询频繁调用）与 `start_locked()`
+      （点“启动”）在**执行任何 dsh 命令前**先 probe：OwnedShimBroken 直接短路
+      （视为未安装 / 返回明确错误），绝不再执行会递归爆炸的 `pnpm dsh`；
+    - 新单元测试覆盖 shim 内容识别与 cd 目标目录提取（含 npm 全局 shim 不误判）。
+  - 版本 0.4.6。
+
 ## [0.4.5] - 2026-09-03
 
 ### 变更
