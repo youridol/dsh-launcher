@@ -1,5 +1,8 @@
-// 版本管理面板：双通道版本列表 + 安装/卸载（最新版本置顶）
+// 版本管理面板：双通道版本列表（按钮组切换 GitHub/npm）+ 安装/卸载（最新版本置顶）
 // v0.1.7：安装过程显示进度条（订阅 install://progress 事件）
+// v0.4.9：双通道列表融合——顶部按钮组切换 GitHub/npm，单一刷新按钮，默认 GitHub。
+//   两通道列表在进入时并发预加载（refresh 一次性拉齐），切换 Tab 零网络开销、零状态丢失，
+//   保证来回切换无 bug。安装任意通道版本时 Rust 端自动先卸载对侧通道（全局单版本）。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,18 +33,30 @@ import {
 import { toast } from "sonner";
 import { Package, RefreshCw } from "lucide-react";
 import ToolchainPanel from "@/components/ToolchainPanel";
+import { cn } from "@/lib/utils";
+
+/** 当前展示的通道 Tab（默认 GitHub） */
+type ActiveChannel = "github" | "npm";
+
+// 通道 Tab 元信息
+const CHANNEL_TABS: { key: ActiveChannel; label: string; hint: string }[] = [
+  { key: "github", label: "GitHub 通道", hint: "源码 clone + 构建" },
+  { key: "npm", label: "npm 通道", hint: "registry 现成包" },
+];
 
 export default function VersionPanel() {
   const [npmVersions, setNpmVersions] = useState<DshVersion[]>([]);
   const [ghVersions, setGhVersions] = useState<DshVersion[]>([]);
+  // 当前展示通道（默认 GitHub）
+  const [active, setActive] = useState<ActiveChannel>("github");
   const [installed, setInstalled] = useState<string | null>(null);
   // 安装路径（显示 harness 下载/安装目录）
   const [paths, setPaths] = useState<InstallPaths | null>(null);
   // 刷新安装状态中
   const [refreshingInstalled, setRefreshingInstalled] = useState(false);
   const [busy, setBusy] = useState(false);
-  // 正在刷新版本的通道（npm / github / null）
-  const [refreshing, setRefreshing] = useState<"npm" | "github" | null>(null);
+  // 正在刷新版本（单一刷新按钮；npm+github 并发拉取）
+  const [refreshing, setRefreshing] = useState(false);
   // 安装进度（当前安装任务）
   const [progress, setProgress] = useState<InstallProgress | null>(null);
 
@@ -114,18 +129,26 @@ export default function VersionPanel() {
     };
   }, [refreshInstalled]);
 
-  // 单独刷新某通道版本列表（npm / github 独立按钮）
-  const refreshChannel = useCallback(async (channel: "npm" | "github") => {
-    setRefreshing(channel);
+  // 单一刷新按钮：并发刷新两个通道版本列表（切换 Tab 只切展示，不触发网络）
+  const refreshAllChannels = useCallback(async () => {
+    setRefreshing(true);
     try {
-      const versions = await listVersions(channel);
-      if (channel === "npm") setNpmVersions(versions);
-      else setGhVersions(versions);
-    } catch (e) {
-      console.error(`刷新 ${channel} 版本失败`, e);
-      toast.error(`刷新 ${channel} 版本列表失败: ${e}`);
+      const [npm, gh] = await Promise.allSettled([
+        listVersions("npm"),
+        listVersions("github"),
+      ]);
+      if (npm.status === "fulfilled") setNpmVersions(npm.value);
+      else {
+        console.error("刷新 npm 版本失败", npm.reason);
+        toast.error(`刷新 npm 版本列表失败: ${npm.reason}`);
+      }
+      if (gh.status === "fulfilled") setGhVersions(gh.value);
+      else {
+        console.error("刷新 GitHub 版本失败", gh.reason);
+        toast.error(`刷新 GitHub 版本列表失败: ${gh.reason}`);
+      }
     } finally {
-      setRefreshing(null);
+      setRefreshing(false);
     }
   }, []);
 
@@ -157,6 +180,8 @@ export default function VersionPanel() {
       const msg = await installVersion(channel, version);
       setProgress({ channel, phase: "done", percent: 100, message: "安装完成" });
       toast.success(msg);
+      // 安装完成后自动切到该通道 Tab（让用户看到新装的“当前版本”）
+      if (channel === "github" || channel === "npm") setActive(channel);
       refresh();
     } catch (e) {
       setProgress(null);
@@ -193,6 +218,10 @@ export default function VersionPanel() {
     return ch === channel && (ver === version || ver === ver2);
   };
 
+  // 当前展示通道的版本列表
+  const activeVersions = active === "github" ? sortedGh : sortedNpm;
+  const activeEmpty = active === "github" ? ghVersions.length === 0 : npmVersions.length === 0;
+
   return (
     <Card className="flex min-h-0 flex-1 flex-col">
       <CardHeader className="shrink-0">
@@ -200,19 +229,64 @@ export default function VersionPanel() {
           <Package className="size-4" />
           版本管理
           <Badge variant="default">{installedLabel ?? "未安装"}</Badge>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            disabled={refreshingInstalled}
-            onClick={refreshInstalled}
-            title="刷新安装状态"
-          >
-            <RefreshCw className={refreshingInstalled ? "animate-spin" : ""} />
-          </Button>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={refreshingInstalled}
+              onClick={refreshInstalled}
+              title="刷新安装状态"
+            >
+              <RefreshCw className={refreshingInstalled ? "animate-spin" : ""} />
+            </Button>
+          </div>
         </CardTitle>
-        <CardDescription>npm / GitHub 双通道安装</CardDescription>
+        <CardDescription>GitHub / npm 双通道 · 全局单版本（切换安装自动卸载对侧）</CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+        {/* 通道切换按钮组 + 单一刷新按钮 */}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <div
+            className="inline-flex items-center gap-0.5 rounded-lg bg-muted p-0.5"
+            role="tablist"
+            aria-label="安装通道切换"
+          >
+            {CHANNEL_TABS.map((t) => {
+              const isActive = active === t.key;
+              return (
+                <Button
+                  key={t.key}
+                  size="sm"
+                  variant={isActive ? "default" : "ghost"}
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => setActive(t.key)}
+                  title={t.hint}
+                  className={cn(
+                    "px-3",
+                    !isActive && "text-muted-foreground hover:bg-muted/70",
+                  )}
+                >
+                  {t.label}
+                  <span className="ml-1.5 tabular-nums text-[10px] opacity-70">
+                    {(t.key === "github" ? ghVersions : npmVersions).length}
+                  </span>
+                </Button>
+              );
+            })}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={refreshing}
+            onClick={refreshAllChannels}
+            title="刷新全部通道版本列表"
+          >
+            <RefreshCw className={refreshing ? "animate-spin" : "size-3"} />
+            刷新列表
+          </Button>
+        </div>
+
         {/* 安装/下载目录（任务：显示 harness 下载和安装目录） */}
         {paths && (
           <div className="space-y-1 rounded-md border bg-muted/30 p-3 text-xs">
@@ -247,87 +321,60 @@ export default function VersionPanel() {
             </p>
           </div>
         )}
-        {/* 双通道左右排列（大屏两列；每通道展示最新 + 7 个历史版本；列内列表自适应高度滚动） */}
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="flex min-h-0 flex-col">
+        {/* 单一融合版本列表（按钮组切换 GitHub/npm） */}
+        <div className="flex min-h-0 flex-1 flex-col">
           <div className="mb-2 flex shrink-0 items-center justify-between">
-            <h3 className="text-sm font-medium">npm 通道</h3>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              disabled={refreshing !== null}
-              onClick={() => refreshChannel("npm")}
-              title="刷新 npm 版本列表"
-            >
-              <RefreshCw className={refreshing === "npm" ? "animate-spin" : ""} />
-            </Button>
+            <h3 className="text-sm font-medium">
+              {active === "github" ? "GitHub 通道版本" : "npm 通道版本"}
+              <span className="ml-2 text-xs text-muted-foreground">
+                {active === "github"
+                  ? "源码 clone + pnpm 构建"
+                  : "npm registry 现成包"}
+                {installed && active === installed.split(":")[0] ? " · 当前使用" : ""}
+              </span>
+            </h3>
           </div>
           <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
             {/* 最新 + 7 个历史版本 */}
-            {sortedNpm.slice(0, 8).map((v) => (
-              <div
-                key={v.version}
-                className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
-              >
-                <span className="text-sm">
-                  {v.version} {channelBadge(v.channel)}
-                </span>
-                <Button
-                  size="xs"
-                  variant="secondary"
-                  disabled={busy || isCurrent("npm", v.version)}
-                  onClick={() => handleInstall("npm", v.version)}
+            {activeVersions.slice(0, 8).map((v) => {
+              const isCur = isCurrent(v.channel, v.version);
+              return (
+                <div
+                  key={`${v.channel}-${v.version}`}
+                  className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
                 >
-                  {isCurrent("npm", v.version) ? "当前版本" : "安装"}
-                </Button>
+                  <span className="flex min-w-0 items-center gap-2 text-sm">
+                    <span className="truncate">{v.version}</span>
+                    {channelBadge(v.channel)}
+                  </span>
+                  <Button
+                    size="xs"
+                    variant="secondary"
+                    disabled={busy || isCur}
+                    onClick={() => handleInstall(v.channel, v.version)}
+                    title={
+                      isCur
+                        ? "当前版本"
+                        : v.channel !== active
+                          ? `切换到 ${v.channel} 通道（自动卸载当前通道）`
+                          : "安装此版本"
+                    }
+                  >
+                    {isCur ? "当前版本" : v.channel !== active ? "切换安装" : "安装"}
+                  </Button>
+                </div>
+              );
+            })}
+            {activeEmpty && (
+              <div className="text-xs text-muted-foreground">
+                {active === "github"
+                  ? "暂无版本（请检查 GitHub 网络/镜像，或点击“刷新列表”）"
+                  : "暂无版本（请检查 npm 网络/镜像，或点击“刷新列表”）"}
               </div>
-            ))}
-            {npmVersions.length === 0 && (
-              <div className="text-xs text-muted-foreground">暂无版本（请检查 npm 网络/镜像）</div>
             )}
           </div>
         </div>
-
-        <div className="flex min-h-0 flex-col">
-          <div className="mb-2 flex shrink-0 items-center justify-between">
-            <h3 className="text-sm font-medium">GitHub 通道</h3>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              disabled={refreshing !== null}
-              onClick={() => refreshChannel("github")}
-              title="刷新 GitHub 版本列表"
-            >
-              <RefreshCw className={refreshing === "github" ? "animate-spin" : ""} />
-            </Button>
-          </div>
-          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
-            {/* 最新 + 7 个历史版本 */}
-            {sortedGh.slice(0, 8).map((v) => (
-              <div
-                key={v.version}
-                className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
-              >
-                <span className="text-sm">
-                  {v.version} {channelBadge(v.channel)}
-                </span>
-                <Button
-                  size="xs"
-                  variant="secondary"
-                  disabled={busy || isCurrent("github", v.version)}
-                  onClick={() => handleInstall("github", v.version)}
-                >
-                  {isCurrent("github", v.version) ? "当前版本" : "安装"}
-                </Button>
-              </div>
-            ))}
-            {ghVersions.length === 0 && (
-              <div className="text-xs text-muted-foreground">暂无版本（请检查 GitHub 网络/镜像）</div>
-            )}
-          </div>
-        </div>
-        </div>
-        {/* 分割线 + 工具链（从左侧边栏移入：位于 npm/GitHub 列表底部） */}
+        {/* 分割线 + 工具链（从左侧边栏移入：位于版本列表底部） */}
         <Separator className="my-1" />
         <div className="shrink-0">
           <ToolchainPanel />

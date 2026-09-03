@@ -125,6 +125,14 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
 
 /// 安装指定版本（npm 通道：npm i -g；GitHub 通道：clone + build）
 /// v0.1.7：流式执行 + 进度事件 + 日志实时输出；成功后广播 version://changed
+///
+/// v0.4.9：**安装前自动卸载对侧通道版本**（ADR-0003 全局单版本的彻底化）。
+/// 此前两个通道的 dsh 各自独立安装：npm 全局包残留 node_modules、GitHub 源码目录
+/// 残留数 GB，且 dsh.cmd 同名互相覆盖，切换不干净（旧版残留影响启动决策）。
+/// 现在：
+/// - 装 npm 通道 → 先清理 GitHub 通道（删除源码目录 + 自家 shim；不清 DSH_HOME 数据）
+/// - 装 GitHub 通道 → 先卸载 npm 全局包（npm uninstall -g @deepseek-ai/dsh）
+/// 保证任何时刻全局只有一个通道的 dsh 生效。
 #[tauri::command]
 pub async fn install_version(
     app: tauri::AppHandle,
@@ -133,10 +141,29 @@ pub async fn install_version(
     version: String,
 ) -> Result<String, String> {
     let logger = Arc::clone(&state.logger);
+    let process = std::sync::Arc::clone(&state.process);
     tauri::async_runtime::spawn_blocking(move || {
+        // 切换通道前统一优雅停止 dsh（ADR-0002：卸载/替换前必须停止，避免运行中
+        // 占用安装目录/全局包导致删除失败；装完由用户重新启动）
+        logger.info("切换通道安装前尝试停止 dsh（若有运行）…");
+        if let Err(e) = process.stop() {
+            logger.warn(&format!("停止 dsh 失败（继续安装）: {e}"));
+        }
         let result = match channel.as_str() {
-            "npm" => install_npm_version(&logger, &version),
-            "github" => core_github::install_version(&version, &logger),
+            "npm" => {
+                // 先卸载对侧 GitHub 通道（若有），再装 npm
+                if let Err(e) = uninstall_github_channel(&logger) {
+                    logger.warn(&format!("清理 GitHub 通道失败（继续 npm 安装）: {e}"));
+                }
+                install_npm_version(&logger, &version)
+            }
+            "github" => {
+                // 先卸载对侧 npm 全局包（若有），再装 GitHub
+                if let Err(e) = uninstall_npm_global(&logger) {
+                    logger.warn(&format!("卸载 npm 全局包失败（继续 GitHub 安装）: {e}"));
+                }
+                core_github::install_version(&version, &logger)
+            }
             other => Err(format!("未知通道: {other}")),
         };
         if result.is_ok() {
@@ -149,56 +176,80 @@ pub async fn install_version(
     .map_err(|e| format!("任务执行失败: {e}"))?
 }
 
+/// 卸载 npm 全局 dsh 包（幂等：未安装时静默成功）
+fn uninstall_npm_global(logger: &Arc<crate::core::logging::Logger>) -> Result<(), String> {
+    logger.info("卸载 npm 全局包 @deepseek-ai/dsh…");
+    let npm_result = {
+        let mut c = command::hidden_cmd("npm");
+        c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
+        c.output()
+    };
+    match &npm_result {
+        Ok(out) if out.status.success() => {
+            logger.info("npm 全局包已卸载");
+            Ok(())
+        }
+        Ok(out) => {
+            let msg = format!(
+                "npm uninstall 返回非零: {}",
+                crate::core::text::decode(&out.stderr).trim()
+            );
+            logger.warn(&msg);
+            Ok(()) // npm 包不存在时返回码也非零，视为已干净
+        }
+        Err(e) => {
+            logger.warn(&format!("npm uninstall 执行失败（可能未通过 npm 安装）: {e}"));
+            Ok(()) // 非 npm 通道安装（无全局包）→ 无操作成功
+        }
+    }
+}
+
+/// 卸载 GitHub 通道（删除源码目录 + 自家全局 shim；**不清 DSH_HOME 用户数据**）
+/// 幂等：目录/shim 不存在时静默成功。返回 Err 仅当目录删除失败（被占用）。
+/// 注意：调用方应确保 dsh 已停止（本函数不负责停 dsh——卸载命令/切换安装统一先停）。
+fn uninstall_github_channel(
+    logger: &Arc<crate::core::logging::Logger>,
+) -> Result<(), String> {
+    // 1. 删除 GitHub 源码目录（github-dsh\deepseek-harness）
+    let gh_dir = core_github::github_clone_dir();
+    if gh_dir.exists() {
+        logger.info(&format!("清理 GitHub 源码目录: {}", gh_dir.display()));
+        std::fs::remove_dir_all(&gh_dir)
+            .map_err(|e| format!("清理 GitHub 源码目录失败: {e}"))?;
+    } else {
+        logger.info("GitHub 源码目录不存在，跳过清理");
+    }
+    // 2. 清理全局 dsh.cmd shim（GitHub 安装时创建的；npm 全局包安装时 npm 会写自己的）
+    let shim = core_github::global_shim_path();
+    if let Some(p) = shim {
+        if p.exists() {
+            match std::fs::remove_file(&p) {
+                Ok(_) => logger.info(&format!("已删除全局 dsh 命令: {}", p.display())),
+                Err(e) => logger.warn(&format!("删除 dsh.cmd shim 失败（继续）: {e}")),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 卸载 dsh（npm 全局 + GitHub 通道目录 + 可选 DSH_HOME 用户数据）
 /// 完成后广播 version://changed（前端版本管理/状态卡联动刷新）
 #[tauri::command]
 pub async fn uninstall(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let logger = Arc::clone(&state.logger);
-    // 卸载前先优雅停止 dsh（ADR-0003：卸载前必须停止，避免删除运行中目录失败）
     let process = std::sync::Arc::clone(&state.process);
     tauri::async_runtime::spawn_blocking(move || {
+        // 卸载前先优雅停止 dsh（ADR-0002：卸载前必须停止，避免删除运行中目录失败）
         logger.info("卸载前优雅停止 dsh…");
         if let Err(e) = process.stop() {
             logger.warn(&format!("停止 dsh 失败（继续卸载）: {e}"));
         }
         logger.info("开始卸载 dsh（npm 全局包 + GitHub 源码目录 + 全局命令）…");
-        // 1. 卸载 npm 全局包
-        let npm_result = {
-            let mut c = command::hidden_cmd("npm");
-            c.args(["uninstall", "-g", "@deepseek-ai/dsh"]);
-            c.output()
-        };
-        match &npm_result {
-            Ok(out) if out.status.success() => {
-                logger.info("npm 全局包已卸载");
-            }
-            Ok(out) => {
-                logger.warn(&format!(
-                    "npm uninstall 返回非零: {}",
-                    crate::core::text::decode(&out.stderr).trim()
-                ));
-            }
-            Err(e) => {
-                logger.warn(&format!("npm uninstall 执行失败（可能未通过 npm 安装）: {e}"));
-            }
-        }
-        // 2. 清理 GitHub 通道克隆目录（固定 deepseek-harness）
-        let gh_dir = core_github::github_clone_dir();
-        if gh_dir.exists() {
-            match std::fs::remove_dir_all(&gh_dir) {
-                Ok(_) => logger.info(&format!("GitHub 源码目录已清理: {}", gh_dir.display())),
-                Err(e) => return Err(format!("清理 GitHub 源码目录失败: {e}")),
-            }
-        } else {
-            logger.info("GitHub 源码目录不存在，跳过清理");
-        }
-        // 3. 清理全局 dsh.cmd shim（GitHub 安装时创建的）
-        let shim = crate::core::github::global_shim_path();
-        if let Some(p) = shim {
-            let _ = std::fs::remove_file(&p);
-            logger.info(&format!("已删除全局 dsh 命令: {}", p.display()));
-        }
-        // 4. DSH_HOME 用户数据（卸载开关 keepDshHomeOnUninstall）：
+        // 1. 卸载 npm 全局包（幂等）
+        uninstall_npm_global(&logger)?;
+        // 2. 清理 GitHub 通道（删源码目录 + 自家 shim；幂等）
+        uninstall_github_channel(&logger)?;
+        // 3. DSH_HOME 用户数据（卸载开关 keepDshHomeOnUninstall）：
         //    默认保留（不接管、不碰用户数据，见 ADR-0002）；仅当用户显式关闭保留开关时
         //    才删除 dsh 官方默认数据目录 ~/.dsh，且先确认目录特征（避免误删非 dsh 数据）。
         let cfg = crate::core::config::AppConfig::load();
