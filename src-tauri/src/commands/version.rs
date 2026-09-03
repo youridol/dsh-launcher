@@ -94,11 +94,13 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
         if !out.status.success() {
             return Ok(None);
         }
-        Ok(String::from_utf8(out.stdout)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(|v| format!("npm:{v}")))
+        let ver = crate::core::text::decode(&out.stdout);
+        let ver = ver.trim().to_string();
+        Ok(if ver.is_empty() {
+            None
+        } else {
+            Some(format!("npm:{ver}"))
+        })
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
@@ -156,7 +158,7 @@ pub async fn uninstall(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
             Ok(out) => {
                 logger.warn(&format!(
                     "npm uninstall 返回非零: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
+                    crate::core::text::decode(&out.stderr).trim()
                 ));
             }
             Err(e) => {
@@ -230,10 +232,10 @@ fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
     if !out.status.success() {
         return Err(format!(
             "查询 npm 版本失败: {}",
-            String::from_utf8_lossy(&out.stderr)
+            crate::core::text::decode(&out.stderr)
         ));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = crate::core::text::decode(&out.stdout);
     let versions: Vec<String> = serde_json::from_str(&text).unwrap_or_default();
     Ok(versions
         .into_iter()

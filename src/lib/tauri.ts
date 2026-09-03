@@ -90,6 +90,28 @@ export function installToolchain(name: string): Promise<string> {
   return invoke("install_toolchain", { name });
 }
 
+/** 卸载工具链（node 同步删目录；git/python 启动官方卸载器 UAC） */
+export function uninstallToolchain(name: string): Promise<string> {
+  return invoke("uninstall_toolchain", { name });
+}
+
+/** 批量操作结果（对应 Rust BatchResult） */
+export interface BatchResult {
+  name: string;
+  ok: boolean;
+  message: string;
+}
+
+/** 批量一键安装缺失工具链（按 node→pnpm→git→python 依赖顺序） */
+export function batchInstallToolchains(): Promise<BatchResult[]> {
+  return invoke("batch_install_toolchains");
+}
+
+/** 一键卸载全部工具链 */
+export function batchUninstallToolchains(): Promise<BatchResult[]> {
+  return invoke("batch_uninstall_toolchains");
+}
+
 /** 列出某通道可用版本 */
 export function listVersions(channel: string): Promise<DshVersion[]> {
   return invoke("list_versions", { channel });

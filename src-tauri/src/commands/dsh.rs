@@ -160,7 +160,7 @@ pub fn create_desktop_shortcut(state: State<'_, AppState>) -> Result<String, Str
     if !out.status.success() {
         return Err(format!(
             "创建快捷方式失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            crate::core::text::decode(&out.stderr).trim()
         ));
     }
     if !lnk.exists() {

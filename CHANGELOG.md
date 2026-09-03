@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.4.0] - 2026-09-03
+
+### 新增
+
+- **工具链管理功能**（ToolchainPanel 全面升级）：
+  - 每个工具链条目支持**卸载**：Node 删除用户级安装目录并清理用户 PATH 条目；
+    Git/Python 从注册表卸载入口（UninstallString）定位官方卸载器并提权启动（UAC 确认）；
+  - **批量一键安装**：自动检测缺失工具链并按依赖顺序安装（Node → pnpm → Git → Python）；
+  - **一键卸载**：确认对话框后批量卸载 Node/Git/Python（npm/pnpm 随 Node 目录一并清理）；
+  - 新增 **Python 支持**：官方 python.org 完整安装包静默安装（/PrependPath 写 PATH，UAC 确认）。
+- **core/text.rs**：统一子进程输出解码（UTF-8 优先，失败回退 Windows 代码页 GBK/CP1252/CP437，
+  按 GetACP 探测），替换全部 20+ 处 `String::from_utf8_lossy` 硬解点。
+- **core/pathutil.rs**：用户 PATH（HKCU\Environment）读写/前缀注入/移除（REG_EXPAND_SZ，
+  写后广播 WM_SETTINGCHANGE）；`node_dir_injection` 在系统 PATH 无 node 时注入用户级 Node 目录。
+
+### 修复
+
+- **工具链输出日志乱码**（根因：Windows 中文系统 cmd/taskkill/PowerShell 输出 GBK/OEM 字节，
+  旧代码按 UTF-8 硬解成 `������`）：全部命令输出解码点（含 stream 逐行、dsh 进程 stdout/stderr、
+  npm/git 版本查询、taskkill 错误、PowerShell 下载/安装错误）统一走 core/text.rs 代码页回退解码。
+- **分发后其他机器 pnpm 安装失败**（"pnpm 安装失败: 命令退出码: 1"）：
+  1. `command::hidden_cmd` 统一把用户级 node_dir 注入子进程 PATH（npm/pnpm/dsh 均为 .cmd，
+     运行时需要 node）—— 修复 "'npm' 不是内部或外部命令"；
+  2. Node 安装成功后把 node_dir 写入**用户 PATH**（HKCU，免管理员），重启/其他终端全局可用；
+  3. `install_pnpm` 在 npm 不在系统 PATH 时回退 node_dir\npm.cmd 绝对路径执行。
+- **分发后其他机器 python 安装失败**（"不支持的工具链: python"）：install_toolchain 增加 python 分支。
+- **Git/Python 卸载入口匹配安全**：DisplayName 精确语义匹配（Git 仅 "Git"/"Git for Windows"，
+  Python 仅主安装项 `Python X.Y.Z (64-bit)`，排除 MSI 拆分组件与 GitHub Desktop/GitHub CLI 误匹配），
+  并优先非 MsiExec 卸载器；UninstallString 引号路径 + 参数正确拆分。
+
+### 变更
+
+- 版本同步至 0.4.0（MINOR：新功能工具链管理）。
+
 ## [0.3.32] - 2026-09-02
 
 ### 变更

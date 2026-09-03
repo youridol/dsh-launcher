@@ -9,7 +9,7 @@
 use crate::core::command;
 use crate::core::logging::{LogLevel, LogSource, Logger};
 use crate::core::port;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -114,7 +114,7 @@ impl ProcessManager {
         if !out.status.success() {
             return None;
         }
-        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let text = crate::core::text::decode(&out.stdout).trim().to_string();
         text.parse().ok()
     }
 
@@ -459,7 +459,7 @@ impl ProcessManager {
             c.output()
         };
         let still_has = match list {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).contains("dshmarket"),
+            Ok(out) => crate::core::text::decode(&out.stdout).contains("dshmarket"),
             Err(_) => false,
         };
         if !still_has {
@@ -529,8 +529,10 @@ impl ProcessManager {
             let logger_err = Arc::clone(&logger);
             let t_out = stdout.map(|pipe| {
                 thread::spawn(move || {
+                    // v0.4.0：逐行用统一解码（UTF-8 优先 + 代码页回退），
+                    // 修复 dsh 在中文系统输出 GBK 中文时的日志乱码
                     let reader = BufReader::new(pipe);
-                    for line in reader.lines().map_while(Result::ok) {
+                    for line in read_lines_decoded(reader) {
                         let line = line.trim_end_matches('\r').to_string();
                         // 捕获 dsh web 完整 URL（含 token），供内嵌/外部打开免认证
                         if let Some(url) = extract_web_url(&line) {
@@ -545,7 +547,7 @@ impl ProcessManager {
             let t_err = stderr.map(|pipe| {
                 thread::spawn(move || {
                     let reader = BufReader::new(pipe);
-                    for line in reader.lines().map_while(Result::ok) {
+                    for line in read_lines_decoded(reader) {
                         let line = line.trim_end_matches('\r').to_string();
                         logger_err.log(LogSource::Dsh, LogLevel::Warn, &line);
                     }
@@ -600,16 +602,39 @@ fn extract_web_url(line: &str) -> Option<String> {
     }
 }
 
-/// 解码 Windows 控制台输出（GBK/GB18030 编码；UTF-8 优先，失败回退 GBK）
-/// 修复 taskkill 等系统命令错误信息乱码（中文 Windows 输出 GBK）
-fn decode_console_text(bytes: &[u8]) -> String {
-    // 优先按 UTF-8 解码（正常 Unicode 程序输出）
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return s.to_string();
+/// 按行读取并统一解码（UTF-8 优先 + 代码页回退）。
+/// BufRead::lines() 内部用 String::from_utf8 硬解 → GBK 中文乱码；
+/// 这里用字节级行切分 + core::text::decode。
+fn read_lines_decoded<R: std::io::Read>(mut reader: R) -> impl Iterator<Item = String> {
+    let mut lines = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        for &b in &chunk[..n] {
+            if b == b'\n' {
+                if !buf.is_empty() {
+                    lines.push(crate::core::text::decode(&buf));
+                    buf.clear();
+                }
+            } else {
+                buf.push(b);
+            }
+        }
     }
-    // 失败 → 按 GBK（Windows 中文代码页 936）解码
-    let (cow, _, _) = encoding_rs::GBK.decode(bytes);
-    cow.into_owned()
+    if !buf.is_empty() {
+        lines.push(crate::core::text::decode(&buf));
+    }
+    lines.into_iter()
+}
+
+/// 解码 Windows 控制台输出（UTF-8 优先，失败回退代码页 GBK/OEM）
+/// 实现见 core/text.rs（统一解码，全部子进程输出解码都走它，避免各点乱码）
+pub(crate) fn decode_console_text(bytes: &[u8]) -> String {
+    crate::core::text::decode(bytes)
 }
 
 /// 检查指定 PID 的进程是否存活（tasklist 精确过滤）
@@ -621,7 +646,7 @@ fn process_alive(pid: u32) -> bool {
     c.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
     match c.output() {
         Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
+            let text = crate::core::text::decode(&out.stdout);
             // 输出包含 PID 行则存活（无匹配时输出 "INFO: No tasks"）
             text.contains(&pid.to_string())
         }

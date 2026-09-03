@@ -35,8 +35,12 @@ pub fn hidden<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     std::process::Command::new(program)
 }
 
-/// 创建一个"无窗口"的 .cmd 命令执行器（适用于 npm / pnpm 等 batch 脚本）
+/// 创建一个"无窗口"的 .cmd 命令执行器（适用于 npm / pnpm / dsh 等 batch 脚本）
 /// 通过 `cmd.exe /C` 包装，cmd 会按 PATHEXT 正确解析 .cmd 并保持输出管道。
+///
+/// v0.4.0：统一注入用户级 Node 目录到 PATH —— npm/pnpm/dsh 运行时需要 node，
+/// 分发机器（本启动器安装 Node，仅写入用户 PATH）当前进程环境快照不含新 PATH，
+/// 必须进程内前缀注入，否则 cmd /C npm 报 "'npm' 不是内部或外部命令"（退出码 1）。
 #[cfg(windows)]
 pub fn hidden_cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     use std::os::windows::process::CommandExt;
@@ -44,6 +48,8 @@ pub fn hidden_cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Comman
     cmd.creation_flags(CREATE_NO_WINDOW);
     // /C 执行后退出；/D 忽略 AutoRun（避免用户注册表 AutoRun 干扰）
     cmd.arg("/D").arg("/C").arg(program.as_ref());
+    // 注入用户级 node_dir（幂等：PATH 已有则跳过；探测一次 where node，开销极小）
+    crate::core::pathutil::inject_node_path_into(&mut cmd);
     cmd
 }
 

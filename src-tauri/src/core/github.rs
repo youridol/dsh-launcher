@@ -87,7 +87,7 @@ pub fn list_releases() -> Result<Vec<String>, String> {
         .output()
         .map_err(|e| format!("git ls-remote 执行失败: {e}"))?;
     if out.status.success() {
-        let text = String::from_utf8_lossy(&out.stdout);
+        let text = crate::core::text::decode(&out.stdout);
         let versions = parse_tags_from_ls_remote(&text);
         if !versions.is_empty() {
             return Ok(versions);
@@ -96,7 +96,7 @@ pub fn list_releases() -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
     // git 路径失败（镜像不支持 git 协议等）→ 兜底走 API，并给出诊断信息
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let stderr = crate::core::text::decode(&out.stderr).trim().to_string();
     let hint = if stderr.is_empty() {
         format!("git ls-remote 失败（退出码 {})", out.status.code().unwrap_or(-1))
     } else {
@@ -304,7 +304,7 @@ pub fn npm_prefix_dir() -> PathBuf {
     c.args(["prefix", "-g"]);
     if let Ok(out) = c.output() {
         if out.status.success() {
-            let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let prefix = crate::core::text::decode(&out.stdout).trim().to_string();
             if !prefix.is_empty() {
                 return PathBuf::from(prefix);
             }

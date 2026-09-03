@@ -102,6 +102,8 @@ pub fn run_streamed(
 ///   git 的 `\r` 进度刷新、npm/pnpm 的 `\n` 普通行都能实时拿到。
 /// - 缓冲跨行保留（不丢数据）；EOF 时的尾行（无换行）也回调。
 /// - 空行不回调（避免 \r\n 连排产生空行）。
+/// - **编码修复**：行按 UTF-8 严格解码，失败回退 Windows 代码页（GBK/OEM）——
+///   cmd/npm 批处理在中文系统输出的 GBK 中文不再乱码（见 core/text.rs）。
 pub(crate) fn read_all_lines<R: std::io::Read>(mut reader: R, on_line: &dyn Fn(&str)) {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -113,7 +115,7 @@ pub(crate) fn read_all_lines<R: std::io::Read>(mut reader: R, on_line: &dyn Fn(&
         for &b in &chunk[..n] {
             if b == b'\r' || b == b'\n' {
                 if !buf.is_empty() {
-                    let line = String::from_utf8_lossy(&buf).trim().to_string();
+                    let line = crate::core::text::decode(&buf).trim().to_string();
                     if !line.is_empty() {
                         on_line(&line);
                     }
@@ -126,7 +128,7 @@ pub(crate) fn read_all_lines<R: std::io::Read>(mut reader: R, on_line: &dyn Fn(&
     }
     // EOF 尾行
     if !buf.is_empty() {
-        let line = String::from_utf8_lossy(&buf).trim().to_string();
+        let line = crate::core::text::decode(&buf).trim().to_string();
         if !line.is_empty() {
             on_line(&line);
         }
