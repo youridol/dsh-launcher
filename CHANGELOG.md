@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.10] - 2026-09-03
+
+### 修复
+
+- **卸载 Git / Python 失败：“Start-Process : 系统找不到指定的文件”**（真实客户机
+  192.168.3.122 实测复现 + 验证）：
+  - 现象：点卸载 Git / Python → 日志报 `Start-Process -FilePath 'C:\Program'`
+    `-ArgumentList 'Files\Git\unins00...'`（路径在**第一个空格处截断**）→
+    “系统找不到指定的文件”。
+  - 根因：注册表 UninstallString 是**整体引号包裹**的路径，如
+    `"C:\Program Files\Git\unins000.exe"`、
+    `"C:\Users\...\Package Cache\{...}\python-3.14.0-amd64.exe"  /uninstall`。
+    core/toolchain.rs 的 find_uninstall_entry 在收集候选时执行
+    `trim_matches('"')` **提前剥掉首尾引号** → 返回值变成无引号含空格的裸路径
+    → split_uninstall_cmd 按“无引号：第一个空白前为 exe”切分 → exe 截断为
+    `C:\Program` / `C:\Users\Administrator\AppData\Local\Package` →
+    Start-Process 找不到该“文件”。
+  - 修复：find_uninstall_entry **保留原始 UninstallString（含引号）**，引号解析统一
+    交给已正确支持引号路径的 split_uninstall_cmd（对 Git 整体引号、Python 引号+
+    参数两种真实格式均正确解析）。
+  - 验证：测试机 192.168.3.122 实测——旧逻辑 exe=C:\Program（不存在）复现报错；
+    修复后 exe=C:\Program Files\Git\unins000.exe 与完整 Python 缓存路径均解析正确
+    且文件存在；新增 test_split_uninstall_cmd_real_registry_values 回归测试
+    （真实注册表值 Git/Python）。版本 0.4.10。
+
 ## [0.4.9] - 2026-09-03
 
 ### 变更

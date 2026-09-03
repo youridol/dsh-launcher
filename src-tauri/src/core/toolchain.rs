@@ -313,15 +313,21 @@ pub fn find_uninstall_entry(keyword: &str) -> Option<String> {
                     if uninstall_entry_matches(&name, keyword) {
                         if let Some(u) = uninstall {
                             if !u.is_empty() {
-                                let trimmed = u.trim().trim_matches('"').to_string();
-                                if !trimmed.is_empty() {
+                                // 保留原始 UninstallString（含引号包裹的路径）——
+                                // 引号解析统一交给 split_uninstall_cmd。
+                                // v0.4.10 修复：此前这里 trim_matches('\"') 提前剥掉首尾引号，
+                                // 使 "C:\Program Files\Git\unins000.exe" 变成无引号的含空格路径，
+                                // split_uninstall_cmd 按首空格切分 → exe=C:\Program →
+                                // Start-Process 报"系统找不到指定的文件"（Git/Python 卸载失败）。
+                                let raw = u.trim().to_string();
+                                if !raw.is_empty() {
                                     // 非 MsiExec 的卸载器优先（可独立运行卸载整个软件）
-                                    if trimmed.to_lowercase().contains("msiexec") {
+                                    if raw.to_lowercase().contains("msiexec") {
                                         if msi_candidate.is_none() {
-                                            msi_candidate = Some(trimmed);
+                                            msi_candidate = Some(raw);
                                         }
                                     } else if exe_candidate.is_none() {
-                                        exe_candidate = Some(trimmed);
+                                        exe_candidate = Some(raw);
                                     }
                                 }
                             }
@@ -733,12 +739,12 @@ mod tests {
 
             #[test]
     fn test_split_uninstall_cmd() {
-        // Inno（纯引号路径，无参数）
+        // Inno（纯引号路径，无参数）——真实 Git 卸载入口："C:\Program Files\Git\unins000.exe"
         let raw1 = r#""C:\Program Files\Git\unins000.exe""#;
         let (exe, args) = split_uninstall_cmd(raw1);
         assert_eq!(exe, "C:\\Program Files\\Git\\unins000.exe");
         assert!(args.is_empty());
-        // python.org exe + 参数（引号路径 + 空格 /uninstall）
+        // python.org exe + 参数（引号路径 + 空格 /uninstall）——真实 Python 卸载入口
         let raw2 = r#""C:\Users\a\AppData\Local\Package Cache\{abc}\python-3.14.0-amd64.exe"  /uninstall"#;
         let (exe2, args2) = split_uninstall_cmd(raw2);
         assert!(exe2.contains("python-3.14.0-amd64.exe"));
@@ -752,6 +758,42 @@ mod tests {
         let (exe4, args4) = split_uninstall_cmd("C:\\unins000.exe");
         assert_eq!(exe4, "C:\\unins000.exe");
         assert!(args4.is_empty());
+    }
+
+    #[test]
+    fn test_split_uninstall_cmd_real_registry_values() {
+        // 回归测试（v0.4.10 修复）：find_uninstall_entry 现在**保留原始 UninstallString**
+        // （含引号），不再提前 trim_matches('"')。以下是两台真实机器注册表抓到的值，
+        // 经 split_uninstall_cmd 拆分必须得到完整路径（不能在空格处截断）。
+        //
+        // Git for Windows：整体被引号包裹，路径含空格
+        let git_raw = r#""C:\Program Files\Git\unins000.exe""#;
+        let (exe, args) = split_uninstall_cmd(git_raw);
+        assert_eq!(
+            exe, "C:\\Program Files\\Git\\unins000.exe",
+            "Git 卸载器路径必须完整（含空格），当前: {exe:?}"
+        );
+        assert!(args.is_empty(), "Git 无参数: {args:?}");
+        // 修复前 find_uninstall_entry 会把它变成无引号 → exe=C:\Program（截断）
+        let broken_input = "C:\\Program Files\\Git\\unins000.exe"; // 旧 bug 的入参
+        let (exe_bad, _) = split_uninstall_cmd(broken_input);
+        assert_eq!(exe_bad, "C:\\Program", "旧路径会截断（演示 bug）");
+
+        // Python 3.14.0：引号路径 + 双空格 + /uninstall
+        let py_raw = r#""C:\Users\Administrator\AppData\Local\Package Cache\{a9c48b80-2c48-47ac-8c9e-32a1b0ec69e5}\python-3.14.0-amd64.exe"  /uninstall"#;
+        let (py_exe, py_args) = split_uninstall_cmd(py_raw);
+        assert!(py_exe.contains("python-3.14.0-amd64.exe"), "Python 卸载器路径完整: {py_exe:?}");
+        assert_eq!(py_args, vec!["/uninstall"], "Python 卸载参数: {py_args:?}");
+        // 修复前 find_uninstall_entry 的 trim_matches('"') 会把整体引号剥掉 → 无引号含空格
+        // → split 在首空格截断，exe 变成 "C:\Users\...\Package"（路径片段），
+        // Start-Process 因此报“系统找不到指定的文件”
+        let old_bug_input = py_raw.trim_matches('"'); // 模拟旧 find_uninstall_entry 返回值
+        let (exe_bad2, _) = split_uninstall_cmd(old_bug_input);
+        assert_ne!(
+            exe_bad2,
+            py_exe,
+            "旧 bug 会截断 Python 卸载器路径: {exe_bad2:?} vs 正确 {py_exe:?}"
+        );
     }
 
     #[test]
