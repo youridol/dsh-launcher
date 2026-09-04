@@ -73,41 +73,43 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
             return;
         }
 
-        // ② 等带 token 的完整 URL（内存捕获优先，日志兜底；≤10s）
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut url: Option<String> = None;
-        while Instant::now() < deadline {
-            let mem = process.web_url();
-            if !mem.is_empty() {
-                url = Some(mem);
-                break;
-            }
-            if let Some(u) = crate::core::logging::extract_latest_web_url() {
-                url = Some(u);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        let url = url.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
-
-        // v0.5.5（冷启动 404 修复）：token URL 拿到 ≠ HTTP 路由就绪——dsh 先监端口
-        // 后挂路由，期间带 token 请求返回 404，开窗即 WebView2 首载 404（须重开）。
-        // 轮询 HTTP 200 直到可服务（≤20s）再建窗，杜绝 404 死窗口。
+        // v0.5.7（启动自动开窗修复）：URL 获取与 HTTP 就绪探测一体化循环。
+        // 旧实现：先等 URL（含读旧缓存兜底）再固定探测——若拿到旧/过期 token
+        // （dsh 重启后 token 变化），dsh 对无效 token 返回 400（非 2xx/3xx）→
+        // 探测超时不开窗；而手动打开时 dsh 稳定、token 有效（303）→ 秒过。
+        // 现在：循环内取**最新内存 web_url**（tail 捕获当前 dsh 新 token；不读旧
+        // 缓存避免旧 token），有效则 web_ready 探测；通过即建窗（≤40s）。
         {
             use std::time::{Duration, Instant};
-            let deadline = Instant::now() + Duration::from_secs(20);
+            let deadline = Instant::now() + Duration::from_secs(40);
+            let mut ready_url: Option<String> = None;
             while Instant::now() < deadline {
-                if crate::core::port::web_ready(&url, 2000) {
-                    break;
+                let mem = process.web_url();
+                if !mem.is_empty() && mem.contains("token=") {
+                    if crate::core::port::web_ready(&mem, 2000) {
+                        ready_url = Some(mem);
+                        break;
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(700));
             }
-        }
+            let url = match ready_url {
+                Some(u) => u,
+                None => {
+                    logger.log(
+                        crate::core::logging::LogSource::Launcher,
+                        crate::core::logging::LogLevel::Warn,
+                        "自动打开 Web GUI 超时：dsh 访问地址未在 40s 内就绪（HTTP 未响应 2xx/3xx）",
+                    );
+                    return;
+                }
+            };
 
-        // ③ 主线程创建内嵌窗口（带高清图标）
-        let app3 = app.clone();
-        let app3_inner = app3.clone();
-        let _ = app3.run_on_main_thread(move || build_web_gui_window(&app3_inner, &url));
+            // ③ 主线程创建内嵌窗口（带高清图标）
+            let app3 = app.clone();
+            let app3_inner = app3.clone();
+            let _ = app3.run_on_main_thread(move || build_web_gui_window(&app3_inner, &url));
+        }
     });
 }
 

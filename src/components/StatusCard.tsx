@@ -229,36 +229,6 @@ export default function StatusCard() {
 
   const running = status === "running" || status === "starting";
 
-  // Web GUI：内嵌 Tauri WebviewWindow / 外部浏览器（opener 插件）
-  // 用带 token 的完整 URL 打开（dsh web 要求认证，裸 URL 会 401）。
-  // 分发机器修复（v0.4.4）：dsh 冷启动后 token 需要数秒~数十秒才从 stdout
-  // 实时到达启动器。这里轮询等待完整 URL（最多 40s），拿不到就不打开窗口，
-  // 避免两种"死窗口"：端口未监听 → ERR_CONNECTION_REFUSED；
-  // 裸 URL → 401 "dsh web authentication required"。
-  // v0.4.13（审计修复 L2）：取消令牌（alive）下渗到内层轮询——
-  // 弹窗被取消/重开后立即停止空转 IPC，不再等到 40s 超时。
-  async function waitForWebUrl(
-    timeoutMs: number,
-    isAlive: () => boolean,
-  ): Promise<string | null> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (!isAlive()) return null;
-      try {
-        const full = await getWebUrl();
-        // v0.5.4：仅接受**含 token** 的完整 URL 才放行——
-        // 防 get_web_url 兜底（旧缓存/裸 URL）在 dsh 打印新 token 前返回非空，
-        // 导致窗口过早弹出（见 process.rs start 清缓存修复）。裸 URL 会 401。
-        if (full && /[?&]token=/.test(full)) return full;
-      } catch (e) {
-        console.error("获取 Web URL 失败（重试）", e);
-      }
-      if (!isAlive()) return null;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    return null;
-  }
-
   async function handleDesktopShortcut() {
     try {
       const msg = await createDesktopShortcut();
@@ -390,40 +360,45 @@ export default function StatusCard() {
         return;
       }
 
-      // ④ 等带 token 的完整 URL（≤40s），拿不到不开死窗口
-      setStageIdx(3);
-      const url = await waitForWebUrl(40_000, alive);
-      if (!alive()) return;
-      if (!url) {
-        setOpenErr("尚未获取 dsh Web 访问地址（token 未输出）。dsh 可能仍在启动，请稍后重试");
-        return;
-      }
-
-      // v0.5.5（冷启动 404 修复）：token URL 拿到 ≠ HTTP 路由就绪——冷启动时 dsh
-      // 先监端口后挂路由，期间带 token 请求返回 404（"找不到此 127.0.0.1 页"），
-      // 此时开窗 WebView2 首载命中 404 错误页且不自动恢复，须关闭重开。
-      // 改为轮询 HTTP 探测直到 **200 可服务**（≤30s）再开窗，从根本上杜绝 404。
+      // v0.5.7（启动自动开窗修复）：URL 获取与 HTTP 就绪探测**一体化循环**。
+      // 旧实现：waitForWebUrl 一次拿到 url 即固定，再用同一 url 探测 30s——若该
+      // url 是旧/过期 token（dsh 重启后 token 变化、或启动瞬间拿到残留值），dsh
+      // 对无效 token 返回 **400 Bad Request**（非 2xx/3xx）→ 探测 30s 死循环超时，
+      // 而手动"内嵌打开"时 dsh 稳定、url 为当前有效 token（303）→ 秒过。
+      // 现在：循环内每次先取**最新** getWebUrl（token 更新后自然拿到新值），有
+      // 有效 URL 才探测；探测通过即开窗，不通过继续取最新 URL 重试（≤40s）。
       setStageIdx(4);
-      const readyDeadlineHttp = Date.now() + 30_000;
-      let httpReady = false;
-      while (Date.now() < readyDeadlineHttp) {
+      const httpDeadline = Date.now() + 40_000;
+      let finalUrl: string | null = null;
+      while (Date.now() < httpDeadline) {
         if (!alive()) return;
+        // 每次取最新 URL（token 会随 dsh 重启变化）
+        let cur: string | null = null;
         try {
-          if (await probeWebReady(url)) {
-            httpReady = true;
-            break;
-          }
+          cur = await getWebUrl();
         } catch {
-          /* 瞬时失败继续轮询 */
+          cur = null;
+        }
+        // 仅含 token 的 URL 才参与探测
+        if (cur && /[?&]token=/.test(cur)) {
+          try {
+            if (await probeWebReady(cur)) {
+              finalUrl = cur;
+              break;
+            }
+          } catch {
+            /* 瞬时失败继续 */
+          }
         }
         await sleep(700);
       }
       if (!alive()) return;
-      if (!httpReady) {
-        setOpenErr("dsh Web 已输出访问地址但 30 秒内未就绪（HTTP 未返回 200）。请稍后重试或查看日志");
+      if (!finalUrl) {
+        setOpenErr("dsh Web 在 40 秒内未就绪（访问地址无效或 HTTP 未响应 2xx/3xx）。请稍后重试或查看日志");
         return;
       }
-      // 缓冲 300ms 让服务稳定后 WebView2 首载（可忽略的微小窗口）
+      const url = finalUrl;
+      // 缓冲 300ms 让服务稳定后 WebView2 首载
       await sleep(300);
       if (!alive()) return;
 

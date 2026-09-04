@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.7] - 2026-09-04
+
+### 修复
+
+- **"启动 dsh 后自动开内嵌窗口"失败（弹窗卡"正在打开"直到超时重试），手动点"内嵌
+  打开"却正常**：
+  - 根因：冷启动时序下 URL 获取与 HTTP 探测**分离且 url 固定**——旧实现先
+    `waitForWebUrl` 一次性拿到 url（可能是旧/过期 token，dsh 重启后 token 变化，
+    启动瞬间内存/缓存可能残留上一轮值），再用**同一 url** 探测 30s。实测 dsh 对
+    **无效 token 返回 400 Bad Request**（非 2xx/3xx）→ 探测死循环超时；而手动打开
+    时 dsh 稳定、url 为当前有效 token（返回 303）→ 秒过。差异即"自动失败、手动成功"。
+  - 修复：前端 `openWithGuide` 与 Rust `open_web_gui_window` 均改为 **URL 获取与
+    HTTP 探测一体化循环**——每次迭代取**最新** getWebUrl（tail 捕获当前 dsh 新
+    token，token 变化自然拿到新值；Rust 侧不再读旧缓存兜底），仅含 token 的 URL
+    参与 `web_ready`（2xx/3xx 判定）探测，通过即开窗，不通过继续取最新 URL 重试
+    （≤40s）。有效 token + 路由就绪（303）必然通过，冷启动自动开窗不再卡死。
+  - 移除不再使用的 `waitForWebUrl`（内联入一体化循环）。
+
 ## [0.5.6] - 2026-09-04
 
 ### 修复
