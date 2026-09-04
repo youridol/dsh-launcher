@@ -14,6 +14,33 @@ use tauri::Emitter;
 
 use crate::core::events::{self, InstallPhase};
 
+/// v0.4.15（审计修复）：日志文件打开共享"读取 + 删除"标志。
+/// - 本进程 tail（只读句柄，见 process.rs tail_output_file）与写句柄并存；
+/// - rotate 在文件达到 10MB 时级联 rename：Windows 默认文件句柄不含
+///   FILE_SHARE_DELETE 时 rename 会失败 → 切割静默失效。这里统一放开。
+/// 非 Windows 平台 OpenOptions 无 share_mode，返回空值（不调用）。
+#[cfg(windows)]
+fn log_open_share_mode() -> u32 {
+    // FILE_SHARE_READ(0x1) | FILE_SHARE_DELETE(0x4)
+    0x0000_0001 | 0x0000_0004
+}
+
+#[cfg(not(windows))]
+fn log_open_share_mode() -> u32 {
+    0
+}
+
+/// 在 OpenOptions 上应用共享标志（Windows 需 OpenOptionsExt trait 在作用域）。
+/// 非 Windows 平台为 no-op。
+#[cfg(windows)]
+fn apply_share_mode(opts: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    opts.share_mode(log_open_share_mode());
+}
+
+#[cfg(not(windows))]
+fn apply_share_mode(_opts: &mut OpenOptions) {}
+
 /// 前端日志流事件名
 pub const LOG_EVENT: &str = "log://line";
 
@@ -159,7 +186,14 @@ impl Logger {
                 rotate(&path);
                 inner.current_size = 0;
             }
-            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+            // v0.4.15（审计修复）：打开时显式共享"删除"——tail（只读）句柄与 rotate 的
+            // rename 同进程并发时，若无 FILE_SHARE_DELETE，rename 会 ERROR_SHARING_VIOLATION
+            // → 10MB 切割静默失败、日志无限增长。日志文件本身不涉密（token 已打码），
+            // 共享删除无安全副作用。
+            let mut opts = OpenOptions::new();
+            opts.create(true).append(true);
+            apply_share_mode(&mut opts);
+            if let Ok(mut f) = opts.open(&path) {
                 if f.write_all(line.as_bytes()).is_ok() {
                     inner.current_size += line.len() as u64;
                 }

@@ -108,13 +108,19 @@ pub fn run_streamed(
                 ),
             );
             command::kill_process_tree(child.id());
-            // 强杀后等待进程真正退出（回收句柄）
+            // 强杀后等待进程真正退出（回收句柄）。
+            // v0.4.15（审计修复）：加 3s 上限，防止 taskkill 失败且进程不退时
+            // try_wait 永不 Some → 调用线程死循环卡死。
+            let kill_deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 if child
                     .try_wait()
                     .map_err(|e| format!("等待命令退出失败: {e}"))?
                     .is_some()
                 {
+                    break;
+                }
+                if Instant::now() >= kill_deadline {
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));

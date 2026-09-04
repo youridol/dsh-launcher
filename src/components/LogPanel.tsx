@@ -127,16 +127,24 @@ export default function LogPanel({ className }: { className?: string }) {
 
   // 补流：读取最新日志文件 → 解析为条目（倒序：新在前）放入实时流
   // 覆盖 LogPanel 挂载前产生的日志（如启动早期、主窗口操作、dsh 启动输出）
+  // v0.4.15（审计修复）：只补流 <date>.log（排除 dsh-web-stdout/stderr.log——
+  // 那些是进程输出落盘，已实时逐行进 log://line 流，补流会与实时流大量重复），
+  // 且只读尾部 MAX_STREAM_LINES 行（避免一次性全量解析 10MB 大文件卡首帧）。
   const backfillLatestFile = useCallback(async () => {
     try {
       const files = await listLogs();
-      const latest = files[0];
+      // 只取日期日志：yyyy-MM-dd.log（切割档 .log.1 是历史，不补）
+      const latest = files.find((f) => /^\d{4}-\d{2}-\d{2}\.log$/.test(f.path));
       if (!latest || backfilledRef.current === latest.path) return;
       const rawText = await readLog(latest.path);
       const lines: LogLine[] = [];
+      // 从后向前解析并截断到 MAX_STREAM_LINES（只保留最新 N 行）
       for (const line of rawText.split(/\r?\n/).reverse()) {
         const parsed = parseLogLine(line);
-        if (parsed) lines.push(parsed);
+        if (parsed) {
+          lines.push(parsed);
+          if (lines.length >= MAX_STREAM_LINES) break;
+        }
       }
       if (lines.length > 0) {
         backfilledRef.current = latest.path;

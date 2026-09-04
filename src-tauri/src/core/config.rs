@@ -120,7 +120,13 @@ impl AppConfig {
         let mut v = serde_json::to_value(self).map_err(|e| e.to_string())?;
         if let Some(token) = v.get("github_token").and_then(|t| t.as_str()) {
             if !token.is_empty() {
-                let enc = encrypt_token(token).unwrap_or_else(|| token.to_string());
+                // v0.4.15（审计修复 3.x）：加密失败不再静默回退明文落盘——
+                // 此前 `unwrap_or_else(|| token.to_string())` 在 CryptProtectData 失败
+                // （策略限制/异常）时把 token 明文写盘且无任何提示。改为返回 Err，
+                // 由调用方（set_github_token）提示用户保存失败，绝不降级明文持久化。
+                let enc = encrypt_token(token).ok_or_else(|| {
+                    "GitHub Token 加密失败（DPAPI 不可用），已取消保存以防明文落盘".to_string()
+                })?;
                 v["github_token"] = serde_json::Value::String(enc);
             }
         }

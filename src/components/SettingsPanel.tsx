@@ -1,8 +1,6 @@
 // 设置面板：镜像源配置 + 滑动开关 + 版本管理入口
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -15,7 +13,6 @@ import {
   setSwitches,
 } from "@/lib/tauri";
 import { toast } from "sonner";
-import { Settings } from "lucide-react";
 
 // 常用镜像下拉预设
 const PRESETS = {
@@ -34,12 +31,7 @@ const PRESETS = {
   ],
 };
 
-export default function SettingsPanel({
-  embedded = false,
-}: {
-  // true = 在弹出子窗口/对话框内使用（无 Card 外壳与重复标题）
-  embedded?: boolean;
-}) {
+export default function SettingsPanel() {
   const [installedVersion, setInstalledVersion] = useState<string | null>(null);
 
   // 表单状态
@@ -136,19 +128,9 @@ export default function SettingsPanel({
 
   return (
     <div className="space-y-4">
-      {!embedded && (
-        <CardHeader className="px-0 pt-0">
-          <CardTitle className="flex items-center gap-2">
-            <Settings className="size-4" />
-            设置
-            <Badge variant="outline">
-              {installedVersion ? `dsh ${installedVersion}` : "dsh 未安装"}
-            </Badge>
-          </CardTitle>
-          <CardDescription>镜像源与运行行为</CardDescription>
-        </CardHeader>
-      )}
-      {embedded && installedVersion && (
+      {/* v0.4.15（审计修复）：移除 embedded 分支与 CardHeader 外壳——SettingsPanel
+          恒以弹出对话框（App.tsx）形态使用，非 embedded 形态无调用方（死代码）。 */}
+      {installedVersion && (
         <div className="text-xs text-muted-foreground">
           dsh {installedVersion}
         </div>

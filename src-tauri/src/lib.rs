@@ -18,7 +18,7 @@ pub struct AppState {
     pub process: Arc<ProcessManager>,
 }
 
-/// 打开内嵌 Web GUI 窗口（桌面快捷方式 --web-gui / 自动打开 / 托盘唤醒时调用）
+/// 打开内嵌 Web GUI 窗口（桌面快捷方式 --web-gui / 自动打开 / 前端"内嵌打开"命令调用）
 ///
 /// 分发机器修复（v0.4.4）：
 /// - 不再"立刻打开一个很可能打不开/未认证的窗口"：
@@ -27,6 +27,10 @@ pub struct AppState {
 /// - 本函数放到后台线程：先等端口监听（≤8s），再等带 token 的完整 URL（≤10s），
 ///   拿到才开窗；dsh 未运行/始终无 URL 时聚焦主窗口并落日志提示，不再开死窗口。
 /// - 窗口创建仍回主线程（Tauri 窗口非线程安全），见 run_on_main_thread。
+///
+/// 注：前端"内嵌打开"按钮路径 v0.4.15 起不再自行 new WebviewWindow，改调
+/// `create_web_gui_window` IPC → 本函数，与 --web-gui / autoOpen 共用同一条带高清
+/// 图标的 Rust 创建路径（修复此前前端创建窗口首帧缺失高清图标的模糊，见审计报告）。
 fn open_web_gui_window(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -95,64 +99,34 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
 
 /// 主线程上真正创建内嵌 Web GUI 窗口（label 唯一化 + 图标双保险）
 ///
-/// 链接放行设计（v0.4.14，修复内嵌窗口无法打开会话超链接）：
-/// - dsh Web UI 会把 markdown 里的 http/https 外链渲染成 target="_blank" 锚点；
-/// - opener 插件注入的点击拦截脚本会把这类点击转成 `plugin:opener|open_url` IPC，
-///   该 IPC 已由 capabilities/dsh-web-gui.json 对该窗口放行 → 系统默认浏览器打开外链；
-/// - 若某次点击未经 opener 脚本（如 window.open、拖拽、快捷键直达）而到达 WebView2
-///   原生 new-window 请求，wry 默认会直接取消（SetHandled(true)）——这里显式接管：
-///   任何新窗口请求一律用系统默认浏览器打开目标 URL 并 Deny（不让 WebView2 在
-///   启动器进程内长出游离子窗口），导航则全放行（本窗口仅作 dsh Web UI 的载体）。
+/// v0.4.15（审计修复）：窗口构建主体迁移至 commands/dsh.rs
+/// `create_embedded_web_gui_window`，与前端"内嵌打开"命令共用同一实现，
+/// 消除此前"前端 new WebviewWindow（首帧无高清图标）"与"本函数（builder 预置图标）"
+/// 两套路径的任务栏图标分歧（详见 AUDIT_REPORT §图标 / FIX_PLAN_ICON.md）。
+///
+/// 链接放行设计（v0.4.14，修复内嵌窗口无法打开会话超链接）见 dsh.rs 函数注释。
 fn build_web_gui_window(app: &tauri::AppHandle, url: &str) {
-    let parsed: tauri::Url = url
-        .parse()
-        .unwrap_or_else(|_| "http://127.0.0.1:3080".parse().unwrap());
-    let label = format!(
-        "dsh-web-gui-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    // 构造内嵌窗口。构建期预置 SMALL 图标（消除创建瞬间默认 exe 图标闪现）；
-    // 图标源与主窗口一致（同一 512px PNG，同源生成）。
-    // 解码/设置失败均不影响窗口创建：图标随后由 apply_window_icon 补发 SMALL+BIG（双保险）
-    const WIN_ICON: &[u8] = include_bytes!("../icons/icon.png");
-    let builder = {
-        let base = || {
-            tauri::WebviewWindowBuilder::new(
-                app,
-                label.clone(),
-                tauri::WebviewUrl::External(parsed.clone()),
-            )
-            .title("deepseek-harness Web UI")
-            .inner_size(1600.0, 900.0)
-            // 载体窗口：导航全放行（不拦截 dsh Web UI 内部任何跳转）
-            .on_navigation(|_url| true)
-            // 原生新窗口请求（window.open / 部分新窗口型链接）：一律丢给
-            // 系统默认浏览器打开，并拒绝在进程内创建游离 WebView2 子窗口
-            .on_new_window(|url, _features| {
-                // 借用 app 打开外链；失败仅落 stderr，不阻断（见 wry 线程要求：
-                // Windows 上该回调运行在独立线程，这里不做任何阻塞 UI 操作）
-                if let Err(e) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
-                    eprintln!("[dsh-launcher] 系统浏览器打开外链失败 {url}: {e}");
-                }
-                tauri::webview::NewWindowResponse::Deny
-            })
-        };
-        match tauri::image::Image::from_bytes(WIN_ICON) {
-            Ok(img) => match base().icon(img) {
-                Ok(b) => b,
-                Err(_) => base(), // 平台不支持预置时回退（罕见）
-            },
-            Err(_) => base(),
+    // 失败原因落日志（窗口图标/创建问题不再静默）
+    match commands::dsh::create_embedded_web_gui_window(app, url) {
+        Ok(label) => {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.logger.log(
+                    crate::core::logging::LogSource::Launcher,
+                    crate::core::logging::LogLevel::Info,
+                    &format!("已打开内嵌 Web GUI 窗口 {label}"),
+                );
+            }
         }
-    };
-    if let Ok(win) = builder.build() {
-        // 高清任务栏图标：SMALL + ICON_BIG（任务栏大图标，修复模糊）
-        // 启动期 logger 尚未关联 emitter，失败落 stderr 便于排查（错误已含 API/原因）
-        if let Err(e) = commands::dsh::apply_window_icon(&win) {
-            eprintln!("[dsh-launcher] 设置内嵌窗口图标失败: {e}");
+        Err(e) => {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.logger.log(
+                    crate::core::logging::LogSource::Launcher,
+                    crate::core::logging::LogLevel::Warn,
+                    &format!("打开内嵌 Web GUI 窗口失败: {e}"),
+                );
+            } else {
+                eprintln!("[dsh-launcher] 打开内嵌 Web GUI 窗口失败: {e}");
+            }
         }
     }
 }
@@ -161,6 +135,28 @@ fn build_web_gui_window(app: &tauri::AppHandle, url: &str) {
 pub fn run() {
     // v0.4.13（审计修复 2.9）：Logger::init 内部已带目录降级，不再 expect panic
     let logger = Arc::new(Logger::init());
+    // v0.5.2（日志全域化）：全局 panic hook —— release 无控制台时 panic 完全不可见，
+    // 此前静默崩溃（用户只看到"没反应"）。hook 把 panic 位置与消息写入日志目录
+    // 独立崩溃文件 + 经 Logger 落盘（若可用），保证任何崩溃都有迹可查。
+    {
+        let logger = Arc::clone(&logger);
+        std::panic::set_hook(Box::new(move |info| {
+            let msg = format!("panic: {info}");
+            // 独立崩溃文件（不受 Logger 轮转影响）
+            let crash_path = crate::core::logging::logs_dir().join("crash.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&crash_path)
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{msg}");
+            }
+            logger.error(&msg);
+            // 保留默认行为输出到 stderr（若存在控制台）
+            eprintln!("[dsh-launcher] {msg}");
+        }));
+    }
     let process = Arc::new(ProcessManager::new(Arc::clone(&logger)));
     // v0.4.13（审计修复 2.11）：后端 5s 状态对账（收养实例退出/外部启停收敛）
     process.spawn_reconcile();
@@ -191,10 +187,10 @@ pub fn run() {
                 // 关联日志发射器（前端实时流式接收）
                 logger.set_emitter(app.handle().clone());
                 // 设置主窗口/任务栏高清图标（SMALL 512px PNG + ICON_BIG 256px，DPI 缩放后仍清晰）
-                // 失败不阻断启动，落 stderr（错误已含 API/原因，便于排查）
+                // 失败不阻断启动，记日志（v0.5.2：不再仅 eprintln，release 无控制台时可见）
                 if let Some(win) = app.get_webview_window("main") {
                     if let Err(e) = commands::dsh::apply_window_icon(&win) {
-                        eprintln!("[dsh-launcher] 设置主窗口图标失败: {e}");
+                        logger.warn(&format!("设置主窗口图标失败: {e}"));
                     }
                 }
                 // 创建系统托盘
@@ -263,6 +259,7 @@ pub fn run() {
             commands::dsh::get_web_url,
             commands::dsh::create_desktop_shortcut,
             commands::dsh::set_web_gui_icon,
+            commands::dsh::create_web_gui_window,
             commands::dsh::start_dsh,
             commands::dsh::stop_dsh,
             commands::dsh::restart_dsh,
@@ -288,6 +285,8 @@ pub fn run() {
         // v0.4.13（审计修复 2.9）：release 无控制台时 panic 不可见，改为
         // 显式落错误并退出（错误码 1），便于日志/进程退出码排查。
         .unwrap_or_else(|e| {
+            // v0.5.2（日志全域化）：同时落 Logger（release 无控制台 eprintln 不可见）
+            logger.error(&format!("Tauri 应用运行失败: {e}"));
             eprintln!("[dsh-launcher] Tauri 应用运行失败: {e}");
             std::process::exit(1);
         });

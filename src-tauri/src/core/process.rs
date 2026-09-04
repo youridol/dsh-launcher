@@ -1027,11 +1027,26 @@ fn process_alive(pid: u32) -> bool {
     match c.output() {
         Ok(out) => {
             let text = crate::core::text::decode(&out.stdout);
-            // 输出包含 PID 行则存活（无匹配时输出 "INFO: No tasks"）
-            text.contains(&pid.to_string())
+            tasklist_has_pid(&text, pid)
         }
         Err(_) => false,
     }
+}
+
+/// 解析 tasklist /NH 输出：任一行的第 2 列（PID）等于 pid 即判定存活。
+/// v0.4.15（审计修复）：替代此前的 `text.contains(&pid.to_string())` ——
+/// 后者会把"内存/CPU 时间列恰好含该数字子串"的任务行误判为存活。
+/// 无匹配时 tasklist 输出 "INFO: No tasks running with the specified criteria."。
+fn tasklist_has_pid(output: &str, pid: u32) -> bool {
+    output.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        // 列1=映像名，列2=PID
+        let _img = cols.next();
+        cols.next()
+            .and_then(|p| p.parse::<u32>().ok())
+            .map(|p| p == pid)
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]
@@ -1118,5 +1133,30 @@ mod tests {
         assert_eq!(extract_web_url("listening on http://127.0.0.1:3080"), None);
         // 无关行不捕获
         assert_eq!(extract_web_url("random log line"), None);
+    }
+
+    #[test]
+    fn test_tasklist_has_pid() {
+        use super::tasklist_has_pid;
+        // 英文 tasklist /NH 输出（含 PID 列）
+        let en = "node.exe                    1234 Console                    1     45,678 K\r\n";
+        assert!(tasklist_has_pid(en, 1234));
+        assert!(!tasklist_has_pid(en, 5678));
+        // 无匹配提示
+        assert!(!tasklist_has_pid(
+            "INFO: No tasks running with the specified criteria.\r\n",
+            1234
+        ));
+        // 中文系统 tasklist 输出（映像名+PID），PID 列仍为数字
+        let zh = "node.exe                      1234 Console                    1      45,678 K\r\n";
+        assert!(tasklist_has_pid(zh, 1234));
+        // 关键回归：内存/时间列含目标数字子串不得误判（旧 contains 实现的缺陷场景）
+        // 映像名 node.exe、PID=5678，但 CPU/内存含 "1234" 片段
+        let tricky = "node.exe                    5678 Console                    1     12,345 K\r\n";
+        assert!(tasklist_has_pid(tricky, 5678));
+        assert!(!tasklist_has_pid(tricky, 1234), "PID 精确列匹配，内存列 12345 不误判");
+        // 空行 / 单列行不 panic
+        assert!(!tasklist_has_pid("", 1));
+        assert!(!tasklist_has_pid("node.exe\r\n", 1));
     }
 }

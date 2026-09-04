@@ -40,7 +40,7 @@ export default function App() {
           <DialogHeader>
             <DialogTitle>设置</DialogTitle>
           </DialogHeader>
-          <SettingsPanel embedded />
+          <SettingsPanel />
         </DialogContent>
       </Dialog>
 

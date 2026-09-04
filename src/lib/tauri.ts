@@ -55,7 +55,12 @@ export function getWebUrl(): Promise<string> {
   return invoke("get_web_url");
 }
 
-/** 为内嵌 Web GUI 窗口设置高清任务栏图标（修复图标模糊） */
+/** 创建内嵌 Web GUI 窗口（v0.4.15：统一走 Rust 窗口创建，消除 JS 创建路径无高清图标的问题） */
+export function createWebGuiWindow(url: string): Promise<string> {
+  return invoke("create_web_gui_window", { url });
+}
+
+/** 为内嵌 Web GUI 窗口设置高清任务栏图标（Rust 创建路径内部已设置；本命令为兜底重试） */
 export function setWebGuiIcon(label: string): Promise<void> {
   return invoke("set_web_gui_icon", { label });
 }

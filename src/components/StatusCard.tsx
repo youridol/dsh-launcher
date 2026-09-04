@@ -15,10 +15,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   createDesktopShortcut,
+  createWebGuiWindow,
   getDshStatus,
   getConfig,
   getInstalledVersion,
@@ -26,7 +26,6 @@ import {
   listenVersionChanged,
   restartDsh,
   setPort as savePort,
-  setWebGuiIcon,
   startDsh,
   stopDsh,
   uninstallDsh,
@@ -146,20 +145,32 @@ export default function StatusCard() {
 
   async function handleStart() {
     setBusy(true);
+    // v0.5.1：点启动立即把状态置 starting（不再等轮询），提供即时状态反馈
+    setStatus("starting");
     try {
       // 先保存端口再启动
       const p = Number(port);
       if (!Number.isInteger(p) || p < 1 || p > 65535) {
         toast.error("端口不合法（1-65535）");
+        setStatus("stopped");
         return;
       }
       await savePort(p);
+      // v0.5.1：startDsh 内部等待端口就绪后返回，回来即置 running
       await startDsh();
+      setStatus("running");
       toast.success("dsh 已启动");
+      // v0.5.1（产品优化）：启动成功后自动打开内嵌 Web GUI。
+      // openWithGuide 内部：running 态会跳过重复启动，直接等端口就绪 →
+      // 等带 token URL → 创建内嵌窗口（复用 Rust 创建路径，图标清晰）。
+      // 与 autoOpenBrowser 开关语义一致（该开关控制的是启动器启动时的自动打开）。
+      void openWithGuide("embedded");
     } catch (e) {
       toast.error(`启动失败: ${e}`);
+      refresh();
     } finally {
       setBusy(false);
+      // 兜底同步真实状态（防乐观置位与实际不符）
       refresh();
     }
   }
@@ -180,6 +191,14 @@ export default function StatusCard() {
   async function handleRestart() {
     setBusy(true);
     try {
+      // v0.4.15（审计修复）：重启前先保存输入框端口 —— Rust restart 用当前生效端口
+      // （旧端口）重启，若不保存则 UI 显示新端口、实际重启到旧端口，产生误导。
+      const p = Number(port);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        toast.error("端口不合法（1-65535）");
+        return;
+      }
+      await savePort(p);
       await restartDsh();
       toast.success("dsh 已重启");
     } catch (e) {
@@ -379,25 +398,18 @@ export default function StatusCard() {
       // ⑤ 打开目标
       setStageIdx(4);
       if (mode === "embedded") {
-        // 每次使用唯一 label 创建（修复：窗口关闭后 getByLabel 残留导致无法重建）
-        const label = `dsh-web-gui-${Date.now()}`;
-        const win = new WebviewWindow(label, {
-          url,
-          title: "deepseek-harness Web UI",
-          width: 1600,
-          height: 900,
-        });
-        // 创建失败提示（Tauri 2 创建错误通过 tauri://error 事件上报）
-        win.once("tauri://error", (e) => {
-          console.error("内嵌窗口创建失败", e);
-          toast.error(`打开内嵌 Web GUI 失败: ${e.payload}`);
-        });
-        // 窗口创建成功后设置高清任务栏图标（修复模糊）
-        win.once("tauri://created", () => {
-          setWebGuiIcon(label).catch((e) => {
-            console.error("设置内嵌窗口图标失败", e);
-          });
-        });
+        // v0.4.15 起统一走 Rust 创建内嵌窗口（create_web_gui_window）——
+        // 窗口在 Tauri 主线程以"builder 预置 512px 图标 + 创建即 SMALL/BIG"创建，
+        // 杜绝 `new WebviewWindow` 首帧使用默认 exe 16px 图标导致的任务栏模糊。
+        // v0.5.2：命令改为主线程建窗、不等待返回（消除跨线程阻塞死锁 → 白屏/卡死），
+        // 图标在创建时已设置，无需 label 兜底补发。
+        try {
+          await createWebGuiWindow(url);
+        } catch (e) {
+          console.error("创建内嵌窗口失败", e);
+          toast.error(`打开内嵌 Web GUI 失败: ${e}`);
+          return;
+        }
       } else {
         await openUrl(url);
       }
@@ -455,7 +467,8 @@ export default function StatusCard() {
           </div>
           <div className="flex gap-2">
             <Button onClick={handleStart} disabled={running || busy}>
-              <Play /> 启动
+              {busy && status === "starting" ? <Loader2 className="size-4 animate-spin" /> : <Play />}
+              {busy && status === "starting" ? "启动中…" : "启动"}
             </Button>
             <Button variant="secondary" onClick={handleStop} disabled={!running || busy}>
               <Square /> 停止

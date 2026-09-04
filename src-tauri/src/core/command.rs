@@ -131,10 +131,16 @@ pub fn run_with_timeout(
         }
         if Instant::now() >= deadline {
             kill_process_tree(pid);
-            // 强杀后等待进程真正退出（回收句柄）
+            // 强杀后等待进程真正退出（回收句柄）。
+            // v0.4.15（审计修复）：加 3s 上限，防止 taskkill 失败（权限/被占）且
+            // 进程不退时 try_wait 永不 Some → 调用线程死循环卡死。
+            let kill_deadline = Instant::now() + std::time::Duration::from_secs(3);
             loop {
                 if child.try_wait()?.is_some() {
                     break;
+                }
+                if Instant::now() >= kill_deadline {
+                    break; // 尽力而为：句柄由进程退出时系统回收
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }

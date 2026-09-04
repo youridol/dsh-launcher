@@ -1,5 +1,93 @@
 # Changelog
 
+## [0.5.2] - 2026-09-04
+
+### 修复
+
+- **内嵌 Web GUI 白屏 + 所有窗口无法关闭（需任务管理器强杀）——主线程死锁**：
+  - 根因：`create_web_gui_window` 命令在 async 运行时线程执行同步 fn，内部
+    `run_on_main_thread(建窗)` + `std::sync::mpsc::recv()` **阻塞等待主线程建窗结果**。
+    当主线程正被 WebView2 的同步窗口消息占用（内嵌 dsh UI 页面加载/交互时常见，
+    Windows 窗口消息模型下主线程处理 WebView 消息期间不会让出给 run_on_main_thread
+    排队的闭包）→ 主线程与等待它的命令线程**交叉死锁** → 内嵌窗口停在白屏、主窗口
+    及所有窗口事件循环卡死、无法关闭。
+  - 修复：命令改为 **async fn，把建窗调度到主线程后立即返回（fire-and-forget），
+    不跨线程阻塞等待**；窗口创建仍在主线程完成（Tauri 要求），创建失败由内部日志
+    记录。前端不再依赖返回的窗口 label（图标在创建时已同步设置）。
+- 移除 create_web_gui_window 返回 label 的契约（前端 lib/tauri.ts `createWebGuiWindow`
+  签名不变，仅不再消费返回值）。
+- **内嵌窗口偶发创建失败（"the underlying handle is not available"）**：`apply_window_icon`
+  在 build() 后立即取 hwnd 的竞态失败**不再阻断窗口创建**（恢复 0.4.14 语义：失败仅记警告，
+  窗口照常打开）。此前 `?` 传播会把已建成的窗口整体判失败 → 不开窗。
+- **日志全域化（不允许丢失任何日志）**：
+  - 新增全局 **panic hook**：任何线程 panic 落盘 `logs/crash.log` + 经 Logger 记录
+    （release 无控制台时 panic 此前完全不可见 → 静默崩溃无痕）。
+  - 关键路径 `eprintln!`（主窗口图标失败、外链打开失败、Tauri 启动失败）改经 Logger
+    落盘，release 下不再丢失。
+  - dsh stdout/stderr 已实时落盘 `dsh-web-stdout/stderr.log` 并逐行进日志流；崩溃
+    尾部不完整行有 flush 兜底，保证 dsh 侧日志不丢。
+
+## [0.5.1] - 2026-09-04
+
+### 修复
+
+- **内嵌 Web GUI 窗口白屏**：
+  - `on_new_window` 不再一律 Deny+系统浏览器——回环源（127.0.0.1/localhost/::1，
+    dsh Web UI 自身）的新窗口请求 **Allow 进程内放行**，仅非回环 http(s) 外链交
+    系统浏览器并 Deny。此前 0.5.0 把前端"内嵌打开"统一到 Rust builder（带
+    on_new_window）后，dsh UI 内部以 window.open 形式打开的界面被全部掐掉 →
+    白屏（0.4.14 前端 new WebviewWindow 路径无此回调故正常）。
+- **启动按钮状态反馈不即时**：
+  - 前端点"启动"立即乐观置 `starting`（按钮转"启动中…"+ 转圈），不再等 5s 轮询；
+  - Rust `start_dsh` 启动后**等待端口就绪（≤15s）再返回**，前端 await 完成即置
+    `running`，状态徽标即时变"运行中"（此前 spawn 即返回，要等轮询才收敛）。
+
+### 变更
+
+- **点"启动"成功后自动打开内嵌 Web GUI**（产品优化）：启动就绪后自动走
+  openWithGuide(embedded) → 等带 token URL → Rust 统一创建路径开窗（图标清晰），
+  无需再手动点"内嵌打开"。
+
+## [0.5.0] - 2026-09-04
+
+### 修复
+
+- **修复内嵌 WebView2 子窗口任务栏图标模糊（主窗口清晰、内嵌窗口模糊）**：
+  - 根因（源码级证据链）：tao `set_window_icon` 只发 WM_SETICON ICON_SMALL；tauri
+    Windows 默认窗口图标取 `icons/icon.ico` **第 0 帧（16×16）** 注入；前端"内嵌打开"
+    （StatusCard `new WebviewWindow`）创建窗口**不带 icon** → 任务栏按钮首帧以默认
+    exe 16px 图标绘制，`tauri://created` 后置补发 `set_web_gui_icon`（512 SMALL +
+    256 BIG）**晚于按钮首帧** → 模糊/闪烁。而 Rust 路径（桌面快捷方式/自动打开）在
+    builder 预置 512px 图标 + 创建即补发，故主窗口与 Rust 入口窗口清晰。
+  - 修复：**窗口创建统一收敛到 Rust 单一路径**——新增 `create_web_gui_window` IPC
+    命令复用 `WebviewWindowBuilder`（预置 512px 图标 + 创建后同步
+    `apply_window_icon` SMALL+ICON_BIG 256px 原生 HICON）；前端"内嵌打开"改调该命令，
+    不再 `new WebviewWindow`。三条入口（内嵌按钮/桌面快捷方式/自动打开）行为完全一致，
+    任务栏图标源与设置时机对齐主窗口；失败经 Logger 可查（不再仅 stderr）。
+- **用户 PATH 变量引用固化修复（高危环境破坏）**：`user_path()` 改用
+  `RRF_NOEXPAND` 读取注册表原始值，prepend/remove 不再把 `%SystemRoot%`/
+  `%JAVA_HOME%` 等展开成绝对路径写回（此前会永久固化变量引用、可能超长）。
+- **GitHub Token 加密失败不再静默明文落盘**：`config.rs::save` 在 DPAPI
+  CryptProtectData 失败时返回 Err（此前 `unwrap_or_else` 静默降级明文写盘）。
+- **日志 10MB 切割静默失效修复**：写入句柄显式共享删除标志（FILE_SHARE_DELETE），
+  避免与 tail 只读句柄共存时 rotate rename 返回 ERROR_SHARING_VIOLATION。
+- **tasklist 存活探测误判修复**：`process_alive` 改为按行解析第 2 列 PID 精确匹配
+  （此前 `contains(pid字符串)` 会把内存/时间列含同数字子串的任务误判为存活），
+  新增单元测试覆盖。
+- **`run_with_timeout`/流式命令强杀等待死循环护栏**：taskkill 失败且进程不退时
+  最多等 3s 返回错误，不再无限 `try_wait` 卡死调用线程。
+- **重启前保存端口**：StatusCard 重启前先 savePort（此前 UI 显示新端口、Rust 按
+  旧端口重启，误导）。
+- **日志补流性能与去重**：LogPanel 补流只取 `yyyy-MM-dd.log`（排除 dsh-web-*.log
+  进程落盘文件），且只保留尾部 2000 行（此前可能全量解析 10MB+ 并大量重复）。
+- **死代码清理**：SettingsPanel 非 embedded 外壳分支（无调用方）、冗余 import、
+  pathutil 废弃 expand_env 等。
+
+### 变更
+
+- 内嵌窗口 label 追加进程内计数+随机混合后缀（防极端同毫秒撞 label）。
+- 新增 IPC `create_web_gui_window`（前端 lib/tauri.ts 封装 `createWebGuiWindow`）。
+
 ## [0.4.14] - 2026-09-04
 
 ### 修复

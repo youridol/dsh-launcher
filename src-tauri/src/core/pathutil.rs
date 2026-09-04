@@ -69,12 +69,19 @@ pub fn inject_node_path_into(cmd: &mut std::process::Command) {
 // 用户环境变量存于 HKCU\Environment（Path 类型 REG_EXPAND_SZ，可含 %VAR%），
 // 免管理员即可读写；写入后广播 WM_SETTINGCHANGE 让资源管理器/新终端生效。
 
-/// 读取当前用户 PATH（HKCU\Environment\Path，REG_EXPAND_SZ，自动展开 %VAR%）。
+/// 读取当前用户 PATH（HKCU\Environment\Path，REG_EXPAND_SZ）。
+///
+/// v0.4.15（审计修复 3.x）：改用 `RRF_NOEXPAND` **不展开** `%VAR%` 读取——
+/// 此前 `RRF_RT_REG_EXPAND_SZ` 读取会自动展开 `%SystemRoot%`/`%JAVA_HOME%` 等变量，
+/// prepend/remove 把"展开后的绝对路径"写回注册表 → 用户 PATH 的变量引用被永久固化为
+/// 展开值（破坏 %VAR% 语义、可能超长）。读原始值后做字面匹配与写回，变量引用保留。
 /// 读取失败返回默认空串（非 Windows 平台）。
 pub fn user_path() -> String {
     #[cfg(windows)]
     {
-        use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_EXPAND_SZ};
+        use windows::Win32::System::Registry::{
+            RegGetValueW, HKEY_CURRENT_USER, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ,
+        };
         use windows::core::PCWSTR;
 
         const SUBKEY: &str = "Environment";
@@ -90,7 +97,7 @@ pub fn user_path() -> String {
                 HKEY_CURRENT_USER,
                 PCWSTR(subkey_wide.as_ptr()),
                 PCWSTR(value_wide.as_ptr()),
-                RRF_RT_REG_EXPAND_SZ,
+                RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
                 None,
                 Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
                 Some(&mut len),
@@ -101,8 +108,7 @@ pub fn user_path() -> String {
         }
         let raw = &buf[..(len as usize / 2)];
         let raw = trim_trailing_nul(raw);
-        let s = String::from_utf16_lossy(raw);
-        expand_env(&s)
+        String::from_utf16_lossy(raw)
     }
     #[cfg(not(windows))]
     {
@@ -235,40 +241,6 @@ fn broadcast_environment_change() {
             None,
         );
     }
-}
-
-/// 展开路径字符串中的 %VAR% 系统变量（Windows ExpandEnvironmentStringsW）。
-/// 失败时原样返回。
-#[cfg(windows)]
-fn expand_env(input: &str) -> String {
-    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
-    use windows::core::PCWSTR;
-
-    let wide: Vec<u16> = input.encode_utf16().chain(std::iter::once(0)).collect();
-    // 第一次调用取所需缓冲长度（含结尾 NUL）
-    // SAFETY: wide 为合法 NUL 结尾 UTF-16；长度参数 0 表示只查询
-    let need = unsafe { ExpandEnvironmentStringsW(PCWSTR(wide.as_ptr()), None) };
-    if need == 0 {
-        return input.to_string();
-    }
-    let mut buf = vec![0u16; need as usize];
-    // SAFETY: buf 容量 = need（含结尾 NUL），由 API 填充；成功写入 ≤ need 项
-    let written = unsafe {
-        ExpandEnvironmentStringsW(
-            PCWSTR(wide.as_ptr()),
-            Some(buf.as_mut_slice()),
-        )
-    };
-    if written == 0 {
-        return input.to_string();
-    }
-    let raw = trim_trailing_nul(&buf);
-    String::from_utf16_lossy(raw)
-}
-
-#[cfg(not(windows))]
-fn expand_env(input: &str) -> String {
-    input.to_string()
 }
 
 /// 枚举已安装 Python 的安装目录（检测用兜底源）。

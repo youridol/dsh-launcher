@@ -1,7 +1,7 @@
 {
   "name": "dsh-launcher",
   "private": true,
-  "version": "0.4.14",
+  "version": "0.5.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
