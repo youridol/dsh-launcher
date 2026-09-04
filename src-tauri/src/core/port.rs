@@ -39,10 +39,11 @@ pub fn validate_port(port: u16) -> bool {
 }
 
 /// HTTP 层就绪探测：对指定 URL（带 token 的完整 dsh web 地址）发 GET，
-/// 收到 **200** 才视为"可服务"。用于开内嵌窗口前确认 dsh web 真正就绪——
-/// 端口监听（TCP）≠ HTTP 可服务：冷启动时 dsh 先监端口、后挂路由，期间请求
-/// 返回 **404**（SPA 路由未就绪），此时开窗 WebView2 首载即命中 404 错误页且
-/// 不会自动恢复（须关闭重开）。返回 false 表示未就绪（连接失败/非 200/超时）。
+/// HTTP server **完整响应（2xx/3xx）** 视为可服务。用于开内嵌窗口前确认就绪——
+/// 端口监听（TCP）≠ HTTP 就绪：冷启动时 dsh 先监端口、后挂路由，期间返回 **404**
+/// （SPA 路由未挂）或连接被拒；路由挂好后对带 token 请求返回 **303 See Other**
+/// （重定向到 / 走会话交换，浏览器随后 200）——因此就绪判据 = 收到 2xx/3xx 状态行
+/// （非 404/401/5xx/连接失败/超时）。
 ///
 /// 实现：TcpStream 手写最小 HTTP/1.1 GET（只读状态行，不引第三方依赖）。
 /// url 形如 `http://127.0.0.1:3080/?token=xxx`。
@@ -76,8 +77,20 @@ pub fn web_ready(url: &str, timeout_ms: u64) -> bool {
     if reader.read_line(&mut status_line).is_err() {
         return false;
     }
-    // 状态行形如 "HTTP/1.1 200 OK"
-    status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")
+    // 状态行形如 "HTTP/1.1 303 See Other" / "HTTP/1.1 200 OK"。就绪判据 = 2xx 或 3xx
+    // （404/401/5xx 视作未就绪或不可用）。
+    http_status_is_success(&status_line)
+}
+
+/// 从 HTTP 状态行解析状态码并判定是否 2xx/3xx（就绪）。
+fn http_status_is_success(status_line: &str) -> bool {
+    // 取 "HTTP/1.1 303" 的数字段
+    let code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    (200..400).contains(&code)
 }
 
 /// 极简解析 `http://host:port/path?query` → (host, port, path?query)
@@ -126,5 +139,21 @@ mod tests {
         assert!(parse_http_url("").is_none());
         assert!(parse_http_url("https://127.0.0.1:3080/").is_none());
         assert!(parse_http_url("not a url").is_none());
+    }
+
+    #[test]
+    fn test_http_status_is_success() {
+        use super::http_status_is_success;
+        // dsh 就绪：带 token GET 返回 303 See Other（重定向到 / 做会话），判就绪
+        assert!(http_status_is_success("HTTP/1.1 303 See Other"));
+        assert!(http_status_is_success("HTTP/1.1 200 OK"));
+        assert!(http_status_is_success("HTTP/1.1 302 Found"));
+        assert!(http_status_is_success("HTTP/1.1 307 Temporary Redirect"));
+        // 未就绪/不可用：404（路由未挂）、401（无凭据）、5xx、空响应
+        assert!(!http_status_is_success("HTTP/1.1 404 Not Found"));
+        assert!(!http_status_is_success("HTTP/1.1 401 Unauthorized"));
+        assert!(!http_status_is_success("HTTP/1.1 500 Internal Server Error"));
+        assert!(!http_status_is_success(""));
+        assert!(!http_status_is_success("garbage"));
     }
 }

@@ -873,8 +873,10 @@ fn open_redirect_file(path: &std::path::Path) -> std::io::Result<std::fs::File> 
 }
 
 /// 处理一行 dsh 输出：
-/// - stdout 行捕获 token URL → 内存 web_url + 独立缓存文件（不清文进日志）；
-/// - 落日志前对 token 打码（审计修复 2.5：令牌不再明文写入日志/推送前端）。
+/// - stdout 行捕获 token URL → 内存 web_url + 独立缓存文件；
+/// - v0.5.6（产品决策）：token 行**明文**写入日志/推送前端 —— 用户需从日志获取
+///   完整带 token 访问地址以在外部浏览器手动打开（裸 URL 会被 dsh 401 拒）。
+///   安全权衡：日志仅本机用户可读（LOCALAPPDATA）；泄漏风险由产品所有者接受。
 fn process_dsh_output_line(
     line: &str,
     level: LogLevel,
@@ -892,9 +894,8 @@ fn process_dsh_output_line(
             crate::core::logging::save_latest_web_url(&url);
         }
     }
-    // 落盘 + 前端推送一律使用打码后的行（token 值不泄漏进日志/日志流）
-    let safe = crate::core::logging::redact_web_token(line);
-    logger.log(LogSource::Dsh, level, &safe);
+    // 落盘 + 前端推送使用原文（token 行明文，见函数注释 v0.5.6 产品决策）
+    logger.log(LogSource::Dsh, level, line);
 }
 
 /// 轮询读取 dsh 输出落盘文件的新增内容（tail），逐行：
