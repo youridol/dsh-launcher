@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.3] - 2026-09-04
+
+### 变更
+
+- **启动后打开内嵌窗口增加 1 秒就绪缓冲**：
+  - 前端（StatusCard openWithGuide）与 Rust（open_web_gui_window）两条路径统一：
+    拿到带 token 完整 URL（dsh 打印 `dsh web: http://127.0.0.1:<port>/?token=…`）后
+    **再等 1 秒**才创建内嵌窗口。
+  - 原因：token 刚输出的瞬间 dsh web 服务/前端资源可能仍在预热（首屏资源、插件
+    serve 未完），立刻开窗会首载失败/白屏，需手动重开一遍；1 秒缓冲后首载即成功。
+  - 前端 waitForWebUrl 已保证等 token 出现（≤40s），Rust 路径等 token ≤10s，两者
+    之后统一 +1 秒缓冲，与"完全启动后 1 秒弹出"的用户预期一致。
+
 ## [0.5.2] - 2026-09-04
 
 ### 修复

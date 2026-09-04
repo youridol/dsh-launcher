@@ -90,6 +90,11 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
         }
         let url = url.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
 
+        // v0.5.3（产品优化）：拿到带 token URL（dsh 已打印 "dsh web: ...?token="）后，
+        // 再等 1 秒让 dsh web 服务/前端资源完全就绪再建窗——token 刚输出时服务可能
+        // 仍在预热，立刻开窗会首载失败需手动重开。与前端 openWithGuide 缓冲一致。
+        std::thread::sleep(Duration::from_secs(1));
+
         // ③ 主线程创建内嵌窗口（带高清图标）
         let app3 = app.clone();
         let app3_inner = app3.clone();

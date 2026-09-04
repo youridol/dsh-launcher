@@ -395,8 +395,16 @@ export default function StatusCard() {
         return;
       }
 
-      // ⑤ 打开目标
+      // v0.5.3（产品优化）：token URL 已拿到（dsh 打印 "dsh web: ...?token=" 后），
+      // 再等 1 秒让 dsh web 服务/前端资源完全就绪再开窗——实测 token 刚输出时
+      // dsh web 可能仍在预热（首屏资源/插件尚未 serve 完），立刻开窗会加载失败/
+      // 白屏，需要手动重开一遍。1 秒缓冲后窗口首载即成功。
       setStageIdx(4);
+      if (!alive()) return;
+      await sleep(1000);
+      if (!alive()) return;
+
+      // ⑤ 打开目标
       if (mode === "embedded") {
         // v0.4.15 起统一走 Rust 创建内嵌窗口（create_web_gui_window）——
         // 窗口在 Tauri 主线程以"builder 预置 512px 图标 + 创建即 SMALL/BIG"创建，
