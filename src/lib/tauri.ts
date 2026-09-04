@@ -55,6 +55,11 @@ export function getWebUrl(): Promise<string> {
   return invoke("get_web_url");
 }
 
+/** 探测 dsh web 是否 HTTP 200 可服务（开窗前确认，防冷启动 404） */
+export function probeWebReady(url: string): Promise<boolean> {
+  return invoke("probe_web_ready", { url });
+}
+
 /** 创建内嵌 Web GUI 窗口（v0.4.15：统一走 Rust 窗口创建，消除 JS 创建路径无高清图标的问题） */
 export function createWebGuiWindow(url: string): Promise<string> {
   return invoke("create_web_gui_window", { url });

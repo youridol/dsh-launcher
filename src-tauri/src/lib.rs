@@ -90,10 +90,19 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
         }
         let url = url.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
 
-        // v0.5.3（产品优化）：拿到带 token URL（dsh 已打印 "dsh web: ...?token="）后，
-        // 再等 1 秒让 dsh web 服务/前端资源完全就绪再建窗——token 刚输出时服务可能
-        // 仍在预热，立刻开窗会首载失败需手动重开。与前端 openWithGuide 缓冲一致。
-        std::thread::sleep(Duration::from_secs(1));
+        // v0.5.5（冷启动 404 修复）：token URL 拿到 ≠ HTTP 路由就绪——dsh 先监端口
+        // 后挂路由，期间带 token 请求返回 404，开窗即 WebView2 首载 404（须重开）。
+        // 轮询 HTTP 200 直到可服务（≤20s）再建窗，杜绝 404 死窗口。
+        {
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                if crate::core::port::web_ready(&url, 2000) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(700));
+            }
+        }
 
         // ③ 主线程创建内嵌窗口（带高清图标）
         let app3 = app.clone();
@@ -262,6 +271,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::dsh::get_status,
             commands::dsh::get_web_url,
+            commands::dsh::probe_web_ready,
             commands::dsh::create_desktop_shortcut,
             commands::dsh::set_web_gui_icon,
             commands::dsh::create_web_gui_window,

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.5] - 2026-09-04
+
+### 修复
+
+- **冷启动弹出内嵌窗口命中 404（"找不到此 127.0.0.1 页 / HTTP ERROR 404"），须关闭重开**：
+  - 根因：端口监听/TCP 通 ≠ HTTP 路由就绪。冷启动时 dsh 先监听端口、后挂 SPA 路由，
+    期间带 token 请求返回 **404**；此前"等 token + 固定 1s"是启发式，token 打印瞬间
+    HTTP 路由可能仍未挂好 → WebView2 首载命中 404 错误页且不自动恢复。
+  - 修复：改为**真实 HTTP 就绪探测**——新增 Rust `core::port::web_ready()`（TcpStream
+    手写最小 HTTP/1.1 GET，请求带 token 完整 URL，读状态行判定 **200**）+ IPC 命令
+    `probe_web_ready`。
+    - 前端 `openWithGuide`：拿到 token URL 后轮询 `probeWebReady` 直到 HTTP 200
+      （≤30s，700ms 间隔）才开窗；
+    - Rust `open_web_gui_window`（快捷方式/autoOpen 路径）：同步轮询 `web_ready`
+      （≤20s）再建窗。
+  - 效果：内嵌窗口只在 dsh web **真正可服务（HTTP 200）** 后弹出，冷启动首载即成功，
+    不再出现 404 需手动重开。
+
 ## [0.5.4] - 2026-09-04
 
 ### 修复

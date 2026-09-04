@@ -336,6 +336,15 @@ pub fn get_web_url(state: State<'_, AppState>) -> String {
     crate::core::logging::extract_latest_web_url().unwrap_or_default()
 }
 
+/// 探测 dsh web 是否真正可服务（HTTP 200）。
+/// v0.5.5（冷启动 404 修复）：端口监听/TCP 通 ≠ HTTP 路由就绪——冷启动时 dsh 先
+/// 监端口后挂路由，期间带 token 请求返回 404，此时开窗 WebView2 首载命中 404 且
+/// 不自动恢复（须关闭重开）。前端在拿到 token URL 后轮询本命令直到 true 再开窗。
+#[tauri::command]
+pub fn probe_web_ready(url: String) -> bool {
+    crate::core::port::web_ready(&url, 2000)
+}
+
 /// 创建桌面快捷方式（.lnk，双击启动 dsh-launcher 并打开内嵌 Web GUI 窗口）
 /// 注：URL 由启动器侧在收到 --web-gui 参数时重新解析（见 lib.rs），无需在此传入
 #[tauri::command]

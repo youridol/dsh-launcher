@@ -24,6 +24,7 @@ import {
   getInstalledVersion,
   getWebUrl,
   listenVersionChanged,
+  probeWebReady,
   restartDsh,
   setPort as savePort,
   startDsh,
@@ -398,13 +399,32 @@ export default function StatusCard() {
         return;
       }
 
-      // v0.5.3（产品优化）：token URL 已拿到（dsh 打印 "dsh web: ...?token=" 后），
-      // 再等 1 秒让 dsh web 服务/前端资源完全就绪再开窗——实测 token 刚输出时
-      // dsh web 可能仍在预热（首屏资源/插件尚未 serve 完），立刻开窗会加载失败/
-      // 白屏，需要手动重开一遍。1 秒缓冲后窗口首载即成功。
+      // v0.5.5（冷启动 404 修复）：token URL 拿到 ≠ HTTP 路由就绪——冷启动时 dsh
+      // 先监端口后挂路由，期间带 token 请求返回 404（"找不到此 127.0.0.1 页"），
+      // 此时开窗 WebView2 首载命中 404 错误页且不自动恢复，须关闭重开。
+      // 改为轮询 HTTP 探测直到 **200 可服务**（≤30s）再开窗，从根本上杜绝 404。
       setStageIdx(4);
+      const readyDeadlineHttp = Date.now() + 30_000;
+      let httpReady = false;
+      while (Date.now() < readyDeadlineHttp) {
+        if (!alive()) return;
+        try {
+          if (await probeWebReady(url)) {
+            httpReady = true;
+            break;
+          }
+        } catch {
+          /* 瞬时失败继续轮询 */
+        }
+        await sleep(700);
+      }
       if (!alive()) return;
-      await sleep(1000);
+      if (!httpReady) {
+        setOpenErr("dsh Web 已输出访问地址但 30 秒内未就绪（HTTP 未返回 200）。请稍后重试或查看日志");
+        return;
+      }
+      // 缓冲 300ms 让服务稳定后 WebView2 首载（可忽略的微小窗口）
+      await sleep(300);
       if (!alive()) return;
 
       // ⑤ 打开目标
