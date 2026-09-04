@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dsh-web-gui",
+  "description": "Capability for the embedded deepseek-harness Web UI windows (dsh-web-gui-*). 该窗口只作为 WebView2 载体渲染远程 dsh Web GUI（http(s)://127.0.0.1:<port> 或 http(s)://localhost:<port>），放行 opener 使其内部 http/https 外链能交系统默认浏览器打开。Windows 下 IPC 经 http://ipc.localhost 自定义协议传输被判定为 local，postMessage 兜底则以真实页面 URL 判定 remote——故 local 默认开启且同时覆盖 loopback 的 remote urls。除 opener 外不授予任何本地文件/系统命令权限。",
+  "windows": ["dsh-web-gui-*"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*",
+      "http://localhost:*",
+      "https://127.0.0.1:*",
+      "https://localhost:*"
+    ]
+  },
+  "permissions": ["opener:default"]
+}

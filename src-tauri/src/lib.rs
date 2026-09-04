@@ -94,6 +94,15 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
 }
 
 /// 主线程上真正创建内嵌 Web GUI 窗口（label 唯一化 + 图标双保险）
+///
+/// 链接放行设计（v0.4.14，修复内嵌窗口无法打开会话超链接）：
+/// - dsh Web UI 会把 markdown 里的 http/https 外链渲染成 target="_blank" 锚点；
+/// - opener 插件注入的点击拦截脚本会把这类点击转成 `plugin:opener|open_url` IPC，
+///   该 IPC 已由 capabilities/dsh-web-gui.json 对该窗口放行 → 系统默认浏览器打开外链；
+/// - 若某次点击未经 opener 脚本（如 window.open、拖拽、快捷键直达）而到达 WebView2
+///   原生 new-window 请求，wry 默认会直接取消（SetHandled(true)）——这里显式接管：
+///   任何新窗口请求一律用系统默认浏览器打开目标 URL 并 Deny（不让 WebView2 在
+///   启动器进程内长出游离子窗口），导航则全放行（本窗口仅作 dsh Web UI 的载体）。
 fn build_web_gui_window(app: &tauri::AppHandle, url: &str) {
     let parsed: tauri::Url = url
         .parse()
@@ -118,6 +127,18 @@ fn build_web_gui_window(app: &tauri::AppHandle, url: &str) {
             )
             .title("deepseek-harness Web UI")
             .inner_size(1600.0, 900.0)
+            // 载体窗口：导航全放行（不拦截 dsh Web UI 内部任何跳转）
+            .on_navigation(|_url| true)
+            // 原生新窗口请求（window.open / 部分新窗口型链接）：一律丢给
+            // 系统默认浏览器打开，并拒绝在进程内创建游离 WebView2 子窗口
+            .on_new_window(|url, _features| {
+                // 借用 app 打开外链；失败仅落 stderr，不阻断（见 wry 线程要求：
+                // Windows 上该回调运行在独立线程，这里不做任何阻塞 UI 操作）
+                if let Err(e) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
+                    eprintln!("[dsh-launcher] 系统浏览器打开外链失败 {url}: {e}");
+                }
+                tauri::webview::NewWindowResponse::Deny
+            })
         };
         match tauri::image::Image::from_bytes(WIN_ICON) {
             Ok(img) => match base().icon(img) {

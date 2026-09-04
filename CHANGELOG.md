@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.14] - 2026-09-04
+
+### 修复
+
+- **修复内嵌 Web GUI（deepseek-harness Web UI）无法打开会话中的超链接**：
+  - 根因（三层）：
+    1. dsh Web UI 将 markdown 中的 http/https 外链渲染为 `target="_blank"` 锚点（dsh 侧源码行为，本启动器不改 dsh）。
+    2. launcher 注册的 opener 插件（`tauri_plugin_opener::init()`，默认 `open_js_links_on_click: true`）向**每个** WebView 注入点击拦截脚本：左键点击 `_blank` 外链会 `preventDefault()` 并改走 `plugin:opener|open_url` IPC。
+    3. 该 IPC 受 Tauri 2 ACL 管控：原 `capabilities/default.json` 仅授予 `main` 窗口 `opener:default`，内嵌 `dsh-web-gui-*` 窗口**没有任何 capability** → `open_url` 被静默拒绝（release 下 "not allowed by ACL"），点击无任何反应。
+  - 修复：
+    - 新增 `src-tauri/capabilities/dsh-web-gui.json`：对 `dsh-web-gui-*` 窗口放行 `opener:default`，`remote.urls` 覆盖 `http(s)://127.0.0.1:*` 与 `http(s)://localhost:*`（dsh Web GUI 的 loopback 服务地址；缺省组件自动补全配符，见 tauri URLPattern 语义）。除 opener 外**不授予任何本地文件/系统命令权限**。
+    - `lib.rs` 内嵌窗口 builder 增加 Rust 兜底：`.on_navigation(|_| true)` 显式放行一切导航（窗口只作 dsh Web UI 载体）；`.on_new_window()` 收到 WebView2 原生新窗口请求（`window.open` 等）时用系统默认浏览器打开目标 URL 并 `Deny`，杜绝进程内游离 WebView2 子窗口。
+  - 效果：点击会话内 http/https 超链接 → 系统默认浏览器（Edge/Chrome 等）打开新标签；ctrl/shift 点击与 `window.open` 类请求一致处理。
+  - 验证：tsc / vite build / cargo check --all-targets（0 警告）。
+
 ## [0.4.13] - 2026-09-04
 
 ### 变更
