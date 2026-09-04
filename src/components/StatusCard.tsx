@@ -245,7 +245,10 @@ export default function StatusCard() {
       if (!isAlive()) return null;
       try {
         const full = await getWebUrl();
-        if (full) return full;
+        // v0.5.4：仅接受**含 token** 的完整 URL 才放行——
+        // 防 get_web_url 兜底（旧缓存/裸 URL）在 dsh 打印新 token 前返回非空，
+        // 导致窗口过早弹出（见 process.rs start 清缓存修复）。裸 URL 会 401。
+        if (full && /[?&]token=/.test(full)) return full;
       } catch (e) {
         console.error("获取 Web URL 失败（重试）", e);
       }

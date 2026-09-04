@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.4] - 2026-09-04
+
+### 修复
+
+- **启动后内嵌窗口在 dsh 打印新 token 之前过早弹出**（弹窗显示"打开内嵌窗口…"后立即出窗，
+  需手动重开）：
+  - 根因：`process.rs start_locked` 启动新 dsh 时**不清除上一轮的 token 缓存**
+    （last-web-url 文件）。冷启动/异常退出后重启，旧缓存残留 → 前端 `waitForWebUrl`
+    经 `get_web_url` 兜底读到**旧 token** 秒回 → 不等当前 dsh 输出新 token
+    （`dsh web: http://127.0.0.1:3080/?token=…`）窗口就弹出 → 旧 token 无效 → 首载失败。
+  - 修复：
+    1. `start_locked` spawn 成功后**清空内存 web_url + last-web-url 缓存**，前端只能
+       轮询到当前进程输出的新 token 才放行；
+    2. 前端 `waitForWebUrl` 增加校验：仅接受**含 `token=` 的完整 URL** 才返回
+       （裸 URL / 无 token 值一律继续等，杜绝 401 死窗口）。
+
 ## [0.5.3] - 2026-09-04
 
 ### 变更

@@ -291,6 +291,13 @@ impl ProcessManager {
         *self.port.lock().unwrap() = port;
         *self.status.lock().unwrap() = DshStatus::Starting;
         self.stopping.store(false, Ordering::SeqCst);
+        // v0.5.4（启动时序修复）：清空**上一轮** dsh 的 token 内存与缓存。
+        // 此前 start 不清 last-web-url 缓存：冷启动/异常退出后重启时旧缓存残留，
+        // 前端 waitForWebUrl 经 get_web_url 兜底读到旧 token 秒回 → 内嵌窗口在
+        // 当前 dsh 打印新 token（"dsh web: ...?token="）**之前**就弹出 → 401/需重开。
+        // 清零后前端只能轮询到当前进程的新 token 才放行（见 get_web_url 兜底逻辑）。
+        *self.web_url.lock().unwrap() = String::new();
+        crate::core::logging::clear_latest_web_url();
 
         // 子进程放入共享句柄，监视线程取走所有权
         *self.child.lock().unwrap() = Some(child);
