@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.9.4] - 2026-09-12
+
+### 变更
+
+- README：补充「换版本/换通道/卸载不碰 DSH_HOME 数据」说明
+- 用户关心的核心问题：切官方版本时会不会动 ~/.dsh 的会话数据、技能与插件。
+- 经源码核对后如实写入（非宣传口径）：
+- 新增章节「🔒 换版本 / 换通道 / 卸载，都不会碰你的数据」：
+- · 列出 DSH_HOME 里到底有什么（sessions/ 会话、settings.yaml / .credentials.yaml、
+- storages/、task-board/、profiles/<name>/ 插件、~/.agents/skills/ 技能）；
+- · 用表格对照「动作 / 动的部分 / 不碰的部分」四种情形
+- （切通道、升降级、默认卸载、关掉保留开关的卸载）。
+- 依据（源码/文档可复核）：
+- · commands/version.rs 的通道切换只删程序本体（npm 全局包 或 github-dsh 源码目录 +
+- 自家 dsh.cmd shim），注释明确“不清 DSH_HOME 数据”；
+- · keep_dsh_home_on_uninstall 默认 true（core/config.rs:60）；
+- · 关掉该开关时删前校验目录特征（含 profiles/ 或 settings.yaml）才删除。
+- 同时诚实标注例外：插件装在 profiles/ 下与 dsh 版本无关，但与新版不兼容时启动器
+- 只会把冒头那一行**禁用（可逆）**并提示，不会卸载（核验：handle_boot_failure 中
+- uninstall 调用数为 0）。
+- 同步补进「功能一览」版本管理一行与 FAQ（新增一条，便于直接命中搜索）。
+- 验证：README 386 行，6 处配图引用，8/8 <details> 配对，10 个代码围栏成对。
+
 ## [0.9.3] - 2026-09-12
 
 ### 变更
