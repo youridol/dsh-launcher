@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.9.2] - 2026-09-12
+
+### 变更
+
+- 修复插件安装的 4 个 BUG（诊断缺失 / 无谓重启 / GitHub URL 误分类 / 镜像未注入）
+- 依据用户报告「输入 dsh-market 装插件报错：[5] 插件安装失败（已回滚）: 命令退出码: 1」
+- 所做的严格模式排查与修复。已实测：dsh-market 不是 npm 包（真实包名为 dshmarket）；
+- 用户给出的 https://github.com/dsh-market/dsh-market 是**有效**的 git 源。
+- BUG-1（P1）安装失败原因被丢弃，用户无法自助定位
+- 关键实测事实：pnpm 把致命错误**写在 stdout 而非 stderr**（pnpm 11.24 下 stderr 为 0 行）。
+- 旧代码只取 stderr 尾部 → 等于什么都没抓到，只剩「命令退出码: 1」。
+- stream.rs 新增 run_streamed_checked + 结构化 StreamFailure：
+- 同时捕获 stdout/stderr 尾部（上限 12 → 40 行，12 行会让真实原因被后期噪声挤掉）；
+- 过滤 `dsh:` 自身噪声行；run_streamed 保持原 API（委托 + message()）。
+- plugin/mod.rs 新增 describe_pnpm_failure：对 ERR_PNPM_FETCH_404 与
+- ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED 给出指向性提示；未识别情形原样透传（不猜测）。
+- E2E 验证：错误信息现包含 pnpm 原始报错 + 确切 allowBuilds 键名 + 操作指引。
+- BUG-2（P2）安装失败回滚后仍重启 dsh（无谓 + 误导）
+- rollback_after_failed_official_op 改为返回「是否完全还原」；
+- 完全还原则**不重启**（避免中断会话、避免日志出现「dsh 已启动」造成成功错觉），
+- 仅回滚未完全还原时才重启以对齐磁盘状态。
+- BUG-3（P2）GitHub 裸 URL 被误分类为 Unknown
+- https://github.com/<owner>/<repo>（不带 .git）此前落到 Unknown →
+- 不参与 upstream 自动同步，且无法从 spec 推断包名。
+- spec.rs 新增 looks_like_hosted_git_url：识别 GitHub/GitLab/Bitbucket 的
+- owner/repo 两段 URL；仅限已知托管站且恰两段（避免 releases/download/*.tgz 误判）。
+- 实证：pnpm 会把它规范化为 github:owner/repo。
+- BUG-4（P2）插件操作未注入 npm 镜像源
+- 按**官方开放机制**注入：官方 dsh plugin 是 pnpm 的薄转发器
+- （apps/cli/src/plugin.ts:120-163，args 原样透传），故追加 pnpm 原生 --registry。
+- 仅对访问 registry 的操作注入（纯 git/路径/tarball 依赖不注入），
+- 不触碰 profile 的 .npmrc / pnpm-workspace.yaml（不违反 ADR-0005 白名单）。
+- UI（防再犯）
+- PluginsPanel：标签/placeholder 明确「npm 包名 / GitHub URL」，
+- 并直接点明 dshmarket ≠ dsh-market（行 id），给出 URL 形态与钉 commit 建议。
+- 按产品决策 A：不做「一键 allowBuilds」—— 保持与官方 dsh 一致
+- （pnpm ≥10 拦构建脚本需用户按提示自行 allowlist），启动器不写 profile 文件。
+- 验证：cargo check --all-targets 0 警告；cargo test --lib 217 passed（+7 新增）；
+- plugin_pipeline_test 5 / mcp_pipeline_test 17 / contract_types_test 4 全绿；
+- tsc + vite build 通过。E2E 均以隔离 DSH_HOME 执行，用户真实 profile 未被改动。
+
 ## [0.9.1] - 2026-09-11
 
 > 本版为**「启动后未就绪」BUG 修复**。硬边界：未修改 `deepseek-harness` 任何代码；
