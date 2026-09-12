@@ -86,3 +86,5 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --test mcp_pipeline_test
           cargo test --manifest-path src-tauri/Cargo.toml --test skill_write_pipeline_test
           cargo test --manifest-path src-tauri/Cargo.toml --test skill_import_pipeline_test
+          # TC-03：前后端 DTO 字段集合契约（纯源码对账，无网络/环境依赖）
+          cargo test --manifest-path src-tauri/Cargo.toml --test contract_types_test

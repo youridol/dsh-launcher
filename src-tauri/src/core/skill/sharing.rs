@@ -195,11 +195,12 @@ pub struct MigrateReport {
 fn detect(resource: ShareResource) -> ResourceStatus {
     let canonical = canonical_path(resource);
     let view = view_path(resource);
-    let (state, detail) = if std::fs::symlink_metadata(&view).is_ok()
-        && std::fs::read_link(&view).is_ok()
-    {
-        // 视图侧是链接（junction / symlink）：按链接语义判定
-        let target = std::fs::read_link(&view).expect("已确认可读");
+    let (state, detail) = if let Ok(target) = std::fs::read_link(&view) {
+        // 视图侧是链接（junction / symlink）：按链接语义判定。
+        //
+        // G6（审计 RT-05）：此前先 `symlink_metadata().is_ok() && read_link().is_ok()`
+        // 再 `read_link().expect(...)` —— 两次调用间存在 TOCTOU（链接被移除即 panic）。
+        // 改为一次 `let Ok(target) = read_link(&view)`，彻底消除 panic 路径。
         let resolved = if target.is_absolute() {
             target.clone()
         } else {

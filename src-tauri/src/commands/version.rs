@@ -311,7 +311,18 @@ fn list_npm_versions() -> Result<Vec<DshVersion>, String> {
         ));
     }
     let text = crate::core::text::decode(&out.stdout);
-    let versions: Vec<String> = serde_json::from_str(&text).unwrap_or_default();
+    // G5（审计 RT-02）：解析失败曾经被 `unwrap_or_default()` 吞成空列表，
+    // 随后被上层日志误报为「成功但为空（请检查网络/镜像源）」——把**格式漂移**
+    // 误诊为网络问题。此处改为具名 Err，并附输出片段便于定位。
+    let versions: Vec<String> = serde_json::from_str(&text).map_err(|e| {
+        let head: String = text.trim().chars().take(200).collect();
+        format!("npm view 输出不是合法的版本 JSON（{e}）；输出片段: {head}")
+    })?;
+    // G7（审计 TC-02）：**在此排序**（与 GitHub 通道一致），使「顺序」只有 Rust 一个真相源。
+    // npm registry 返回的顺序是升序（旧→新）且官方不保证稳定；此前依赖前端
+    // `lib/version.ts` 再排一次，两端规则可能漂移。
+    let mut versions = versions;
+    versions.sort_by(|a, b| core_github::cmp_semver_desc(a, b));
     Ok(versions
         .into_iter()
         .map(|v| DshVersion {

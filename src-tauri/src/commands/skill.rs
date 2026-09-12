@@ -5,18 +5,11 @@
 //! 写操作的成功路径会广播 `skill://changed`，前端据此重扫；
 //! 幂等空操作（已是目标状态）**不广播**。
 
-use crate::core::plugin::state::PluginError;
-use crate::core::skill::{self, DeleteReport, SkillEntry, SkillList, ToggleReport};
+use crate::core::skill::{self, DeleteReport, SkillList, ToggleReport};
 use crate::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
-
-/// 共享机制的错误格式化（`cli` 侧同一实现；此处仅为兼容旧共享命令保留）
-#[allow(dead_code)]
-fn format_error(error: PluginError) -> String {
-    format!("[{}] {}", error.kind.exit_code(), error.message)
-}
 
 /// 列出全部受管技能（只读，与 dsh 运行状态无关）
 #[tauri::command]
@@ -72,9 +65,6 @@ pub async fn skill_delete(
     crate::core::events::emit_skill_changed(&app);
     Ok(report)
 }
-
-/// 供前端展示的单条技能类型别名（保持与 `scan::SkillEntry` 一致）
-pub type SkillEntryView = SkillEntry;
 
 // ==================== ADR-0008：导入 / 检查更新 / 外部打开 ====================
 

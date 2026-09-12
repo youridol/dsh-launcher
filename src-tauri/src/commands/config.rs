@@ -27,8 +27,6 @@ pub struct ConfigView {
     pub github_mirror: String,
     /// v0.4.13（审计修复 2.4）：不再回传明文 token，只回传“是否已设置”
     pub github_token_set: bool,
-    /// 恒为空串（兼容旧字段，避免前端读到明文）
-    pub github_token: String,
     pub node_mirror: String,
     pub close_exits: bool,
     pub minimize_to_tray: bool,
@@ -51,7 +49,6 @@ impl From<AppConfig> for ConfigView {
             npm_registry: c.npm_registry,
             github_mirror: c.github_mirror,
             github_token_set: !c.github_token.is_empty(),
-            github_token: String::new(),
             node_mirror: c.node_mirror,
             close_exits: c.close_exits,
             minimize_to_tray: c.minimize_to_tray,
@@ -67,9 +64,16 @@ impl From<AppConfig> for ConfigView {
 }
 
 /// 读取完整配置
+///
+/// G5（审计 RT-03）：改用 `load_checked()`，把「配置解析失败 / Token 解密失败」
+/// 这类此前**静默**的回退事件落日志；不改变返回值形状（仍是 `ConfigView`）。
 #[tauri::command]
-pub fn get_config() -> ConfigView {
-    ConfigView::from(AppConfig::load())
+pub fn get_config(state: State<'_, crate::AppState>) -> ConfigView {
+    let (config, issue) = AppConfig::load_checked();
+    if let Some(issue) = issue {
+        state.logger.warn(&issue.message());
+    }
+    ConfigView::from(config)
 }
 
 /// 保存端口

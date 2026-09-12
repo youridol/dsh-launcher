@@ -1,11 +1,27 @@
 [package]
 name = "dsh-launcher"
-version = "0.9.0"
+version = "0.9.1"
 description = "deepseek-harness 启动器与运行环境管理器"
 authors = ["dsh-launcher"]
 edition = "2021"
 
 # 详见 https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+# 生产构建开关（tauri 脚手架标准声明）。
+#
+# 为什么必须有：`tauri::is_dev()` 的实现是 `!cfg!(feature = "custom-protocol")`
+# （`tauri-2.11.5/src/lib.rs:308`）。未启用该 feature 时，即使 `--release` 构建，
+# 二进制仍会去加载 `build.devUrl`（`http://localhost:1420`）而不是内嵌前端资源
+# → 直接跑会得到 `ERR_CONNECTION_REFUSED`（且不生成 `tauri-codegen-assets`）。
+#
+# 正常发布请用 `npm run tauri build`（`tauri build` 会自动启用本 feature）；
+# 若必须直接调用 cargo，请显式带上：
+#   cargo build --release --features custom-protocol
+#
+# 注意：仅声明本 feature 并**不会**让裸 `cargo build --release` 自动进入生产模式
+# （cargo 不会自动启用非 default feature），故 README 同步了命令级说明。
+custom-protocol = ["tauri/custom-protocol"]
 
 [lib]
 # `_lib` 后缀可避免与 bin 名冲突（Windows 下已知问题，见 https://github.com/rust-lang/cargo/issues/8519）
@@ -35,12 +51,17 @@ encoding_rs = "0.8"
 # `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)`，测试二进制根本无法启动。
 # ShellExecuteW 只依赖 shell32，语义完全一致（`open` 动词 = 系统关联程序），
 # 且 `windows` crate 本就已是依赖，不新增任何东西。
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_Environment", "Win32_System_Console", "Win32_Globalization", "Win32_Security_Cryptography"] }
+#
+# ENG-04（审计）：feature 按**实际使用**收窄。`Win32_Graphics_Gdi`（仅 tests 的
+# GetIconInfo 需要，已在 dev-dependencies 声明）与 `Win32_System_Environment`
+# （全仓零引用）已从**库**依赖移除；src/ 只用得到 WindowsAndMessaging 的 CreateIcon。
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_Console", "Win32_Globalization", "Win32_Security_Cryptography"] }
 
 # 注：`tokio` 曾作为 dev-dependency 存在，仅服务于已被移除的
 # `concurrency_test.rs`（它测的是 tokio 运行时行为，而非本产品逻辑）。
 # ADR-0009 D11d 重写该测试为直测 `ProcessManager` 后，`src/` 与 `tests/` 均不再使用
 # tokio（应用用 Tauri 自带 async 运行时），故按 D19 一并移除该未使用依赖。
-# 窗口图标回归测试（tests/icon_window_test.rs）需 CreateIcon/GetIconInfo（GDI）
+# 窗口图标回归测试（tests/icon_window_test.rs）需 CreateIcon/GetIconInfo（GDI）：
+# 仅测试需要，故只在 dev-dependencies 声明，不进库依赖（ENG-04）。
 [target.'cfg(windows)'.dev-dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Environment", "Win32_Globalization"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_Globalization"] }

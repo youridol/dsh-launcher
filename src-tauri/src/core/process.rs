@@ -50,9 +50,25 @@ pub struct ProcessManager {
     logger: Arc<Logger>,
     /// 是否正在停止（避免重复触发）
     stopping: AtomicBool,
+    /// 启动期"端口被非 dsh 进程占用"是否已告警（v0.9.1）。
+    /// 5 秒一轮的对账若每轮都打日志，长期端口冲突会淹没日志（10MB 轮转）；
+    /// 只告警一次，由 `start_locked` 在新一轮启动时复位。
+    starting_port_conflict_logged: AtomicBool,
     /// 生命周期操作互斥锁：保证同一时刻只有一个 start/stop/restart 在执行
     /// （防止多线程并发调用导致双进程/双杀竞态）
     op_lock: Mutex<()>,
+}
+
+/// 取锁并容忍中毒：与仓库其它模块（`commands/config.rs`、`plugin/managed.rs`、
+/// `plugin/mod.rs` 的 `in_flight`）的 `unwrap_or_else(|e| e.into_inner())` 语义一致。
+///
+/// G4（审计 RT-01）：此前本文件**写路径**一律 `.lock().unwrap()`，而读路径
+/// （`status()` / `current_port()` / `web_url()`）已用 `.map(..).unwrap_or(..)` 容错。
+/// 任一线程在持锁期 panic 即毒化互斥量，随后所有状态写操作连锁 panic：后台监视线程
+/// （`spawn_monitor` / `spawn_startup_probe` / `reconcile_once`）死亡 → 状态永久不再收敛。
+/// 状态机是进程生命周期的唯一真相源，不得因一次无关 panic 而整体失效。
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl ProcessManager {
@@ -65,6 +81,7 @@ impl ProcessManager {
             port: Arc::new(Mutex::new(0)),
             logger,
             stopping: AtomicBool::new(false),
+            starting_port_conflict_logged: AtomicBool::new(false),
             op_lock: Mutex::new(()),
         }
     }
@@ -84,13 +101,33 @@ impl ProcessManager {
         self.web_url.lock().map(|u| u.clone()).unwrap_or_default()
     }
 
+    /// 当前 dsh 是否由本启动器**托管**（`pid != 0`）。
+    ///
+    /// `false` 有两种情形：已停止（`Stopped`），或当前 Running 实例是**收养**来的
+    /// 外部 dsh（启动器没有它的子进程句柄）。后者是本文件 v0.9.1 新增的可见性：
+    /// 收养实例的访问 token 是**进程级随机数**（见 packages/client/connection/src/
+    /// browser-auth.ts 的 processLaunchToken），只从该进程 stdout 打印；外部启动的
+    /// 实例启动器原理上拿不到 → 前端据此询问用户是否接管（停止后由启动器重新拉起，
+    /// 从而能捕获 token）。
+    pub fn is_managed(&self) -> bool {
+        *lock_or_recover(&self.pid) != 0
+    }
+
     /// 启动时收养已在运行的 dsh（v0.3.5：退出驻留后重开启动器，
     /// 探测到端口监听则恢复 Running 状态，使停止/重启可用）
     ///
     /// v0.4.13（审计修复 2.2）：收养前必须先做进程身份校验 —— 端口被**非 dsh**
     /// 进程（数据库/代理等）占用时不得标记为 Running（否则"停止"会误杀该进程）。
     /// 仅当监听者命令行形如 dsh 时才收养；否则返回 false 由调用方提示端口冲突。
+    ///
+    /// v0.9.1（启动未就绪 BUG 修复）：允许从 `Starting` 收养 —— 此前只认 `Stopped`，
+    /// 使状态卡 `Starting` 时"外部手动启动的 dsh"永远无法被接管（与启动未就绪 BUG 叠加）。
     pub fn adopt_running(&self, port: u16) -> bool {
+        // 当前状态允许被收养：Stopped（常规）或 Starting（收敛失败/冷启动期）
+        let current = self.status();
+        if !matches!(current, DshStatus::Stopped | DshStatus::Starting) {
+            return false;
+        }
         // 端口上当前监听 PID 是否形如 dsh（读不到/不匹配一律拒绝收养，宁可保守）
         if !port_listener_looks_like_dsh(port) {
             self.logger.log(
@@ -103,14 +140,41 @@ impl ProcessManager {
             );
             return false;
         }
-        let mut st = self.status.lock().unwrap();
+        let mut st = lock_or_recover(&self.status);
         *st = DshStatus::Running;
         drop(st);
-        *self.port.lock().unwrap() = port;
+        *lock_or_recover(&self.port) = port;
         // pid 未知（外部进程），保持 0；停止时按端口查 PID
-        // 恢复 web_url（从日志兜底提取带 token 的 URL）
-        if let Some(url) = crate::core::logging::extract_latest_web_url() {
-            *self.web_url.lock().unwrap() = url;
+        //
+        // v0.9.1（启动未就绪 BUG 修复）：缓存 URL **必须验证对当前监听者仍然有效**才能沿用。
+        // 缺陷背景：dsh 的访问 token 是**进程级随机数**（packages/client/connection/src/
+        // browser-auth.ts::processLaunchToken，仅从该进程 stdout 打印）。因此
+        //   - 上一轮启动器托管、退出驻留（keepDshOnExit）后重开启动器 → 进程仍是同一个，
+        //     缓存 URL 有效 → 保留；
+        //   - 用户在终端**手动**启动的 dsh → 启动器原理上拿不到其 token，缓存里是**上一轮
+        //     的旧 token**。旧实现直接沿用 → 前端以为已拿到地址 → 探测恒为 400 → 40 秒
+        //     超时；这正是"手动启动 dsh 后内嵌打开也失败"的成因之一。
+        // 以 HTTP 探测判定（有效即保留，无效则清空）：清空后前端走"外部实例"分支询问接管。
+        match crate::core::logging::extract_latest_web_url() {
+            Some(url) if crate::core::port::web_ready(&url, 2000) => {
+                *lock_or_recover(&self.web_url) = url;
+            }
+            Some(_) => {
+                *lock_or_recover(&self.web_url) = String::new();
+                // 同步清除磁盘缓存：否则 get_web_url 的兜底仍会把旧 token 交给前端
+                // （前端会拿它探测到 401/400 后空转 40 秒）。
+                crate::core::logging::clear_latest_web_url();
+                self.logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Warn,
+                    "收养实例的缓存访问地址已失效（token 属于旧进程），已清除；\
+                     该实例的 token 需由其自身 stdout 提供",
+                );
+            }
+            None => {
+                *lock_or_recover(&self.web_url) = String::new();
+                crate::core::logging::clear_latest_web_url();
+            }
         }
         self.logger.log(
             LogSource::Launcher,
@@ -134,6 +198,29 @@ impl ProcessManager {
         }
         let text = crate::core::text::decode(&out.stdout).trim().to_string();
         text.parse().ok()
+    }
+
+    /// 判定端口监听者归属（v0.9.1，Starting 收敛用）。
+    ///
+    /// 保守原则与 `adopt_running` 一致：**读不到/无法判定一律不算 dsh**，
+    /// 宁可维持 Starting 等下轮对账，也绝不把无关进程的端口当成 dsh 已就绪
+    /// （否则"停止"会误杀该进程）。
+    fn classify_listener(&self, pid: u32, port: u16) -> Listener {
+        if port == 0 || !port::is_port_in_use(port) {
+            return Listener::None;
+        }
+        let Some(listener) = Self::pid_by_port(port) else {
+            return Listener::None;
+        };
+        // 精确匹配：正是本启动器托管的那个进程
+        if pid != 0 && listener == pid {
+            return Listener::Managed;
+        }
+        // 形如 dsh 但不是本 pid：npm 通道经 cmd 包装时的子进程，或外部手动启动的实例
+        if process_looks_like_dsh(listener) {
+            return Listener::Adopted;
+        }
+        Listener::Foreign
     }
 
     /// 启动 dsh web（阻塞等待 spawn 结果）
@@ -287,21 +374,23 @@ impl ProcessManager {
             &format!("dsh 已启动 (pid={}, port={})", child.id(), port),
         );
 
-        *self.pid.lock().unwrap() = child.id();
-        *self.port.lock().unwrap() = port;
-        *self.status.lock().unwrap() = DshStatus::Starting;
+        *lock_or_recover(&self.pid) = child.id();
+        *lock_or_recover(&self.port) = port;
+        *lock_or_recover(&self.status) = DshStatus::Starting;
         self.stopping.store(false, Ordering::SeqCst);
+        // 新一轮启动：复位"端口冲突已告警"标志（见结构体字段注释）
+        self.starting_port_conflict_logged.store(false, Ordering::SeqCst);
         // v0.5.4（启动时序修复）：清空**上一轮** dsh 的 token 内存与缓存。
         // 此前 start 不清 last-web-url 缓存：冷启动/异常退出后重启时旧缓存残留，
         // 前端 waitForWebUrl 经 get_web_url 兜底读到旧 token 秒回 → 内嵌窗口在
         // 当前 dsh 打印新 token（"dsh web: ...?token="）**之前**就弹出 → 401/需重开。
         // 清零后前端只能轮询到当前进程的新 token 才放行（见 get_web_url 兜底逻辑）。
-        *self.web_url.lock().unwrap() = String::new();
+        *lock_or_recover(&self.web_url) = String::new();
         crate::core::logging::clear_latest_web_url();
 
         // 子进程放入共享句柄，监视线程取走所有权
-        *self.child.lock().unwrap() = Some(child);
-        let pid = *self.pid.lock().unwrap();
+        *lock_or_recover(&self.child) = Some(child);
+        let pid = *lock_or_recover(&self.pid);
 
         self.spawn_monitor(pid);
         // v0.2.7：启动探活线程——端口监听则置 Running；
@@ -323,7 +412,7 @@ impl ProcessManager {
         if self.stopping.swap(true, Ordering::SeqCst) {
             return Ok(()); // 已在停止中
         }
-        let mut status = self.status.lock().unwrap();
+        let mut status = lock_or_recover(&self.status);
         if !matches!(*status, DshStatus::Running | DshStatus::Starting) {
             self.stopping.store(false, Ordering::SeqCst);
             return Ok(());
@@ -335,9 +424,9 @@ impl ProcessManager {
         // v0.3.5：pid 为 0 但端口在监听（收养的外部 dsh）→ 按端口查 PID
         // v0.4.13（审计修复 2.2）：按端口反查的 PID 必须先做 dsh 身份校验，
         // 防止 taskkill 误杀占用同一端口的无关进程。
-        let mut pid = *self.pid.lock().unwrap();
+        let mut pid = *lock_or_recover(&self.pid);
         if pid == 0 {
-            let port = *self.port.lock().unwrap();
+            let port = *lock_or_recover(&self.port);
             if port != 0 && port::is_port_in_use(port) {
                 let candidate = Self::pid_by_port(port).unwrap_or(0);
                 if candidate != 0 && process_looks_like_dsh(candidate) {
@@ -361,7 +450,7 @@ impl ProcessManager {
         }
         if pid == 0 {
             self.stopping.store(false, Ordering::SeqCst);
-            *self.status.lock().unwrap() = DshStatus::Stopped;
+            *lock_or_recover(&self.status) = DshStatus::Stopped;
             return Ok(());
         };
 
@@ -412,7 +501,7 @@ impl ProcessManager {
         // v0.4.13（审计修复 2.2）：清剿前逐一校验残留监听进程**形如 dsh**，
         // 非 dsh 监听者（其他服务占端口）一律不强杀，避免误杀无关进程。
         // 若端口仍监听，按端口查实际监听 PID 逐个强杀，直到端口释放（最多 5 轮）。
-        let port_now = *self.port.lock().unwrap();
+        let port_now = *lock_or_recover(&self.port);
         if port_now != 0 && port::is_port_in_use(port_now) {
             self.logger.log(
                 LogSource::Launcher,
@@ -483,10 +572,10 @@ impl ProcessManager {
             }
         }
 
-        *self.status.lock().unwrap() = DshStatus::Stopped;
-        *self.pid.lock().unwrap() = 0;
-        *self.port.lock().unwrap() = 0;
-        *self.web_url.lock().unwrap() = String::new();
+        *lock_or_recover(&self.status) = DshStatus::Stopped;
+        *lock_or_recover(&self.pid) = 0;
+        *lock_or_recover(&self.port) = 0;
+        *lock_or_recover(&self.web_url) = String::new();
         // 审计修复 2.5：停止 dsh 后清除 URL 缓存（避免重启后误用旧 token）
         crate::core::logging::clear_latest_web_url();
         self.stopping.store(false, Ordering::SeqCst);
@@ -511,21 +600,26 @@ impl ProcessManager {
     }
 
     /// 启动探活线程：端口监听 → Running；进程退出且端口未开 → 自动修复插件后重试
+    ///
+    /// v0.9.1（启动未就绪 BUG 修复）：本线程的 8 秒等待**只服务于"启动即崩"的快速
+    /// 归因**（ADR-0005 D12 语义不变）；它不再是"就绪"的唯一判据。此前它超时后
+    /// 直接 return，导致状态永久卡 Starting（详见 `reconcile_once` 的 Starting 分支注释）。
+    /// 现在超时仅记一条 info，收敛交由 `reconcile_once` 每 5 秒持续推进（无上限）。
     fn spawn_startup_probe(&self, port: u16, pid: u32) {
         let logger = Arc::clone(&self.logger);
         let status_arc = Arc::clone(&self.status);
         let pid_arc = Arc::clone(&self.pid);
         thread::spawn(move || {
-            // 最多等 8 秒（dsh 冷启动 + 插件加载）
+            // 最多等 8 秒（dsh 冷启动 + 插件加载）——仅用于快速识别"启动即崩"
             let deadline = Instant::now() + Duration::from_secs(8);
             while Instant::now() < deadline {
                 let alive = {
-                    let p = pid_arc.lock().unwrap();
+                    let p = lock_or_recover(&pid_arc);
                     *p != 0 && *p == pid
                 };
                 if port::probe(port) == Some(true) {
                     // 端口监听 → 启动成功
-                    let mut s = status_arc.lock().unwrap();
+                    let mut s = lock_or_recover(&status_arc);
                     if *s == DshStatus::Starting {
                         *s = DshStatus::Running;
                         logger.log(LogSource::Launcher, LogLevel::Info, "dsh 已就绪（端口监听中）");
@@ -557,12 +651,12 @@ impl ProcessManager {
                         }
                     }
                     // 无论是否修复，本次启动的进程已死：状态复位
-                    let mut s = status_arc.lock().unwrap();
+                    let mut s = lock_or_recover(&status_arc);
                     if *s == DshStatus::Starting {
                         *s = DshStatus::Stopped;
                     }
                     drop(s);
-                    let mut p = pid_arc.lock().unwrap();
+                    let mut p = lock_or_recover(&pid_arc);
                     if *p == pid {
                         *p = 0;
                     }
@@ -570,11 +664,16 @@ impl ProcessManager {
                 }
                 thread::sleep(Duration::from_millis(500));
             }
-            // 8 秒后仍未监听但进程存活：保持 Starting（可能是 dsh 后台任务，不误判失败）
+            // 8 秒后仍未监听但进程存活：**不是失败**，只是冷启动较慢（插件/MCP 拉长预热）。
+            // 状态维持 Starting，由 reconcile_once 每 5 秒继续探测直至端口就绪 —— 这是
+            // v0.9.1 的关键修复点（旧实现在此 return 后永无收敛路径）。
             logger.log(
                 LogSource::Launcher,
-                LogLevel::Warn,
-                &format!("dsh 启动 8 秒后端口 {port} 仍未监听（进程存活），状态保持启动中"),
+                LogLevel::Info,
+                &format!(
+                    "dsh 启动 8 秒后端口 {port} 仍未监听（进程存活，冷启动偏慢），\
+                     状态保持启动中并由对账线程持续探测"
+                ),
             );
         });
     }
@@ -591,7 +690,7 @@ impl ProcessManager {
 
         thread::spawn(move || {
             // 从共享句柄取走所有权（stop 通过 try_wait 探测，取走前 stop 已可能拿到引用）
-            let child = child_arc.lock().unwrap().take();
+            let child = lock_or_recover(&child_arc).take();
             let Some(mut child) = child else {
                 return;
             };
@@ -632,17 +731,17 @@ impl ProcessManager {
             // v0.4.13（审计修复 2.11）：仅在“当前托管 pid 仍是本进程”时才复位共享
             // 状态并清 URL 缓存 —— 避免旧监视线程收尾时覆盖“停止后立刻重启”的新实例
             // 状态/端口/URL（restart 场景的竞态）。
-            let still_owner = *self_pid.lock().unwrap() == pid;
+            let still_owner = *lock_or_recover(&self_pid) == pid;
             if still_owner {
                 // 更新状态（若 stop() 已置 Stopping，这里不覆盖）
-                let mut s = status_arc.lock().unwrap();
+                let mut s = lock_or_recover(&status_arc);
                 if *s != DshStatus::Stopping {
                     *s = DshStatus::Stopped;
                 }
                 drop(s);
-                *self_pid.lock().unwrap() = 0;
-                *port_arc.lock().unwrap() = 0;
-                *cleanup_url.lock().unwrap() = String::new();
+                *lock_or_recover(&self_pid) = 0;
+                *lock_or_recover(&port_arc) = 0;
+                *lock_or_recover(&cleanup_url) = String::new();
                 // 审计修复 2.5：进程退出（非停止路径）时同步清除 URL 缓存，
                 // 防止陈旧 token 被后续启动/收养复用。
                 crate::core::logging::clear_latest_web_url();
@@ -663,6 +762,13 @@ impl ProcessManager {
         });
     }
 
+    /// 立即执行一次对账（供启动等待路径按需调用，使就绪收敛**不必等下一个 5s 周期**）。
+    ///
+    /// 与后台 5s 线程共用同一实现：状态机的推进规则只有一处（本文件 `reconcile_once`）。
+    pub fn reconcile_now(&self) {
+        self.reconcile_once();
+    }
+
     /// 单次对账（见 spawn_reconcile）
     fn reconcile_once(&self) {
         // 停止/切换中不介入（避免与 stop/start 竞态）
@@ -670,13 +776,74 @@ impl ProcessManager {
             return;
         }
         let (st, pid, port, cfg_port) = {
-            let st = *self.status.lock().unwrap();
-            let pid = *self.pid.lock().unwrap();
-            let port = *self.port.lock().unwrap();
+            let st = *lock_or_recover(&self.status);
+            let pid = *lock_or_recover(&self.pid);
+            let port = *lock_or_recover(&self.port);
             let cfg_port = crate::core::config::AppConfig::load().port;
             (st, pid, port, cfg_port)
         };
         match st {
+            // v0.9.1（启动未就绪 BUG 修复）：**托管实例启动期的收敛兜底**。
+            //
+            // 背景（缺陷）：`spawn_startup_probe` 是此前唯一的 Starting→Running 路径，
+            // 硬上限 8 秒；dsh 冷启动一旦超过 8 秒（插件 dsh-cost-meter 与 MCP filesystem
+            // 会把就绪时间推到 20s+），它就打一条 warn 后 return，**再无任何后续尝试**：
+            //   - 前端「内嵌打开」阶段③在 25s 内始终读不到 running → 报"端口未监听"；
+            //   - 状态永久卡 Starting（UI 上等于"运行中"，端口输入框被禁用）；
+            //   - 收养分支只认 Stopped → "手动启动 dsh 后内嵌打开"同样被堵死。
+            // 实测证据：本机 2026-09-11 日志 ready=1/probeTimeout=2，且空闲端口复现
+            // 冷启动「端口监听 at t=8.83s」> 8s 上限。
+            //
+            // 修复判据与 spawn_startup_probe 完全一致（先端口后路由，见 port.rs）：
+            // 端口已监听 → Running；进程已死 → Stopped；否则维持 Starting 等下轮。
+            // 每 5 秒重试，故收敛有界，且**不依赖 CIM 命令行读取**（只读机器上同样有效）。
+            DshStatus::Starting => {
+                // 端口监听者必须是**本实例**（pid 精确匹配），或命令行形如 dsh
+                // （npm 通道经 cmd 包装时监听者可能是子进程而非本 pid）。
+                // Foreign → 端口被无关进程占用，绝不据此判 Running（防误判/防误杀）。
+                let listener = self.classify_listener(pid, port);
+                if listener == Listener::Foreign {
+                    // 只告警一次（5s 轮询会重复命中，长期冲突不得淹没日志）；
+                    // 新一轮 start 会复位该标志。
+                    if !self.starting_port_conflict_logged.swap(true, Ordering::SeqCst) {
+                        self.logger.log(
+                            LogSource::Launcher,
+                            LogLevel::Warn,
+                            &format!(
+                                "端口 {port} 被非 dsh 进程占用，不据此判定 dsh 已就绪；\
+                                 请检查端口冲突（本次启动期间只提示一次）"
+                            ),
+                        );
+                    }
+                }
+                // 仅在"端口未就绪"时才查进程存活（省一次 tasklist 调用）
+                let alive = listener.is_owned() || process_alive(pid);
+                if let Some(next) = starting_convergence(listener.is_owned(), alive) {
+                    let mut s = lock_or_recover(&self.status);
+                    // publish 前双重检查：状态仍须是 Starting
+                    // （避免覆盖并发的 stop/restart 已推进的状态）
+                    if *s == DshStatus::Starting {
+                        *s = next;
+                        drop(s);
+                        match next {
+                            DshStatus::Running => self.logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Info,
+                                &format!(
+                                    "dsh 已就绪（对账线程观测到端口 {port} 监听，Starting → Running）"
+                                ),
+                            ),
+                            _ => self.logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Warn,
+                                &format!(
+                                    "dsh 进程 (pid={pid}) 已退出且端口 {port} 未监听，状态复位为未运行"
+                                ),
+                            ),
+                        }
+                    }
+                }
+            }
             // 收养实例（pid==0）：端口探活对账
             DshStatus::Running if pid == 0 && port != 0 => {
                 if !port::is_port_in_use(port) {
@@ -685,8 +852,8 @@ impl ProcessManager {
                         LogLevel::Info,
                         &format!("端口探活：外部 dsh（端口 {port}）已退出，状态复位为未运行"),
                     );
-                    *self.status.lock().unwrap() = DshStatus::Stopped;
-                    *self.web_url.lock().unwrap() = String::new();
+                    *lock_or_recover(&self.status) = DshStatus::Stopped;
+                    *lock_or_recover(&self.web_url) = String::new();
                 } else if !port_listener_looks_like_dsh(port) {
                     // 端口监听者已不是 dsh（被其他服务抢占）：解除接管（勿误杀）
                     self.logger.log(
@@ -696,8 +863,8 @@ impl ProcessManager {
                             "端口 {port} 监听进程已不是 dsh，解除运行状态接管（避免停止时误杀无关进程）"
                         ),
                     );
-                    *self.status.lock().unwrap() = DshStatus::Stopped;
-                    *self.web_url.lock().unwrap() = String::new();
+                    *lock_or_recover(&self.status) = DshStatus::Stopped;
+                    *lock_or_recover(&self.web_url) = String::new();
                 }
             }
             // 外部手动启动 dsh：自动收养（内部含身份校验，非 dsh 不收养）
@@ -711,6 +878,47 @@ impl ProcessManager {
             }
             _ => {}
         }
+    }
+}
+
+/// 端口监听者归属（v0.9.1，Starting 收敛与收养判定共用）
+///
+/// 三态刻意区分「我托管的」与「外部 dsh」：前者可判定就绪；后者虽也是 dsh，
+/// 但它的 token 启动器拿不到（见 `ProcessManager::is_managed`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listener {
+    /// 端口无监听者
+    None,
+    /// 正是本启动器托管的那一个进程（pid 精确匹配）
+    Managed,
+    /// 是 dsh（命令行形如 dsh）但不是本 pid：npm 通道的子进程，或外部手动启动的实例
+    Adopted,
+    /// 端口被与 dsh 无关的进程占用
+    Foreign,
+}
+
+impl Listener {
+    /// 该监听者是否可认定为「dsh 已在此端口就绪」
+    fn is_owned(self) -> bool {
+        matches!(self, Listener::Managed | Listener::Adopted)
+    }
+}
+
+/// 纯函数：`Starting` 状态在单次对账中的收敛决策。
+///
+/// 返回 `Some(next)` 表示应推进状态；`None` 表示维持 `Starting` 等下轮对账。
+/// 抽为纯函数以便单测直接覆盖状态机语义（ADR-0009 D11c：关键路径需有守护测试）。
+///
+/// - 端口就绪（托管或收养的 dsh）→ `Running`
+/// - 进程已退出且端口未就绪 → `Stopped`（启动即崩，由 startup_probe 做插件归因）
+/// - 进程仍存活但端口未就绪 → `None`（继续预热，**不再有 8 秒放弃语义**）
+fn starting_convergence(port_ready: bool, process_alive: bool) -> Option<DshStatus> {
+    if port_ready {
+        Some(DshStatus::Running)
+    } else if !process_alive {
+        Some(DshStatus::Stopped)
+    } else {
+        None
     }
 }
 
@@ -1012,6 +1220,105 @@ mod tests {
     use super::cmdline_looks_like_dsh;
     use super::decode_console_text;
     use super::extract_web_url;
+    use super::starting_convergence;
+    use super::DshStatus;
+    use super::Listener;
+
+    /// G4（审计 RT-01）：互斥量**中毒**后仍可继续读写（不得 panic）。
+    ///
+    /// 旧实现写路径用 `.lock().unwrap()`：任一线程持锁期 panic → 毒化 → 后续所有
+    /// 状态写操作连锁 panic，后台监视线程死亡、状态无法收敛。
+    #[test]
+    fn 锁中毒后仍可恢复读写() {
+        use std::sync::{Arc, Mutex};
+        let mutex = Arc::new(Mutex::new(7u32));
+
+        // 在另一线程持锁 panic，使互斥量中毒
+        let poisoner = Arc::clone(&mutex);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("持锁 panic → 毒化");
+        })
+        .join();
+
+        assert!(mutex.is_poisoned(), "前置条件：应该已中毒");
+        // 关键断言：中毒后仍能取锁（不 panic）且值可读可写
+        {
+            let mut guard = super::lock_or_recover(&mutex);
+            assert_eq!(*guard, 7);
+            *guard = 9;
+        }
+        assert_eq!(*super::lock_or_recover(&mutex), 9);
+    }
+
+    /// G4 回归：`ProcessManager` 的状态读写走同一容错取锁路径。
+    #[test]
+    fn 状态读写不panic() {
+        use super::ProcessManager;
+        use crate::core::logging::Logger;
+        use std::sync::Arc;
+        let pm = ProcessManager::new(Arc::new(Logger::init()));
+        assert_eq!(pm.status(), DshStatus::Stopped);
+        assert_eq!(pm.current_port(), 0);
+        assert!(pm.web_url().is_empty());
+        assert!(!pm.is_managed());
+    }
+
+    /// v0.9.1 回归：**「端口未就绪但进程存活」绝不能给出终态**。
+    ///
+    /// 这正是「启动未就绪」BUG 的状态机内核：旧实现里 8 秒探活超时后线程直接 return，
+    /// 状态永久停在 `Starting`（无人再推进）。现在该情形必须返回 `None`（维持启动中，
+    /// 交由 5 秒对账继续探测），而非任何终态。
+    #[test]
+    fn test_starting_convergence_slow_boot_is_not_terminal() {
+        assert_eq!(
+            starting_convergence(false, true),
+            None,
+            "进程存活但端口未就绪 → 必须继续等待（不得判失败/终止）"
+        );
+    }
+
+    #[test]
+    fn test_starting_convergence_port_ready_becomes_running() {
+        assert_eq!(starting_convergence(true, true), Some(DshStatus::Running));
+        // 端口就绪即认定就绪（即使本轮存活判定未命中，端口是更强的证据）
+        assert_eq!(starting_convergence(true, false), Some(DshStatus::Running));
+    }
+
+    #[test]
+    fn test_starting_convergence_dead_process_becomes_stopped() {
+        assert_eq!(
+            starting_convergence(false, false),
+            Some(DshStatus::Stopped),
+            "进程已退出且端口未监听（启动即崩）→ 复位为未运行，交由插件归因"
+        );
+    }
+
+    /// `Listener::is_owned` 决定「端口是否可认定为 dsh 已就绪」：
+    /// 托管与收养的 dsh 都算；无监听者与**无关进程**都不算（防误判 → 防误杀）。
+    #[test]
+    fn test_listener_is_owned_semantics() {
+        assert!(Listener::Managed.is_owned());
+        assert!(Listener::Adopted.is_owned());
+        assert!(!Listener::None.is_owned());
+        assert!(
+            !Listener::Foreign.is_owned(),
+            "端口被无关进程占用时绝不可判为 dsh 就绪（否则停止会误杀该进程）"
+        );
+    }
+
+    /// 新建实例未被托管：`is_managed` 是前端区分「继续等待」与「询问接管」的依据。
+    #[test]
+    fn test_is_managed_false_before_start() {
+        use super::ProcessManager;
+        use crate::core::logging::Logger;
+        use std::sync::Arc;
+        let pm = ProcessManager::new(Arc::new(Logger::init()));
+        assert!(
+            !pm.is_managed(),
+            "未启动时不得声称托管理实例（pid 必须为 0）"
+        );
+    }
 
     #[test]
     fn test_cmdline_looks_like_dsh_positive() {

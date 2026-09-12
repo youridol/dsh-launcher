@@ -3,7 +3,7 @@
 // v0.4.9：双通道列表融合——顶部按钮组切换 GitHub/npm，单一刷新按钮，默认 GitHub。
 //   两通道列表在进入时并发预加载（refresh 一次性拉齐），切换 Tab 零网络开销、零状态丢失，
 //   保证来回切换无 bug。安装任意通道版本时 Rust 端自动先卸载对侧通道（全局单版本）。
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTauriEvent, useRefreshOnEvent } from "@/hooks/useTauriEvent";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
-import { versionSortDesc } from "@/lib/version";
 import {
   getInstalledVersion,
   getInstallPaths,
@@ -72,15 +71,11 @@ export default function VersionPanel() {
     };
   }, []);
 
-  // 最新版本置顶（npm 原始顺序是旧→新，需反转；GitHub 已是降序但统一处理）
-  const sortedNpm = useMemo(
-    () => [...npmVersions].sort((a, b) => versionSortDesc(a.version, b.version)),
-    [npmVersions],
-  );
-  const sortedGh = useMemo(
-    () => [...ghVersions].sort((a, b) => versionSortDesc(a.version, b.version)),
-    [ghVersions],
-  );
+  // G7（审计 TC-02）：**不再在前端重排**。顺序的唯一真相源是 Rust 的
+  // `list_versions`（npm 与 GitHub 两个通道都已在后端按 semver 降序返回，
+  // 最新在前）。此前两端各实现一份 semver 比较（`lib/version.ts`），规则可能漂移。
+  const sortedNpm = npmVersions;
+  const sortedGh = ghVersions;
 
   const refresh = useCallback(async () => {
     // 并发拉取（互不阻塞）：npm 版本 + GitHub 版本 + 已安装版本 + 安装路径

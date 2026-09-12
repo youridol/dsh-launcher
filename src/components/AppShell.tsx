@@ -183,9 +183,16 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
   const handleTitlebarDoubleClick = useCallback((e: ReactMouseEvent) => {
     if ((e.target as HTMLElement).closest("button")) return;
     try {
-      void getCurrentWindow().toggleMaximize();
+      // G7（审计 RT-04）：`try/catch` 只能捕获**同步**抛出；`toggleMaximize()`
+      // 返回的 Promise 若 reject（非 Tauri 环境）会变成未处理的 Promise 拒绝。
+      // 改为显式 `.catch` 吞并（与 WindowControls 的 `act()` 包装语义一致）。
+      getCurrentWindow()
+        .toggleMaximize()
+        .catch(() => {
+          // 非 Tauri 环境忽略
+        });
     } catch {
-      // 非 Tauri 环境忽略
+      // getCurrentWindow() 同步抛错（非 Tauri 环境）
     }
   }, []);
 

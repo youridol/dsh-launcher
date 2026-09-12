@@ -132,6 +132,34 @@ pub fn rgba_to_bgra_and_mask(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, 
     (bgra, and_mask)
 }
 
+/// 回环主机名判定（内嵌 Web GUI 只允许停在回环源）。
+///
+/// IPv6 的 `Url::host_str()` 会带方括号（`[::1]`），此处一并兼容。
+fn is_loopback_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("127.0.0.1")
+        || host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("::1")
+}
+
+/// 字符串 URL 是否为回环 http(s) 地址（供 IPC 入参校验；G1）。
+///
+/// 安全性：内嵌 Web GUI 的 url 由前端传入，必须限定为回环源，避免
+/// ① 前端/被注入脚本把后端当作任意 host 的 HTTP 客户端（SSRF）；
+/// ② 内嵌窗口被导航到任意外部站点。
+pub(crate) fn url_is_loopback(url: &str) -> bool {
+    match url.parse::<tauri::Url>() {
+        Ok(parsed) => {
+            matches!(parsed.scheme(), "http" | "https")
+                && is_loopback_host(parsed.host_str())
+        }
+        Err(_) => false,
+    }
+}
+
 /// 创建内嵌 Web GUI 窗口（统一实现；被桌面快捷方式/自动打开/前端"内嵌打开"共用）
 ///
 /// 设计要点（任务栏图标高清修复，v0.4.15）：
@@ -180,8 +208,35 @@ pub(crate) fn create_embedded_web_gui_window(
             )
             .title("deepseek-harness Web UI")
             .inner_size(1600.0, 900.0)
-            // 载体窗口：导航全放行（不拦截 dsh Web UI 内部任何跳转）
-            .on_navigation(|_url| true);
+            // 同窗口导航（G1，审计 SEC-01）：只放行回环源，防止带 `dsh-web-gui-*`
+            // capability 的内嵌窗口被导航到任意外部站点（原实现恒返回 true，
+            // 使「本窗口仅作 dsh Web UI 载体」的设计约定失效）。
+            // 非回环 http(s) 外链 → 交系统默认浏览器打开并取消本次导航（与
+            // on_new_window 的外链分流语义保持一致）。
+            // 回调运行在 wry 独立线程，禁止阻塞 UI（仅同步判断 + 打开浏览器）。
+            .on_navigation({
+                let app_nav = app.clone();
+                move |url| {
+                    // 只拦截「非回环的 http(s) 外链」：这些才是真正会把窗口带离
+                    // 受信源、且属于网络导航的情况。
+                    // 非 http(s)（about: / data: / blob: 等）不是外部站点导航，
+                    // 保持原「不拦截 dsh UI 内部行为」的语义，避免 UI 回归。
+                    let is_http = matches!(url.scheme(), "http" | "https");
+                    if !is_http || is_loopback_host(url.host_str()) {
+                        return true;
+                    }
+                    if let Err(e) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
+                        if let Some(state) = app_nav.try_state::<AppState>() {
+                            state.logger.warn(&format!(
+                                "内嵌 Web GUI 拦截非回环导航并交系统浏览器失败 {url}: {e}"
+                            ));
+                        } else {
+                            eprintln!("[dsh-launcher] 打开外链失败 {url}: {e}");
+                        }
+                    }
+                    false
+                }
+            });
             // 原生新窗口请求（window.open / 部分新窗口型链接）：
             // - 目标为 dsh Web UI 自身回环源（127.0.0.1 / localhost）→ Allow，进程内放行。
             //   （v0.5.1 修复：此前一律 Deny+系统浏览器会把 dsh UI 内部用 window.open
@@ -309,6 +364,13 @@ fn unique_window_suffix() -> String {
 /// 在创建时设置，不再依赖 setWebGuiIcon 兜底回传）。
 #[tauri::command]
 pub async fn create_web_gui_window(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    // G1（审计 SEC-02）：前端传入的 url 必须为回环 http(s)，否则拒绝——
+    // 否则该命令可被用来把内嵌窗口指向任意站点。
+    if !url_is_loopback(&url) {
+        return Err(format!(
+            "非法地址（仅允许回环 127.0.0.1/localhost/::1 的 http(s) 地址）: {url}"
+        ));
+    }
     // async command 在 async 运行时线程执行；窗口 API 要求主线程。
     // 调度到主线程建窗，不等待结果（无跨线程阻塞 → 无死锁）。
     let app2 = app.clone();
@@ -324,6 +386,19 @@ pub async fn create_web_gui_window(app: tauri::AppHandle, url: String) -> Result
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> DshStatus {
     state.process.status()
+}
+
+/// 当前 dsh 是否由本启动器**托管**（v0.9.1）。
+///
+/// 为何前端需要它：dsh 的访问 token 是**进程级随机数**，只从该进程 stdout 打印。
+/// 于是"已运行但拿不到 token URL"有两种截然不同的成因与处置：
+/// - `true`（托管，pid 已知）：token 只是**尚未打印**（冷启动慢）→ 应继续等待；
+/// - `false`（收养的外部实例）：token 原理上不可得 → 应询问用户是否**接管**
+///   （停止后由启动器重新拉起，从而能捕获 token）。
+/// 若无此区分，前端只能一律长时间空等（旧实现在此空转 40 秒后报错）。
+#[tauri::command]
+pub fn is_dsh_managed(state: State<'_, AppState>) -> bool {
+    state.process.is_managed()
 }
 
 /// 获取 dsh web 完整访问 URL（含 token，供内嵌/外部打开免认证）
@@ -344,6 +419,11 @@ pub fn get_web_url(state: State<'_, AppState>) -> String {
 /// 不自动恢复（须关闭重开）。前端在拿到 token URL 后轮询本命令直到 true 再开窗。
 #[tauri::command]
 pub fn probe_web_ready(url: String) -> bool {
+    // G1（审计 SEC-02）：仅允许探测回环 http(s) 地址，避免把后端当作
+    // 任意 host:port 的 HTTP 客户端（SSRF）。
+    if !url_is_loopback(&url) {
+        return false;
+    }
     crate::core::port::web_ready(&url, 2000)
 }
 
@@ -403,11 +483,17 @@ pub async fn start_dsh(state: State<'_, AppState>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         process.start(port)?;
         // 等待端口就绪（探活线程亦会置 Running；此处同步等待使命令返回即"已就绪"）。
-        // 注意：不依赖探活线程结果，直接轮询端口；失败（超时）不视为启动失败
-        // （进程可能仍在预热/插件加载），返回时状态由后台探活线程继续收敛。
+        // v0.9.1（启动未就绪 BUG 修复）：一旦**观测到端口监听**就立即调用一次对账，
+        // 把 Starting 推进为 Running —— 此前这里已明确探测到端口在监听，却只用它拼
+        // 返回字符串、不置状态，导致 dsh 冷启动超过探活线程 8 秒上限时状态永久卡
+        // Starting（前端「内嵌打开」因此报"端口未监听"）。观测到的事实不再被丢弃。
+        // 失败（超时）不视为启动失败（进程可能仍在预热/插件加载），
+        // 状态由后台对账线程继续收敛。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut ready = false;
         while std::time::Instant::now() < deadline {
             if crate::core::port::is_port_in_use(port) {
+                ready = true;
                 break;
             }
             // 进程已退出则不再等待（避免空等）：状态回 Stopped/Error 说明启动即崩
@@ -419,8 +505,17 @@ pub async fn start_dsh(state: State<'_, AppState>) -> Result<String, String> {
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
-        if crate::core::port::is_port_in_use(port) {
+        if ready {
+            // 按需对账（与后台 5s 线程同一实现）：端口已在监听 → 立即 Starting → Running
+            process.reconcile_now();
+        }
+        // 返回前二次确认状态（对账可能因端口被无关进程占用而拒绝置位）
+        if process.status() == DshStatus::Running {
             Ok::<_, String>(format!("dsh 已启动并就绪，端口 {port}"))
+        } else if ready {
+            Ok::<_, String>(format!(
+                "dsh 已启动（端口 {port} 已被占用但监听者不是 dsh，请检查端口冲突）"
+            ))
         } else {
             Ok::<_, String>(format!("dsh 已启动（端口 {port} 等待就绪中…）"))
         }
@@ -448,6 +543,32 @@ pub async fn restart_dsh(state: State<'_, AppState>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         process.restart()?;
         Ok::<_, String>("dsh 已重启".to_string())
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {e}"))?
+}
+
+/// 接管外部启动的 dsh（v0.9.1）。
+///
+/// 场景：用户在终端手动 `dsh web`（或上次退出驻留的实例无法恢复 token），启动器只能
+/// **收养**它 —— 而它的访问 token 是进程级随机数、只从该进程 stdout 打印，启动器在
+/// 原理上拿不到 → 内嵌窗口无法免认证打开。
+///
+/// 处置：停止该外部实例，再由启动器以官方参数重新拉起（`dsh web --port <p> --no-open`），
+/// 于是 token 经 stdout 落盘被捕获，内嵌窗口可正常打开。**由前端显式征得用户同意后调用**
+/// （会中断该实例上正在进行的会话），故单独成一个语义明确的命令，而非隐式行为。
+#[tauri::command]
+pub async fn take_over_dsh(state: State<'_, AppState>) -> Result<String, String> {
+    let process = std::sync::Arc::clone(&state.process);
+    tauri::async_runtime::spawn_blocking(move || {
+        // restart 内部：stop（含按端口清剿收养实例，带 dsh 身份校验防误杀）→ 同端口重启。
+        // 端口用的是 ProcessManager 当前生效端口（收养实例的监听端口），
+        // 故返回消息也从它取，不假定配置端口（二者理论上有偏差时不得误导用户）。
+        process.restart()?;
+        Ok::<_, String>(format!(
+            "已接管并重新启动 dsh（端口 {}）",
+            process.current_port()
+        ))
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
@@ -510,5 +631,49 @@ mod icon_pixel_tests {
         let (bgra, mask) = rgba_to_bgra_and_mask(&[], 0, 0);
         assert!(bgra.is_empty());
         assert!(mask.is_empty());
+    }
+}
+
+/// G1（审计 SEC-01/SEC-02）：内嵌 Web GUI 的 url 入参必须限定为回环 http(s)。
+#[cfg(test)]
+mod loopback_url_tests {
+    use super::{is_loopback_host, url_is_loopback};
+
+    #[test]
+    fn 回环地址被接受() {
+        for url in [
+            "http://127.0.0.1:3080/?token=abc",
+            "http://localhost:3080/",
+            "https://127.0.0.1:3080/",
+            "http://[::1]:3080/x",
+        ] {
+            assert!(url_is_loopback(url), "{url} 应被接受");
+        }
+    }
+
+    #[test]
+    fn 非回环地址被拒绝() {
+        for url in [
+            "https://evil.example/",
+            "http://10.0.0.1:3080/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://localhost.evil.com/",
+            "http://127.0.0.1.evil.com/",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "",
+            "not a url",
+        ] {
+            assert!(!url_is_loopback(url), "{url} 必须被拒绝");
+        }
+    }
+
+    #[test]
+    fn 主机名判定兼容_ipv6_方括号() {
+        assert!(is_loopback_host(Some("::1")));
+        assert!(is_loopback_host(Some("[::1]")));
+        assert!(is_loopback_host(Some("LOCALHOST")));
+        assert!(!is_loopback_host(Some("127.0.0.2")));
+        assert!(!is_loopback_host(None));
     }
 }

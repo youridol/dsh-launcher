@@ -489,6 +489,23 @@ fn apply_body(
     body: Option<&str>,
 ) -> Result<BlockOutcome, String> {
     let _write_guard = file_write_lock(path);
+    // G3（审计 SEC-03）：写入体不得含本家族的受管 marker 子串。
+    //
+    // marker 的定位是**子串计数**（见 `locate_with_markers`：`content.matches(marker).count()`
+    // 必须恰为 1）。若 body 里出现 marker 文本（例如 MCP 的 `--raw-config` 透传、或某个被
+    // `yaml_quote` 包裹的字段值恰好含该串），写出的文件就会出现**重复 marker**，此后所有
+    // 区块读写一律判 `Broken`，且无法自愈（需人工修文件）。故在唯一写入路径上直接拒绝。
+    if let Some(text) = body {
+        for marker in [begin_marker, end_marker] {
+            if text.contains(marker) {
+                return Err(format!(
+                    "{}: 写入体包含受管区块 marker（{}），拒绝写入（会破坏区块结构）",
+                    path.display(),
+                    marker
+                ));
+            }
+        }
+    }
     let existing = read_optional(path)?;
     let eol = detect_eol(existing.as_deref().unwrap_or(""));
     let rendered = match body {
@@ -1029,5 +1046,45 @@ mod tests {
         assert!(content.contains(&SHARED.mark_begin()), "{content}");
         assert!(content.contains(&THIRD.mark_begin()), "{content}");
         assert!(content.starts_with("# 用户自己的注释\n# 第二行\n"), "块外必须保留");
+    }
+
+    // ==================== G3（审计 SEC-03）：marker 注入防护 ====================
+
+    /// 写入体含本家族 marker 子串时必须拒绝，且**不得改动文件**。
+    ///
+    /// 背景：marker 的定位是子串计数（`content.matches(marker).count()` 必须恰为 1）；
+    /// 若允许写入含 marker 文本的 body，会产生重复 marker → 此后所有区块读写判
+    /// `Broken`，需人工修文件。
+    #[test]
+    fn 写入体含_marker_时拒绝且不改动文件() {
+        let path = temp_path("marker-injection");
+        fs::write(&path, USER_TEMPLATE).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let evil = format!("- id: x\n  config:\n    command: '{}'", THIRD.mark_begin());
+        let err = apply_family(&path, THIRD, Some(&evil)).unwrap_err();
+        assert!(err.contains("marker"), "错误信息应指明 marker: {err}");
+        assert_eq!(fs::read(&path).unwrap(), before, "被拒时文件必须逐字节不变");
+
+        // 结束 marker 同样被拦
+        let evil_end = format!("- id: y\n  note: '{}'", THIRD.mark_end());
+        let err_end = apply_family(&path, THIRD, Some(&evil_end)).unwrap_err();
+        assert!(err_end.contains("marker"), "{err_end}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    /// 正常 body（不含 marker）仍可正常写入（确认防护不误伤）。
+    #[test]
+    fn 正常写入体不受_marker_防护影响() {
+        let path = temp_path("marker-clean");
+        fs::write(&path, USER_TEMPLATE).unwrap();
+        assert_eq!(
+            apply_family(&path, THIRD, Some("- id: ok\n  disabled: false")).unwrap(),
+            BlockOutcome::Written
+        );
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("- id: ok"));
+        assert_eq!(content.matches(&THIRD.mark_begin()).count(), 1);
+        assert_eq!(content.matches(&THIRD.mark_end()).count(), 1);
     }
 }

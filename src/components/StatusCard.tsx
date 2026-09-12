@@ -25,12 +25,14 @@ import {
   getConfig,
   getInstalledVersion,
   getWebUrl,
+  isDshManaged,
   listenVersionChanged,
   probeWebReady,
   restartDsh,
   setPort as savePort,
   startDsh,
   stopDsh,
+  takeOverDsh,
   uninstallDsh,
   type DshStatus as Status,
 } from "@/lib/tauri";
@@ -83,6 +85,8 @@ export default function StatusCard() {
   const [opening, setOpening] = useState(false);
   const [stageIdx, setStageIdx] = useState(0);
   const [openErr, setOpenErr] = useState<string | null>(null);
+  // v0.9.1：失败原因为「外部实例无法取得令牌」时置位 → 弹窗多给一个「接管并重启」
+  const [needsTakeover, setNeedsTakeover] = useState(false);
   // 当前打开模式（embedded=内嵌窗口 / external=外部浏览器）
   const openMode = useRef<"embedded" | "external">("embedded");
   // 打开流程守卫：取消/重开时使旧流程的异步 setState 失效（避免竞态污染）
@@ -255,6 +259,7 @@ export default function StatusCard() {
     const alive = () => openSeq.current === seq;
     setGuiBusy(true);
     setOpenErr(null);
+    setNeedsTakeover(false);
     setStageIdx(0);
     setOpening(true);
     try {
@@ -329,9 +334,13 @@ export default function StatusCard() {
         }
       }
 
-      // ③ 等 dsh 就绪（running = 端口监听中；最长 25s）
+      // ③ 等 dsh 就绪（running = 端口监听中）。
+      // v0.9.1（启动未就绪 BUG 修复）：本阶段此前是**唯一的失败点**，且文案把一切
+      // 失败都说成"端口未监听"——实测端口其实已监听（冷启动 8.83s），只是后端状态机
+      // 卡在 Starting 未收敛。现在：后端已有对账兜底 + start_dsh 观测即置位，
+      // 这里同时放宽到 40s（覆盖插件/MCP 拉长的冷启动），并按**真实原因**分别报错。
       setStageIdx(2);
-      const readyDeadline = Date.now() + 25_000;
+      const readyDeadline = Date.now() + 40_000;
       let ready = false;
       while (Date.now() < readyDeadline) {
         try {
@@ -340,7 +349,7 @@ export default function StatusCard() {
             ready = true;
             break;
           }
-          if (s === "error") break; // 出错不再等待
+          if (s === "stopped" || s === "error") break; // 进程已退出，不再等待
         } catch {
           /* 瞬时错误继续 */
         }
@@ -349,7 +358,23 @@ export default function StatusCard() {
       }
       if (!alive()) return;
       if (!ready) {
-        setOpenErr("dsh 启动后未就绪（端口未监听）。请查看日志定位原因，或先停止再启动");
+        // 按真实状态给出可操作的原因，不再一律误报"端口未监听"
+        let finalStatus: Status = "stopped";
+        try {
+          finalStatus = await getDshStatus();
+        } catch {
+          /* 保持默认 */
+        }
+        if (!alive()) return;
+        if (finalStatus === "stopped" || finalStatus === "error") {
+          setOpenErr(
+            "dsh 进程已退出，未能就绪。请查看下方日志面板定位原因（常见：端口被占用、插件加载失败），或先停止再启动",
+          );
+        } else {
+          setOpenErr(
+            "dsh 进程仍在启动但未在 40 秒内就绪。请查看日志面板确认进度，稍后点「重试」，或先停止再启动",
+          );
+        }
         return;
       }
 
@@ -365,6 +390,12 @@ export default function StatusCard() {
       setStageIdx(3);
       const httpDeadline = Date.now() + 40_000;
       let finalUrl: string | null = null;
+      // v0.9.1：判断是否"已运行但 token 原理上不可得"（收养的外部实例）。
+      // 外部实例的 token 只从**它自己的** stdout 打印，启动器拿不到；旧实现会在
+      // 这里空转 40 秒后报"访问地址无效"，用户无从下手。现在辨识该情形并给出
+      // **可操作的接管选择**（停止后由启动器重新拉起 → token 可被捕获）。
+      let externalNoToken = false;
+      let sawUrl = false;
       while (Date.now() < httpDeadline) {
         if (!alive()) return;
         // 每次取最新 URL（token 会随 dsh 重启变化）
@@ -376,6 +407,7 @@ export default function StatusCard() {
         }
         // 仅含 token 的 URL 才参与探测
         if (cur && /[?&]token=/.test(cur)) {
+          sawUrl = true;
           try {
             if (await probeWebReady(cur)) {
               finalUrl = cur;
@@ -384,12 +416,34 @@ export default function StatusCard() {
           } catch {
             /* 瞬时失败继续 */
           }
+        } else {
+          // 没有可用 URL：若是**非托管**实例，再等也不会出现（token 不可得）→ 提前决策
+          try {
+            if (!(await isDshManaged())) {
+              externalNoToken = true;
+              break;
+            }
+          } catch {
+            /* 查询失败按托管处理，继续等待 */
+          }
         }
         await sleep(700);
       }
       if (!alive()) return;
+      if (!finalUrl && externalNoToken) {
+        // 外部实例：询问是否由启动器接管（会中断该实例上的会话）
+        setOpenErr(
+          "当前 dsh 是**在启动器之外**启动的实例，它的访问令牌只在该进程自己的输出里，启动器无法获取，因此无法免认证打开内嵌窗口。\n可点「接管并重启」：停止该实例并由启动器重新启动（会中断其中正在进行的会话）。",
+        );
+        setNeedsTakeover(true);
+        return;
+      }
       if (!finalUrl) {
-        setOpenErr("dsh Web 在 40 秒内未就绪（访问地址无效或 HTTP 未响应 2xx/3xx）。请稍后重试或查看日志");
+        setOpenErr(
+          sawUrl
+            ? "dsh 已监听端口但访问地址未在 40 秒内通过 HTTP 就绪探测（可能 token 过期或服务仍在预热）。请点「重试」，或先停止再启动"
+            : "dsh 运行中但未输出访问地址（含 token）。请查看日志面板；若为启动器之外启动的实例，请先停止它再由启动器启动",
+        );
         return;
       }
       const url = finalUrl;
@@ -435,6 +489,26 @@ export default function StatusCard() {
     setOpening(false);
     setGuiBusy(false);
     setOpenErr(null);
+    setNeedsTakeover(false);
+  }
+
+  /**
+   * 接管外部启动的 dsh（v0.9.1）：停止该实例并由启动器重新拉起，使 token 可被捕获。
+   * 由用户在失败弹窗中显式点击触发（会中断该实例上的会话）。
+   */
+  async function handleTakeover() {
+    setNeedsTakeover(false);
+    setOpenErr(null);
+    setStageIdx(1);
+    try {
+      await takeOverDsh();
+    } catch (e) {
+      setOpenErr(`接管失败：${e}`);
+      return;
+    }
+    // 重启命令返回后再走一次完整引导流程（此时实例已由启动器托管）
+    await sleep(300);
+    await openWithGuide(openMode.current, true);
   }
 
   function sleep(ms: number) {
@@ -572,16 +646,22 @@ export default function StatusCard() {
             {/* 失败提示 + 重试/关闭 */}
             {openErr && (
               <div className="space-y-3">
-                <p className="break-words text-xs text-destructive">{openErr}</p>
-                <div className="flex justify-end gap-2">
+                <p className="break-words whitespace-pre-line text-xs text-destructive">{openErr}</p>
+                <div className="flex flex-wrap justify-end gap-2">
                   <Button variant="outline" size="sm" onClick={closeOpenGuide}>
                     关闭
                   </Button>
+                  {needsTakeover && (
+                    <Button variant="secondary" size="sm" onClick={() => void handleTakeover()}>
+                      <RotateCw className="size-3" /> 接管并重启
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     onClick={() => {
                       // 重试（force：失败态 guiBusy=true 也放行，重新走引导流程）
                       setOpenErr(null);
+                      setNeedsTakeover(false);
                       void openWithGuide(openMode.current, true);
                     }}
                   >

@@ -316,7 +316,12 @@ pub fn open_skill_file(
             "该路径不在受管的用户级技能根内（或已不存在）".to_string(),
         ));
     }
-    let path = declared_path.to_path_buf();
+    // G6（审计 SEC-05）：打开**已校验的规范化路径**。
+    // 归属判定内部已 canonicalize；若此处仍用前端传入的原路径，
+    // 判定与打开之间就存在符号链接替换窗口（TOCTOU）。
+    let path = declared_path
+        .canonicalize()
+        .map_err(|e| OpenError::UnknownTarget(format!("无法解析技能文件路径: {e}")))?;
 
     let configured = AppConfig::load().editor_command;
     let configured = configured.trim();

@@ -46,11 +46,16 @@ fn open_web_gui_window(app: &tauri::AppHandle) {
         let port = if crate::core::port::validate_port(cfg_port) { cfg_port } else { 3080 };
 
         // ① 等端口监听（dsh 冷启动 / 直接 node 预热需数秒）
-        let deadline = Instant::now() + Duration::from_secs(8);
+        // v0.9.1（启动未就绪 BUG 修复）：上限由 8s 放宽到 30s —— 实测冷启动「端口监听
+        // at 8.83s」（插件 dsh-cost-meter + MCP filesystem 拉长预热），8s 会在就绪前
+        // 放弃并去聚焦主窗口，用户看到的正是"点了打不开"。每轮顺带按需对账，
+        // 使状态机不必等下一个 5s 周期（同一实现，规则不重复）。
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut listening = false;
         while Instant::now() < deadline {
             if crate::core::port::probe(port) == Some(true) {
                 listening = true;
+                process.reconcile_now();
                 break;
             }
             std::thread::sleep(Duration::from_millis(400));
@@ -308,6 +313,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::dsh::get_status,
+            commands::dsh::is_dsh_managed,
             commands::dsh::get_web_url,
             commands::dsh::probe_web_ready,
             commands::dsh::create_desktop_shortcut,
@@ -315,6 +321,7 @@ pub fn run() {
             commands::dsh::start_dsh,
             commands::dsh::stop_dsh,
             commands::dsh::restart_dsh,
+            commands::dsh::take_over_dsh,
             commands::config::get_config,
             commands::config::set_port,
             commands::config::set_mirrors,

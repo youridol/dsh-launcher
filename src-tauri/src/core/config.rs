@@ -96,27 +96,78 @@ pub fn current_npm_registry() -> Option<String> {
     AppConfig::load().npm_registry_url()
 }
 
+/// 配置加载中可恢复的问题（供调用方落日志；G5 / 审计 RT-03）。
+///
+/// 此前 `AppConfig::load` 对「JSON 解析失败」与「DPAPI 解密失败」均静默回退/置空，
+/// 用户配置（端口/开关/镜像）一次性丢失后**无任何可观测线索**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadIssue {
+    /// 配置文件存在但解析失败（已回退默认配置）
+    ParseFailed(String),
+    /// `github_token` 为 `dpapi1:` 密文但解密失败（已置空，见审计 2.4）
+    TokenDecryptFailed,
+}
+
+impl LoadIssue {
+    /// 面向用户/日志的中文说明。
+    pub fn message(&self) -> String {
+        match self {
+            LoadIssue::ParseFailed(detail) => format!(
+                "配置文件解析失败，已回退默认配置（原文件未被覆盖）：{detail}"
+            ),
+            LoadIssue::TokenDecryptFailed => {
+                "GitHub Token 解密失败（可能因更换用户或机器），已置空；请重新设置".to_string()
+            }
+        }
+    }
+}
+
 impl AppConfig {
     /// 读取配置；文件不存在时返回默认配置
     ///
     /// v0.4.13（审计修复 2.4）：github_token 字段若带 `dpapi1:` 前缀则按 DPAPI
     /// 解密（Windows）；解不开（换用户/机器）时置空，避免以密文当明文使用。
     pub fn load() -> Self {
+        Self::load_checked().0
+    }
+
+    /// 带问题的配置读取（G5 / 审计 RT-03）：返回配置与**可选的加载问题**。
+    ///
+    /// 文件不存在视为正常首启（无问题）；仅在「存在但解析失败」或
+    /// 「token 解密失败」时返回 `Some(issue)`，供调用方（如 `get_config`）落日志。
+    pub fn load_checked() -> (Self, Option<LoadIssue>) {
         let path = Self::config_path();
-        match fs::read_to_string(&path) {
-            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(mut v) => {
-                    if let Some(s) = v.get("github_token").and_then(|t| t.as_str()) {
-                        if s.starts_with(DPAPI_PREFIX) {
-                            let dec = decrypt_token(s).unwrap_or_default();
-                            v["github_token"] = serde_json::Value::String(dec);
-                        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            // 不存在 / 不可读：保持旧行为（默认配置），不当作异常
+            return (Self::default(), None);
+        };
+        let mut v = match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    Self::default(),
+                    Some(LoadIssue::ParseFailed(e.to_string())),
+                )
+            }
+        };
+        let mut issue = None;
+        if let Some(s) = v.get("github_token").and_then(|t| t.as_str()) {
+            if s.starts_with(DPAPI_PREFIX) {
+                match decrypt_token(s) {
+                    Some(dec) => v["github_token"] = serde_json::Value::String(dec),
+                    None => {
+                        v["github_token"] = serde_json::Value::String(String::new());
+                        issue = Some(LoadIssue::TokenDecryptFailed);
                     }
-                    serde_json::from_value(v).unwrap_or_default()
                 }
-                Err(_) => Self::default(),
-            },
-            Err(_) => Self::default(),
+            }
+        }
+        match serde_json::from_value(v) {
+            Ok(config) => (config, issue),
+            Err(e) => (
+                Self::default(),
+                Some(LoadIssue::ParseFailed(e.to_string())),
+            ),
         }
     }
 

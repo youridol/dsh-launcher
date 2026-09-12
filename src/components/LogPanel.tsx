@@ -16,7 +16,7 @@ import { listLogs, readLog, type LogFile } from "@/lib/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { Download, Eraser } from "lucide-react";
+import { Download, Eraser, ShieldOff } from "lucide-react";
 
 // 日志行（对应 Rust LogLine）
 interface LogLine {
@@ -58,6 +58,19 @@ function stripEmoji(s: string): string {
 
 function formatLogLine(l: LogLine): string {
   return stripEmoji(`[${l.timestamp}] [${l.source}] [${l.level}] ${l.message}`);
+}
+
+/**
+ * 把日志文本中的 dsh 访问 token 打码（G5 / ADR-0009 D5）。
+ *
+ * 仅用于**导出产物**（供外发/上报）；屏幕展示与落盘保持 ADR-0009 D5 的明文口径。
+ * 覆盖两类出现形式：
+ * - 查询串 `token=<值>`（含 `?token=` 与 `&token=`）；
+ * - 裸 `token=` 后接 URL-safe 值。
+ * 只替换值本身，保留 `token=` 便于阅读时定位。
+ */
+function redactWebTokens(text: string): string {
+  return text.replace(/(token=)[^\s&"'\\]+/gi, "$1***");
 }
 
 function toEntry(l: LogLine): StreamEntry {
@@ -217,13 +230,37 @@ export default function LogPanel({ className }: { className?: string }) {
     const data = liveMode
       ? entries.map((e) => e.text).join("\n")
       : stripEmoji(content);
+    downloadText(data, liveMode ? "dsh-live.log" : `${selected?.replace(/[\\/]/g, "-") ?? "dsh.log"}`);
+  }
+
+  /**
+   * 导出**打码版**日志（G5 / ADR-0009 D5）。
+   *
+   * ADR-0009 D5 保留了「日志与前端流明文含 token」的产品决策（用户需复制完整
+   * 带 token 地址在外部浏览器打开），但同节亦明确指出：向外部分享/上报日志时应
+   * 提供**打码**路径。此处只影响导出产物，**不改变**默认的屏幕展示与落盘口径。
+   */
+  function exportLogRedacted() {
+    const data = liveMode
+      ? entries.map((e) => e.text).join("\n")
+      : stripEmoji(content);
+    const redacted = redactWebTokens(data);
+    if (redacted === data) {
+      toast.info("本段日志未发现访问 token，已按原样导出");
+    } else {
+      toast.success("已导出打码版日志（token 已替换为 ***）");
+    }
+    const name = liveMode ? "dsh-live-redacted.log" : `redacted-${selected?.replace(/[\\/]/g, "-") ?? "dsh.log"}`;
+    downloadText(redacted, name);
+  }
+
+  /** 把文本下载为本地文件（统一 blob URL 的创建与延后回收）。 */
+  function downloadText(data: string, filename: string) {
     const blob = new Blob([data], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = liveMode
-      ? "dsh-live.log"
-      : `${selected?.replace(/[\\/]/g, "-") ?? "dsh.log"}`;
+    a.download = filename;
     a.click();
     // 延后回收 blob URL（避免下载开始前被作废）
     setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -284,6 +321,15 @@ export default function LogPanel({ className }: { className?: string }) {
             aria-label="导出日志"
           >
             <Download />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={exportLogRedacted}
+            title="导出打码版日志（token → ***，供外发/上报）"
+            aria-label="导出打码版日志"
+          >
+            <ShieldOff />
           </Button>
         </div>
       </div>

@@ -287,7 +287,12 @@ fn parse_semver_parts(v: &str) -> (Vec<u64>, Vec<PreId>) {
 
 /// semver 降序比较（返回 a 是否应排在 b 之前，即 a 更新则 Less… 见 sort_by 语义）。
 /// sort_by 的比较器：返回 Ordering 表示 a 相对 b 的顺序，降序 = 更新版本排前。
-fn cmp_semver_desc(a: &str, b: &str) -> std::cmp::Ordering {
+///
+/// G7（审计 TC-02）：公开给 `commands/version.rs` 用，使**排序只在一端发生**——
+/// 此前前端 `lib/version.ts` 另实现了一份等价的 semver 比较（含相同的
+/// `rc.9 < rc.10` 修复注释），两端规则有漂移风险。现在 npm/GitHub 两个通道
+/// 都在 Rust 侧排好序，前端只负责展示。
+pub fn cmp_semver_desc(a: &str, b: &str) -> std::cmp::Ordering {
     cmp_semver_asc(b, a)
 }
 
@@ -691,6 +696,31 @@ f\trefs/tags/dsh-v0.1.1-rc.2
             "dsh-v0.1.1-rc.2",
         ];
         assert_eq!(tags, expect, "semver 降序应正确: {tags:?}");
+    }
+
+    /// G7（审计 TC-02）：`cmp_semver_desc` 现已公开给 npm 通道排序，
+    /// 直接对比较器本身加回归（不再仅靠 tags 解析的间接覆盖）。
+    #[test]
+    fn test_cmp_semver_desc_npm_channel_order() {
+        use super::cmp_semver_desc;
+        let mut versions = vec![
+            "0.1.1-rc.9",
+            "0.1.1-rc.10",
+            "0.10.0",
+            "0.9.0",
+            "0.1.2-alpha.1",
+            "0.1.1-rc.2",
+        ];
+        versions.sort_by(|a, b| cmp_semver_desc(a, b));
+        assert_eq!(
+            versions,
+            vec!["0.10.0", "0.9.0", "0.1.2-alpha.1", "0.1.1-rc.10", "0.1.1-rc.9", "0.1.1-rc.2"],
+            "npm 通道同一套 semver 降序规则（与 GitHub tags 一致）"
+        );
+        // 正式版 > 同号预发布
+        assert!(cmp_semver_desc("0.2.0", "0.2.0-rc.1").is_lt());
+        // 数字段 < 字母段
+        assert!(cmp_semver_desc("0.1.1-rc.2", "0.1.1-alpha.1").is_lt());
     }
 
     #[test]

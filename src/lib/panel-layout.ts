@@ -2,10 +2,21 @@
 // 仅布局逻辑；视觉样式与业务无关
 // 状态分离：宽度值（useResizablePanel 持久化）与 open/close 状态独立
 
-/** 移动端断点（≤640px：Sidebar 变 overlay/drawer，Main 占满） */
+/** 移动端断点（≤640px：Sidebar 变 overlay/drawer，Main 占满）。
+ *
+ * G7（审计 §2.1）：此前 `useIsMobile` 另行硬编码 `max-width: 640px`，与这里的常量
+ * 形成双源（改一处忘另一处即漂移）。现由 `useIsMobile` 引用本常量，单一来源在 TS 侧；
+ * `index.css:431` 的 `@media (max-width: 640px)` 是 CSS 侧无法共享的副本，
+ * 修改时必须同步（两处都已标注）。
+ */
 export const MOBILE_MAX_WIDTH = 640;
-/** 紧凑桌面断点（<960px：仅 Sidebar | Main 两栏，Right Panel 不参与 split） */
-export const SPLIT_PANEL_MIN_WIDTH = 960;
+
+/** 紧凑桌面断点（<960px：仅 Sidebar | Main 两栏，Right Panel 不参与 split）。
+ *
+ * G7（审计 §2.1）：仅在**本模块内部**（`getSidebarMaxWidth` / `getRightPanelMaxWidth`）
+ * 使用，故不再 `export`（收紧公共面）。
+ */
+const SPLIT_PANEL_MIN_WIDTH = 960;
 
 /** 左侧 Sidebar：默认 / 最小 / 最大宽度（默认 340px，用户拖拽可在 200~480 调整） */
 export const SIDEBAR_DEFAULT_WIDTH = 340;

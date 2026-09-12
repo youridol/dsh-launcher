@@ -793,6 +793,53 @@ fn raw_config_channel_passes_official_fields_verbatim_including_js() {
     assert_eq!(raw_server.transport, Some(mcp::state::McpTransportView::StreamableHttp));
 }
 
+// ==================== G3（审计 SEC-03）：marker 注入与回滚 ====================
+
+/// G3：MCP 原始通道（`raw_config`）含受管区块 marker 时，`add` 必须**拒绝且零写入**。
+///
+/// 若允许写入，文件会出现重复 marker → 此后所有区块读写判 `Broken`，需人工修文件。
+#[test]
+fn g3_raw_config_with_managed_marker_is_rejected_with_zero_write() {
+    let fixture = Fixture::new("g3-marker");
+    // 让区块已存在，以便验证“被拒时文件逐字节不变”
+    fixture.write_user_patch(USER_PATCH);
+    let before = std::fs::read_to_string(fixture.patch_path()).unwrap();
+
+    // 构造一个内含 mcp 受管区块起始 marker 的原始体
+    let marker = dsh_launcher_lib::core::mcp::block::mark_begin();
+    let raw = format!(
+        "serverName: evilsrv\ntransport: stdio\ncommand: x\nx-note: '{marker}'\n"
+    );
+    let spec = McpAddSpec {
+        server_name: "evilsrv".to_string(),
+        transport: "stdio".to_string(),
+        raw_config: Some(raw),
+        ..Default::default()
+    };
+
+    let error = mcp::add(&spec, &fixture.logger()).unwrap_err();
+    assert!(
+        error.message.contains("marker"),
+        "错误信息应指明 marker 问题: {}",
+        error.message
+    );
+    // 零写入：文件与操作前逐字节一致，且 marker 仍成对
+    assert_eq!(
+        std::fs::read_to_string(fixture.patch_path()).unwrap(),
+        before,
+        "被拒时文件必须逐字节不变"
+    );
+    assert_eq!(before.matches(&marker).count(), 0, "前置条件：用户 patch 无受管区块");
+    // 被拒后仍无受管区块（未写入），且未新增任何行
+    assert_eq!(
+        std::fs::read_to_string(fixture.patch_path()).unwrap().matches(&marker).count(),
+        0
+    );
+    // 区块仍可读（未损坏）
+    let listed = fixture.list();
+    assert!(!listed.servers.iter().any(|s| s.server_name == "evilsrv"));
+}
+
 // ==================== 备份与回滚 ====================
 
 #[test]

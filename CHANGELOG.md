@@ -1,5 +1,115 @@
 # Changelog
 
+## [0.9.1] - 2026-09-11
+
+> 本版为**「启动后未就绪」BUG 修复**。硬边界：未修改 `deepseek-harness` 任何代码；
+> **未引入新依赖**；**未新增 npm 依赖**；**未新增 Tauri capability 权限**。
+
+### 修复
+
+- **dsh 冷启动超过 8 秒后状态永久卡「启动中」，导致内嵌打开失败（核心 BUG）**。
+  `Starting → Running` 此前**只有一条**路径：启动探活线程，硬上限 8 秒；超时即打日志
+  后 `return`，**再无任何后续收敛尝试**。而本机实测冷启动「端口监听 at 8.83s」
+  （`dsh-cost-meter` 插件 + MCP filesystem 拉长预热）已越过该上限，于是：
+  - 「内嵌打开」阶段③在 25 秒内始终读不到 `running` → 报
+    `dsh 启动后未就绪（端口未监听）`（**端口其实已在监听**，文案也是错的）；
+  - 状态永久停留 `Starting`（UI 上等同"运行中"，端口输入框被禁用）；
+  - 5 秒对账线程的收养分支只认 `Stopped` → **手动启动的 dsh 也无法被接管**，
+    这正是"手动启动后内嵌打开按钮同样失败"的成因。
+  修复：
+  - **对账线程新增 `Starting` 分支**（无上限持续探测）：端口就绪 → `Running`；
+    进程已退出 → `Stopped`（仍由探活线程做插件归因，ADR-0005 D12 语义不变）。
+    收敛判据区分监听者归属 —— `Managed`（本托管 pid）/ `Adopted`（命令行形如 dsh）
+    可认定就绪，`Foreign`（无关进程占端口）**绝不**判定就绪（防误判 → 防停止时误杀）。
+  - **`start_dsh` 观测到端口监听即置位**：该命令本就轮询到端口已在监听，此前却只用它
+    拼返回字符串、不推进状态（观测到的事实被丢弃）；现在按需调用一次对账。
+  - **收养允许从 `Starting` 进入**（此前只认 `Stopped`），解开"手动启动无法接管"的死结。
+  - 启动探活线程 8 秒超时由 `WARN` 降为 `INFO`：它是"冷启动偏慢"而非失败。
+- **外部启动的 dsh 复用陈旧 token，导致内嵌打开空转 40 秒**。
+  dsh 的访问 token 是**进程级随机数**（`packages/client/connection/src/browser-auth.ts`
+  的 `processLaunchToken`），仅从该进程 stdout 打印。收养时旧实现**无条件沿用**缓存地址：
+  若缓存来自上一轮进程（外部实例的 token 启动器原理上拿不到），前端会拿这段失效 token
+  反复探测失败 → 空转 40 秒后报"访问地址无效"。现在收养时**先用 HTTP 探测验证缓存对
+  当前监听者仍有效**，失效即同时清除内存与磁盘缓存（`last-web-url`）。
+- **「启动时自动打开 Web GUI」/桌面快捷方式在 8 秒内未监听即放弃**：上限放宽到 30 秒，
+  并在探测到监听时顺带对账，覆盖超过 8 秒的冷启动。
+
+### 新增
+
+- **「接管并重启」失败引导**：当内嵌打开因"外部实例无 token"失败时，弹窗不再只报一句
+  无从下手的错误，而是说明原因并提供**接管**按钮 —— 停止该外部实例并由启动器重新拉起，
+  使 token 可被捕获。因会中断该实例上的会话，故**由用户显式点击**触发。
+- 新命令 `is_dsh_managed`（区分托管/外部实例）与 `take_over_dsh`（接管）。
+- 失败文案按**真实原因**分流：进程已退出 / 仍在启动未就绪 / 已监听但 HTTP 未就绪 /
+  外部实例无 token —— 不再一律误报"端口未监听"。
+- 测试隔离缝 `DSH_LAUNCHER_DATA_DIR`（仅集成测试使用；正常运行时该变量不存在，
+  行为与原先完全一致）：端到端用例可把日志与 token 缓存隔离到临时目录，
+  **不触碰用户正在运行的启动器文件**。
+- 回归测试：`starting_convergence` 纯函数语义（进程存活但端口未就绪**必须**保持
+  非终态）、`Listener::is_owned` 归属判定、`is_managed` 初值；
+  以及隔离式端到端用例 `tests/starting_convergence_e2e.rs`
+  （真实冷启动收敛 + 收养不得复用陈旧 token）。
+
+### 严格模式审计整改（全链路只读审查 → 逐项修复）
+
+> 依据 `docs/AUDIT_REPORT_STRICT.md`（P0×1 / P1×3 / P2×18，已逐项处置）。
+> 硬边界同本版上方：未修改 `deepseek-harness` 任何代码；**未引入运行时新依赖**
+> （新增仅限 dev/测试用途）；**未新增 Tauri capability 权限**。
+
+#### 安全 / 数据完整性
+
+- **受管区块写入可被写坏且回滚被绕过（P1）**：`plugin::managed::apply_body`（managed /
+  shared / mcp 三个家族的**唯一**写入路径）新增 marker 子串校验——写入体含本家族
+  marker 即拒绝且**零落盘**；同时修复 `mcp::apply_with_verification` 中
+  `fingerprint_outside(...)?` 的 **`?` 早退**（写后区块损坏时会在进入回滚前返回，
+  导致坏文件永久残留），改为压入失败列表走统一回滚。
+- **IPC 接受前端任意 URL（P1）**：`probe_web_ready` 与 `create_web_gui_window` 增加
+  **回环（127.0.0.1 / localhost / ::1）http(s) 校验**，消除 SSRF 原语与「任意源内嵌」。
+- **内嵌 Web GUI 窗口任意源导航（P0→P1）**：`on_navigation` 由「恒 `true`」收紧为
+  **仅回环放行**，非回环 http(s) 交系统默认浏览器打开并取消导航（与 `on_new_window`
+  的外链分流语义一致）；非 http(s)（`about:`/`data:`）保持放行以避免 UI 回归。
+
+#### 健壮性 / 可观测性
+
+- **锁中毒即 panic（P1）**：`ProcessManager` 的 **39 处** `.lock().unwrap()` 统一改为
+  容忍中毒的 `lock_or_recover`（与仓库其它模块既有约定一致）；此前任一线程持锁期 panic
+  会连锁使后台监视线程死亡、状态永久不再收敛。
+- **路径校验与实际使用不一致（TOCTOU）**：`read_log` 改为读取**已校验的规范化路径**；
+  `open_skill_file` 改为打开 `canonicalize()` 后的路径。
+- **生产路径 `expect`**：`skill::sharing::detect` 的 `read_link().expect(..)`（两次调用
+  间存在 TOCTOU）与 `mcp::set_state` 的 `row.expect(..)` 均改为显式错误分支。
+- **静默失败**：`npm view` 输出解析失败不再被 `unwrap_or_default()` 吞成空列表
+  （此前会被上层误报为「网络/镜像源问题」）；新增 `AppConfig::load_checked()`，
+  把「配置解析失败」「Token 解密失败」这类**此前静默**的回退事件落日志。
+- **查询语义修正**：`npm` 通道版本列表改在 **Rust 侧排序**（registry 原始为升序），
+  与 GitHub 通道统一。
+
+#### 类型契约
+
+- **新增前后端 DTO 字段集合契约测试** `tests/contract_types_test.rs`（33 组对账，含
+  `rename_all` 转换；已入 CI，并用「注入真实改名→失败→还原」实证非空洞）。
+- **删除重复实现**：移除前端 `lib/version.ts`（与 Rust 各写一份 semver 比较，有漂移风险），
+  排序收敛到 **Rust 单点**；收紧若干无用 `export`。
+
+#### 工程与发布
+
+- **发布构建陷阱修复**：补上标准 `[features] custom-protocol`（`tauri::is_dev()` 即
+  `!cfg!(feature = "custom-protocol")`），并在 README 明记「发布必须用
+  `npm run tauri build`」——此前裸 `cargo build --release` 会产出 **dev 模式二进制**，
+  启动即报 `ERR_CONNECTION_REFUSED`（本仓历史上一直缺该声明）。
+- `starting_convergence_e2e` 纳入 nightly（`--ignored`）；`@types/node` 对齐 CI 的 Node 22；
+  移除未使用的 `windows` crate feature（`Win32_System_Environment`、库依赖中的
+  `Win32_Graphics_Gdi`，测试所需项保留在 dev-dependencies）。
+- **发布可验证性**：Release 新增 `SHA256SUMS.txt`（安装包 + 便携包的 SHA-256，
+  标准 `sha256sum -c` 格式）。本版**未做代码签名**（产品决策，接受 SmartScreen 告警）。
+
+#### UI
+
+- 技能管理面板：「共享资源（agentsHome）」移至**顶部第二行**（原在置底）；
+  移除面板底部的「备份目录 / `.trash`」说明块（删除的 `.trash` 可恢复语义仍在删除确认弹窗中保留）。
+- 日志面板：新增「导出打码版」（`token=` 值打码；默认展示与落盘仍为明文口径，
+  遵 ADR-0009 D5 的产品决策）。
+
 ## [0.9.0] - 2026-09-11
 
 > 本版为**技能导入、手动检查更新与外部打开（ADR-0008）**。硬边界：未修改

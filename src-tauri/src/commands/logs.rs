@@ -94,5 +94,7 @@ pub fn read_log(rel_path: String) -> Result<String, String> {
     if !canonical_full.starts_with(&canonical_base) {
         return Err("非法路径".to_string());
     }
-    fs::read_to_string(&full).map_err(|e| e.to_string())
+    // G6（审计 SEC-05）：读取**已校验的规范化路径**，而非校验前的 `full`。
+    // 否则校验与读取之间存在符号链接替换窗口（TOCTOU）。
+    fs::read_to_string(&canonical_full).map_err(|e| e.to_string())
 }

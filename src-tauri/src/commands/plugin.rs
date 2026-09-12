@@ -9,11 +9,6 @@ use crate::AppState;
 use std::sync::Arc;
 use tauri::State;
 
-/// 把结构化错误转成前端可解析的字符串（`[exit_code] message`）
-fn format_error(error: PluginError) -> String {
-    format!("[{}] {}", error.kind.exit_code(), error.message)
-}
-
 /// 列出受管 profile 的插件（磁盘为事实源）
 #[tauri::command]
 pub async fn plugin_list(state: State<'_, AppState>) -> Result<PluginList, String> {
@@ -28,7 +23,7 @@ pub async fn plugin_list(state: State<'_, AppState>) -> Result<PluginList, Strin
                 degraded_reason: Some(error.message),
             })
         }
-        Err(error) => Err(format_error(error)),
+        Err(error) => Err(error.ipc_message()),
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
@@ -56,7 +51,7 @@ pub async fn plugin_install(
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
-    .map_err(format_error)?;
+    .map_err(|e: PluginError| e.ipc_message())?;
     crate::core::events::emit_plugin_changed(&app);
     Ok(result)
 }
@@ -75,7 +70,7 @@ pub async fn plugin_set_state(
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
-    .map_err(format_error)?;
+    .map_err(|e: PluginError| e.ipc_message())?;
     crate::core::events::emit_plugin_changed(&app);
     Ok(result)
 }
@@ -94,7 +89,7 @@ pub async fn plugin_uninstall(
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
-    .map_err(format_error)?;
+    .map_err(|e: PluginError| e.ipc_message())?;
     crate::core::events::emit_plugin_changed(&app);
     Ok(result)
 }
@@ -115,7 +110,7 @@ pub async fn plugin_sync(
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
-    .map_err(format_error)?;
+    .map_err(|e: PluginError| e.ipc_message())?;
     if result.applied {
         crate::core::events::emit_plugin_changed(&app);
     }
@@ -137,7 +132,7 @@ pub async fn plugin_repair(
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
-    .map_err(format_error)?;
+    .map_err(|e: PluginError| e.ipc_message())?;
     crate::core::events::emit_plugin_changed(&app);
     Ok(result)
 }

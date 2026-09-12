@@ -268,3 +268,41 @@ jobs:
           Write-Host "已上传便携包: $zip_name"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 校验和（SHA-256）：本项目**不做代码签名**（产品决策，见 README），
+      # 故以发布产物校验和作为“来源可验证”的替代手段：用户可核对下载文件
+      # 与 Release 中 SHA256SUMS.txt 是否一致。
+      - name: 生成并上传校验和（SHA256SUMS.txt）
+        if: ${{ !inputs.skip-release }}
+        shell: pwsh
+        run: |
+          $new_version = "${{ steps.bump.outputs.new }}"
+          $sums = Join-Path $env:RUNNER_TEMP "SHA256SUMS.txt"
+          # 收集本次发布的全部产物（安装包 + 便携包）。
+          # 安装包由 tauri bundler 输出到 bundle/nsis/（已核实路径，非 dist-bundles/）。
+          $nsis_dir = "src-tauri/target/release/bundle/nsis"
+          $targets = @()
+          if (Test-Path $nsis_dir) {
+            $targets += Get-ChildItem -Path $nsis_dir -Filter "*_${new_version}_*-setup.exe" | ForEach-Object { $_.FullName }
+          }
+          $targets += (Join-Path $env:RUNNER_TEMP "dsh-launcher_${new_version}_x64_portable.zip")
+          $lines = @()
+          foreach ($t in $targets) {
+            if (Test-Path $t) {
+              $h = (Get-FileHash -Algorithm SHA256 -Path $t).Hash.ToLower()
+              $lines += "$h  $([System.IO.Path]::GetFileName($t))"
+              Write-Host "SHA256  $([System.IO.Path]::GetFileName($t))  $h"
+            } else {
+              Write-Warning "跳過不存在的产物: $t"
+            }
+          }
+          if ($lines.Count -eq 0) {
+            Write-Error "未找到任何可校验的发布产物，无法生成 SHA256SUMS.txt"
+            exit 1
+          }
+          # 统一 LF 行尾，便于跨平台核对（sha256sum -c 可直接使用）
+          ($lines -join "`n") + "`n" | Set-Content -Path $sums -Encoding utf8NoBOM -NoNewline
+          gh release upload "v$new_version" $sums --clobber
+          Write-Host "已上传校验和: SHA256SUMS.txt（$($lines.Count) 个产物）"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -143,6 +143,18 @@ impl PluginError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(PluginErrorKind::Internal, message)
     }
+
+    /// IPC/CLI 面向用户的字符串形式：`[<exit_code>] <message>`。
+    ///
+    /// G2（审计 §2.2 重复代码）：此前 `commands/{plugin,mcp,skill}.rs` 各自定义了一份
+    /// **逐字相同**的 `format_error`。收归到错误类型自身，使其与
+    /// `PluginErrorKind::exit_code()`（ADR-0005 API 的退出码契约）就近维护、不再分叉。
+    ///
+    /// 注意与 `Display` 的区别：`Display` 只给 `message`（供日志/`{}` 插值），
+    /// 本方法额外携带退出码前缀（供前端展示与脚本化定位）。
+    pub fn ipc_message(&self) -> String {
+        format!("[{}] {}", self.kind.exit_code(), self.message)
+    }
 }
 
 impl std::fmt::Display for PluginError {

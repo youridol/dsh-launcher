@@ -1,7 +1,9 @@
 // 移动端断点检测（≤640px），与 index.css 的响应式断点保持一致
 import { useSyncExternalStore } from "react";
+import { MOBILE_MAX_WIDTH } from "@/lib/panel-layout";
 
-const MOBILE_QUERY = "(max-width: 640px)";
+// G7（审计 §2.1）：断点值单一来源（`panel-layout.ts`），不再本地硬编码。
+const MOBILE_QUERY = `(max-width: ${MOBILE_MAX_WIDTH}px)`;
 
 function subscribe(cb: () => void): () => void {
   if (typeof window === "undefined" || !window.matchMedia) return () => {};

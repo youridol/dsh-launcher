@@ -341,10 +341,25 @@ fn apply_with_verification(
     let after_content = managed::read_file(&path)
         .map_err(|e| PluginError::internal(e))?
         .unwrap_or_default();
-    let after_fingerprint = fingerprint_outside(&after_content)?;
 
     let mut failures: Vec<String> = Vec::new();
-    if before_fingerprint != after_fingerprint {
+    // G3（审计 SEC-03②）：写后指纹**不得以 `?` 早退**。
+    //
+    // 旧实现为 `let after_fingerprint = fingerprint_outside(&after_content)?;`：
+    // 当写入把区块写成**重复 marker**（`split_outside` → `Err`）时，该 `?` 会在进入
+    // 下方回滚块之前就返回，导致「校验失败→回滚」语义被绕过，坏文件永久残留。
+    // 现在把错误压入 `failures`，与其它校验失败一视同仁地进入回滚路径。
+    let after_fingerprint = match fingerprint_outside(&after_content) {
+        Ok(fingerprint) => Some(fingerprint),
+        Err(error) => {
+            failures.push(format!(
+                "写后无法读取受管区块（受管区块 marker 可能已损坏）：{}",
+                error.message
+            ));
+            None
+        }
+    };
+    if Some(before_fingerprint.as_str()) != after_fingerprint.as_deref() {
         failures.push(format!(
             "受管 MCP 区块之外的**内容**发生变化（用户手写段 / 其它区块 / 注释被改动）"
         ));
@@ -631,7 +646,14 @@ pub fn set_state(
     let row = find_in_tree(&tree, server_name);
     // 无对象 → NotFound（不是幂等空操作）；表达式行 → IllegalTransition
     state::validate_transition(server_name, row, action)?;
-    let row = row.expect("validate_transition 已保证存在");
+    // G6（审计 RT-05）：不用 `expect`（生产路径不得 panic）。
+    // `validate_transition` 已保证存在，但把它写成显式分支：即使未来该校验被改动，
+    // 这里也只是返回 Internal 错误，而不是把整个 spawn_blocking 线程打崩。
+    let Some(row) = row else {
+        return Err(PluginError::internal(format!(
+            "内部不一致：{server_name} 通过状态校验后目标行丢失"
+        )));
+    };
     let row_id = row.row_id.clone();
     let desired = action.desired_disabled();
 

@@ -50,6 +50,22 @@ export function getDshStatus(): Promise<DshStatus> {
   return invoke("get_status");
 }
 
+/**
+ * 当前 dsh 是否由本启动器托管（v0.9.1）。
+ *
+ * dsh 的访问 token 是进程级随机数，只从该进程 stdout 打印。故"已运行但拿不到
+ * token URL"有两种成因：托管实例只是**尚未打印**（继续等待即可）；收养的外部
+ * 实例则**原理上不可得**（需询问用户是否接管）。
+ */
+export function isDshManaged(): Promise<boolean> {
+  return invoke("is_dsh_managed");
+}
+
+/** 接管外部启动的 dsh（停止并以启动器方式重新拉起，从而能捕获 token） */
+export function takeOverDsh(): Promise<string> {
+  return invoke("take_over_dsh");
+}
+
 /** 获取 dsh web 完整访问 URL（含 token，免认证） */
 export function getWebUrl(): Promise<string> {
   return invoke("get_web_url");

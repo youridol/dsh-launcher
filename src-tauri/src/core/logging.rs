@@ -393,8 +393,19 @@ pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
-/// 数据目录：%LOCALAPPDATA%\dsh-launcher
+/// 数据目录：`%LOCALAPPDATA%\dsh-launcher`
+///
+/// v0.9.1：支持环境变量 `DSH_LAUNCHER_DATA_DIR` 覆盖。这是**集成测试的隔离缝**：
+/// 端到端用例必须真实拉起 dsh，而 dsh 的 stdout/stderr 落盘文件与 token 缓存
+/// （`last-web-url`）都在此目录下 —— 若不隔离，测试会截断用户正在运行的启动器
+/// 所属会话的落盘文件、并覆盖其 token 缓存（用户可见的副作用）。
+/// 正常运行时该变量不存在，行为与原先完全一致（仅多一次环境变量读取）。
 fn data_dir() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("DSH_LAUNCHER_DATA_DIR") {
+        if !override_dir.trim().is_empty() {
+            return PathBuf::from(override_dir);
+        }
+    }
     std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))

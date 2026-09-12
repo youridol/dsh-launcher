@@ -68,7 +68,12 @@ jobs:
           $tests = @(
             'github_tag_test',
             'npm_versions_test',
-            'direct_node_capture_test'
+            'direct_node_capture_test',
+            # ENG-01（审计）：本文件的 2 个用例均为 `#[ignore]`（需真实
+            # deepseek-harness 安装目录 + node），但此前**既不在 ci.yml 也不在本清单** →
+            # 永不执行。它们在隔离数据目录（DSH_LAUNCHER_DATA_DIR）中运行，
+            # 不会触碰用户环境，故并入夜间集成验证。
+            'starting_convergence_e2e'
           )
           $failed = @()
           foreach ($t in $tests) {

@@ -33,6 +33,7 @@ import {
   skillApplyUpdate,
   skillCheckUpdates,
   skillDelete,
+  skillForgetSource,
   skillImportBatch,
   skillList,
   skillOpen,
@@ -54,6 +55,7 @@ import {
   FolderOpen,
   Loader2,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 
 /** 状态徽章配色 */
@@ -312,6 +314,31 @@ export default function SkillsPanel() {
     }
   }
 
+  /**
+   * 移除一条来源记录（ADR-0008：**只删元数据，不动技能文件**）。
+   *
+   * 此前后端命令 `skill_forget_source` 与 TS 封装均存在但**无 UI 入口**
+   * （审计 G2 ④），导致来源清单只增不减。此处接到已有的来源列表上。
+   */
+  async function forgetSource(url: string, label: string) {
+    if (
+      !window.confirm(
+        `仅从来源记录中移除「${label}」？\n\n已导入的技能文件不会被删除，也不会卸载。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await skillForgetSource(url);
+      toast.success(`已移除来源记录「${label}」（技能文件未删除）`);
+      setSources(await skillSources());
+      // 检查报告里可能仍引用了该来源 → 一并清掉，避免显示过期条目
+      setCheckReport(null);
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
   async function applyUpdate(url: string) {
     setChecking(true);
     try {
@@ -374,6 +401,45 @@ export default function SkillsPanel() {
           ）刷新即可管理。
         </p>
       )}
+
+      {/* 共享资源（AGENTS.md / CONTEXT.md）—— 置于顶部第二行（不置底） */}
+      <Separator />
+      <div className="space-y-2">
+        <div className="text-sm font-medium">共享资源（agentsHome）</div>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          这两个文件位于共享真源 <code className="dsh-code">&lt;agentsHome&gt;</code>。
+          <code className="dsh-code">AGENTS.md</code> 是 dsh 固定读取的全局指令真源；
+          <code className="dsh-code">CONTEXT.md</code> 是 agent 侧约定的词表（dsh 不读）。
+          点击编辑用外部编辑器 / 系统默认程序打开；文件不存在时自动按模板创建。
+        </p>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() => openManaged("agents-md")}
+          >
+            <FilePen className="size-3" /> 编辑 AGENTS.md
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() => openManaged("context-md")}
+          >
+            <FilePen className="size-3" /> 编辑 CONTEXT.md
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() => openManaged("skills-root")}
+            title="用编辑器 / 系统默认程序打开技能根目录"
+          >
+            <ExternalLink className="size-3" /> 技能根目录
+          </Button>
+        </div>
+      </div>
 
       <Separator />
 
@@ -539,6 +605,16 @@ export default function SkillsPanel() {
                     {s.name || s.url}
                   </span>
                   <Badge variant="outline">{s.skills.length} 个技能</Badge>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-1.5 text-[11px] text-muted-foreground"
+                    title="仅移除来源记录，不删除已导入的技能文件"
+                    onClick={() => void forgetSource(s.url, s.name || s.url)}
+                  >
+                    <Trash2 className="size-3" />
+                    移除记录
+                  </Button>
                 </div>
                 {s.name && (
                   <div className="text-[11px] text-muted-foreground">
@@ -771,60 +847,6 @@ export default function SkillsPanel() {
             </div>
           );
         })}
-      </div>
-
-      {data && data.skills.length > 0 && (
-        <>
-          <Separator />
-          <div className="space-y-1 text-[11px] text-muted-foreground">
-            <div>
-              备份目录 <span className="dsh-code break-all">{data.backupRoot}</span>
-            </div>
-            <div>
-              删除会移入所属根的{" "}
-              <code className="dsh-code">.trash/</code>（可恢复），不会真正删除。
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* 共享资源（AGENTS.md / CONTEXT.md） */}
-      <Separator />
-      <div className="space-y-2">
-        <div className="text-sm font-medium">共享资源（agentsHome）</div>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          这两个文件位于共享真源 <code className="dsh-code">&lt;agentsHome&gt;</code>。
-          <code className="dsh-code">AGENTS.md</code> 是 dsh 固定读取的全局指令真源；
-          <code className="dsh-code">CONTEXT.md</code> 是 agent 侧约定的词表（dsh 不读）。
-          点击编辑用外部编辑器 / 系统默认程序打开；文件不存在时自动按模板创建。
-        </p>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => openManaged("agents-md")}
-          >
-            <FilePen className="size-3" /> 编辑 AGENTS.md
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => openManaged("context-md")}
-          >
-            <FilePen className="size-3" /> 编辑 CONTEXT.md
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => openManaged("skills-root")}
-            title="用编辑器 / 系统默认程序打开技能根目录"
-          >
-            <ExternalLink className="size-3" /> 技能根目录
-          </Button>
-        </div>
       </div>
 
       {/* 首次编辑器引导 */}

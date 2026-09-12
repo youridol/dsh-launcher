@@ -12,11 +12,6 @@ use crate::AppState;
 use std::sync::Arc;
 use tauri::State;
 
-/// 把结构化错误转成前端可解析的字符串（`[exit_code] message`）
-fn format_error(error: PluginError) -> String {
-    format!("[{}] {}", error.kind.exit_code(), error.message)
-}
-
 /// 列出合成树全量 MCP server（磁盘 + dump 为事实源）
 #[tauri::command]
 pub async fn mcp_list(state: State<'_, AppState>) -> Result<mcp::McpListResult, String> {
@@ -24,7 +19,7 @@ pub async fn mcp_list(state: State<'_, AppState>) -> Result<mcp::McpListResult, 
     tauri::async_runtime::spawn_blocking(move || mcp::list(&logger))
         .await
         .map_err(|e| format!("任务执行失败: {e}"))?
-        .map_err(format_error)
+        .map_err(|e: PluginError| e.ipc_message())
 }
 
 /// 新增 MCP server（受管区块声明段 + 定向段）
@@ -38,7 +33,7 @@ pub async fn mcp_add(
     let result = tauri::async_runtime::spawn_blocking(move || mcp::add(&spec, &logger))
         .await
         .map_err(|e| format!("任务执行失败: {e}"))?
-        .map_err(format_error)?;
+        .map_err(|e: PluginError| e.ipc_message())?;
     crate::core::events::emit_mcp_changed(&app);
     Ok(result)
 }
@@ -54,7 +49,7 @@ pub async fn mcp_remove(
     let result = tauri::async_runtime::spawn_blocking(move || mcp::remove(&server_name, &logger))
         .await
         .map_err(|e| format!("任务执行失败: {e}"))?
-        .map_err(format_error)?;
+        .map_err(|e: PluginError| e.ipc_message())?;
     crate::core::events::emit_mcp_changed(&app);
     Ok(result)
 }
@@ -73,7 +68,7 @@ pub async fn mcp_set_state(
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
-    .map_err(format_error)?;
+    .map_err(|e: PluginError| e.ipc_message())?;
     crate::core::events::emit_mcp_changed(&app);
     Ok(result)
 }
