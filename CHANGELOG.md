@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.9.3] - 2026-09-12
+
+### 变更
+
+- README 全链路重写：大白话介绍 + 5 张界面配图 + 事实校正
+- 面向首次接触的用户重写 README，并修正原文档中的过时/错误陈述。
+- 新增配图（png/1-5.png，均为 1600x900）
+- 1 主界面（版本管理 + 工具链 + 实时日志）
+- 2 MCP server 管理    3 插件管理
+- 4 技能管理           5 设置
+- 每张均在对应章节配一段"这张图能做什么"的说明，而非只堆图。
+- 可读性
+- 新增「这是个什么东西？（大白话）」：先讲清 dsh 是什么、launcher 解决什么痛点，
+- 并显式声明"它不做什么"（不改 dsh 源码 / 不接管 DSH_HOME / 不偷偷安装）。
+- 新增「快速开始」（装 3 步 + 用 5 步典型流程）、「FAQ」（404 / allowBuilds /
+- 内嵌打开拿不到 token / 状态卡启动中 / 是否误杀进程 / 数据是否被改动）。
+- 功能清单改为表格；命令行与长说明折叠为 <details>；顶部加徽章行（含 dsh-plugin 话题）。
+- 事实校正（原文与代码/ADR 不一致处）
+- 「技能共享：以 ~/.agents/agent 为唯一真源…链接模式」→ 与实际不符：
+- 共享真源是 agentsHome 根（~/.agents），且 link/config 两种共享模式**已退役**
+- （CONTEXT「技能共享（已退役）」）。改为描述真正的技能管理能力
+- （启停 = disable-model-invocation、.trash 可恢复删除、批量导入、手动检查更新）。
+- ADR 范围「ADR-0001~0005」→ 实际为 ADR-0001 ~ 0009。
+- 命令行示例 `skill list` 不存在（实际为 status|apply|migrate|repair-links）→ 修正并加注说明。
+- 补充 mcp CLI 段落与 --resource 参数。
+- 进程模型措辞精确化：无窗口启动（CREATE_NO_WINDOW）、stdout/stderr 落盘后 tail、
+- taskkill /PID /T（SIGTERM 语义，约 1 秒）→ /F 强杀 → 端口兜底清剿（清剿前校验身份防误杀）。
+- IPC 命令数经 generate_handler! 权威核对为 48（非估算值）。
+- 仓库元数据
+- topics 修正：移除不准确的 `electron`（本项目为 Tauri 2，DESIGN §2 明确"抛弃 Electron"），
+- 补充高精准度话题 dsh-launcher / cordis / cordis-plugin / tauri-app / desktop。
+- 保留既有的 `dsh-plugin`（已确认本仓库出现在该话题搜索结果中）。
+- 验证：5 张配图与全部本地链接（CONTEXT/CHANGELOG/LICENSE/docs）均存在；
+- 外部链接（deepseek-harness / topics/dsh-plugin / releases / tauri.app）均 200；代码块配对（10 个围栏）。
+
 ## [0.9.2] - 2026-09-12
 
 ### 变更
