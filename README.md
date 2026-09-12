@@ -17,13 +17,14 @@
 
 ---
 
-## 这是个什么东西？（大白话）
+## 这是个什么东西？
 
-`deepseek-harness`（简称 `dsh`）是个很能干活的 AI Agent 框架，但它主要靠命令行操作：
+`deepseek-harness`（简称 `dsh`）是deepseek 开源的 harness 框架，但它启动方式和更新主要靠命令行操作，
+deepseek-harness 还在开发前期没有稳定下来更新方式，更新特别麻烦；
 装它要 npm 或 git 编译，启动要敲 `dsh web --port 3080`，管插件要 `dsh plugin add ...`，
 日志还得去翻文件。
 
-**dsh-launcher 就是把这些事搬进一个桌面窗口**：
+**dsh-launcher 就是把这些事搬进一个启动器和提供桌面窗口**：
 
 - 🖱️ **点一下就能装** —— Node / Git / Python 运行环境缺什么补什么，dsh 本体支持 npm 与 GitHub 两条安装通道；
 - ▶️ **点一下就能跑** —— 启动 / 停止 / 重启 `dsh web`，状态实时显示，还能一键内嵌打开 Web GUI（自动带上免登录 token，不用手动复制那串地址）；
@@ -105,7 +106,7 @@ npm registry / GitHub 加速 / Node 二进制三类镜像源，GitHub Token（�
 | 模块 | 能做什么 |
 |---|---|
 | **dsh 生命周期** | 启动 / 停止 / 重启 `dsh web`（端口可配，默认 3080）；五态实时状态；崩溃自动归因到不兼容插件并**可逆禁用** |
-| **版本管理** | npm 通道（registry 装包）与 GitHub 通道（clone + pnpm 构建）双通道；全局单版本，切换 = 先卸载再装；安装过程实时进度 |
+| **版本管理** | npm 通道（registry 装包）与 GitHub 通道（clone + pnpm 构建）双通道；全局单版本，切换 = 先卸载再装；安装过程实时进度。**换版本/换通道不碰 `DSH_HOME`** —— 会话、技能、插件配置全部保留 |
 | **工具链** | 检测 Node(22.19+/24+) / npm / pnpm / Git(2.26+) / Python(3.10+，可选)，显示"已装/缺失/版本不符"，支持单个或批量装卸 |
 | **Web GUI 集成** | 内嵌窗口打开 dsh Web UI（自动带 token）；也可用外部浏览器或创建桌面快捷方式 |
 | **系统托盘** | 打开主窗口 / 启动 / 停止 / 重启 / 退出；可配置「关闭窗口最小化到托盘」「退出时驻留 dsh」 |
@@ -155,6 +156,34 @@ dsh-launcher mcp enable|disable <serverName>
 | **GitHub** | `git clone --depth 1 --branch <tag>` → `pnpm install` → `pnpm build`，并生成全局 `dsh.cmd` | 想用最新源码（含 rc / alpha） |
 
 全局同时只有一个 dsh 生效 —— 切换通道时启动器会先清理对侧（ADR-0003）。
+
+### 🔒 换版本 / 换通道 / 卸载，都不会碰你的数据
+
+**你可以随便切版本、切通道 —— 会话记录、技能、插件、配置全都在。**
+
+原因是 dsh 把用户数据集中放在 **`DSH_HOME`**（默认 `~/.dsh`），而版本切换只动「程序本体」：
+
+| 你的数据（在 `~/.dsh` 里） | 说明 |
+|---|---|
+| `sessions/` | **会话历史**（你的聊天记录） |
+| `settings.yaml` / `.credentials.yaml` | 设置与凭据 |
+| `storages/` / `task-board/` | 会话投影缓存、任务板 |
+| `profiles/<name>/` | 已装插件与其配置（`package.json`、`cordis.patch.yml`、`node_modules`） |
+| `~/.agents/skills/` | 你的技能（共享真源，官方扫描根） |
+
+**启动器实际做了什么（可对照源码）：**
+
+| 动作 | 动的部分 ✅ | 不碰的部分 🔒 |
+|---|---|---|
+| **切换 npm ⇄ GitHub 通道** | 删另一条通道的**程序本体**（npm 全局包，或 `github-dsh` 源码目录 + 自家 `dsh.cmd` shim） | **`DSH_HOME` 全部数据**（代码注释即明确写“不清 DSH_HOME 数据”，`commands/version.rs`） |
+| **升级 / 降级到另一个版本** | 同理，只替换程序本体 | 同上（会话 / 技能 / 插件原样保留） |
+| **卸载 dsh（默认）** | 程序本体（npm 全局包 / 源码目录 / 全局命令） | `DSH_HOME` —— 默认 **保留**（`keepDshHomeOnUninstall` 默认为 `true`） |
+| **卸载 dsh（仅当你手动关掉“卸载保留数据”）** | 程序本体 + `~/.dsh` | 删前会**校验目录特征**（含 `profiles/` 或 `settings.yaml`），不像 dsh 数据就拒绝删除 |
+
+> **要点**：切版本不会清技能、不会丢会话、也不会重置插件配置。装上不同版本后，它们读的是**同一个 `DSH_HOME`**。
+>
+> **例外（需你知情）**：插件本身是装在 `~/.dsh/profiles/<name>/` 里的，跟 dsh 版本无关；
+> 但如果某个插件与新版 dsh **不兼容**，新版启动时可能报错 —— 此时启动器会自动把**冒头的那一行禁用（可逆）**并提示你，不会去卸载它。
 
 ### 插件安装：三种来源形态
 
@@ -295,6 +324,19 @@ dsh 的访问 token 是**进程级随机数**，只从它自己的 stdout 打印
 
 v0.9.1 起已修复早期版本"超时即卡死"的问题：启动就绪由**启动探活线程**与**每 5 秒状态对账线程**共同保证，
 冷启动再慢也会持续探测直到端口就绪。若长期不收敛，请查看日志面板排查端口冲突或插件报错。
+</details>
+
+<details>
+<summary><b>换个 dsh 版本，我的会话 / 技能 / 插件会没吗？</b></summary>
+
+**不会。** 你的数据都在 `DSH_HOME`（默认 `~/.dsh`）—— 包括 `sessions/`（会话）、`settings.yaml`、
+`profiles/`（插件）、以及 `~/.agents/skills/`（技能）。版本切换（含 npm ⇄ GitHub 通道互切）
+**只替换程序本体**，一个字节都不会碰这些目录；它们代码里就明确写着“不清 DSH_HOME 数据”。
+
+连**卸载** dsh 也默认**保留**数据（`keepDshHomeOnUninstall` 默认开）；只有你主动关掉该开关，
+启动器才会删 `~/.dsh` —— 而删除前还会校验目录特征（含 `profiles/` 或 `settings.yaml`），不像 dsh 数据就拒删。
+
+详见上方「🔒 换版本 / 换通道 / 卸载，都不会碰你的数据」。
 </details>
 
 <details>
