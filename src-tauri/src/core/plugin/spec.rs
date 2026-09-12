@@ -52,7 +52,19 @@ pub fn classify(spec: &str) -> (SpecKind, Origin) {
         return (SpecKind::Git, Origin::Upstream);
     }
     if lower.starts_with("http://") || lower.starts_with("https://") {
-        // 远端 tarball / 压缩包 URL：形态可执行但无法判定版本推进策略
+        // BUG-3（审计）：已知 Git 托管站点的裸 URL（无 `.git` 后缀）也是 git 依赖。
+        //
+        // 实证（pnpm 11.24）：
+        //   pnpm add "https://github.com/dsh-market/dsh-market"
+        //   → dshmarket github:dsh-market/dsh-market   （成功，被规范化成 git 依赖）
+        // 但 `is_git_spec` 此前只认带 `.git`/`.git#` 的形态，于是这类 URL 落到
+        // `Unknown` 分支 → **不参与 upstream 自动同步**（`sync.rs` 仅处理 Upstream），
+        // 且无法从 spec 推断包名。而 `dsh plugin` 是 pnpm 的薄转发器（官方
+        // `apps/cli/src/plugin.ts:120-163`），pnpm 既然能装，就应按 git 源对待。
+        if looks_like_hosted_git_url(&lower) {
+            return (SpecKind::Git, Origin::Upstream);
+        }
+        // 其余远端 tarball / 压缩包 URL：形态可执行但无法判定版本推进策略
         return (SpecKind::Unknown, Origin::Unknown);
     }
     if lower.ends_with(".tgz") || lower.ends_with(".tar.gz") {
@@ -99,7 +111,32 @@ fn is_git_spec(lower: &str) -> bool {
         || lower.starts_with("ssh://")
         || lower.starts_with("git://")
         || (lower.starts_with("http")
-            && (lower.contains(".git#") || lower.ends_with(".git")))
+            && (lower.contains(".git#") || lower.ends_with(".git") || looks_like_hosted_git_url(lower)))
+}
+
+/// 已知 Git 托管站点的 HTTPS URL（含**不带** `.git` 后缀的常见写法）。
+///
+/// 依据：pnpm 会把这两种形式都规范化为 `github:<owner>/<repo>`（已实测）：
+/// `https://github.com/o/r` 与 `https://github.com/o/r.git`。
+/// 仅识别**路径恰为两段**（`owner/repo`）的形态，避免把 `.../releases/download/x.tgz`
+/// 这类发布附件误判为 git 源。
+fn looks_like_hosted_git_url(lower: &str) -> bool {
+    const HOSTS: [&str; 3] = [
+        "https://github.com/",
+        "https://gitlab.com/",
+        "https://bitbucket.org/",
+    ];
+    for host in HOSTS {
+        if let Some(rest) = lower.strip_prefix(host) {
+            // 去掉可能的 `#ref`，再去掉尾部 `.git`
+            let path = rest.split('#').next().unwrap_or(rest);
+            let path = path.trim_end_matches('/').trim_end_matches(".git");
+            let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            // 恰为 owner/repo 两段
+            return segments.len() == 2;
+        }
+    }
+    false
 }
 
 /// 把 git spec 归一化为 `git ls-remote` 可用的仓库地址与引用。
@@ -243,6 +280,64 @@ mod tests {
             (SpecKind::Unknown, Origin::Unknown)
         );
         assert_eq!(classify(""), (SpecKind::Unknown, Origin::Unknown));
+    }
+
+    /// BUG-3（审计）：已知 Git 托管站点的**裸 URL**（无 `.git`）应识别为 git 源。
+    ///
+    /// 实证：pnpm 11.24 把 `https://github.com/dsh-market/dsh-market` 规范化为
+    /// `github:dsh-market/dsh-market` 并成功安装；启动器此前误判为 Unknown
+    /// → 不参与 upstream 同步、且无法推断包名。
+    #[test]
+    fn test_hosted_git_url_without_dot_git() {
+        // 裸 URL（用户实际输入形态）→ Git/Upstream
+        assert_eq!(
+            classify("https://github.com/dsh-market/dsh-market"),
+            (SpecKind::Git, Origin::Upstream)
+        );
+        assert_eq!(
+            classify("https://gitlab.com/o/r"),
+            (SpecKind::Git, Origin::Upstream)
+        );
+        assert_eq!(
+            classify("https://bitbucket.org/o/r"),
+            (SpecKind::Git, Origin::Upstream)
+        );
+        // 带 .git / 带 #ref 仍然正确
+        assert_eq!(
+            classify("https://github.com/o/r.git"),
+            (SpecKind::Git, Origin::Upstream)
+        );
+        assert_eq!(
+            classify("https://github.com/o/r#abc1234"),
+            (SpecKind::Git, Origin::Upstream)
+        );
+        // 包名可从裸 URL 推断
+        assert_eq!(
+            package_name_from_spec("https://github.com/dsh-market/dsh-market").as_deref(),
+            Some("dsh-market")
+        );
+        // git 仓库地址规范化（不带 .git 也保持可 ls-remote）
+        assert_eq!(
+            git_repo_and_ref("https://github.com/dsh-market/dsh-market"),
+            Some((
+                "https://github.com/dsh-market/dsh-market".to_string(),
+                None
+            ))
+        );
+        // 反例：发布附件 / 非 owner-repo 两段形态不得误判为 git
+        assert_eq!(
+            classify("https://github.com/o/r/releases/download/v1/x.tgz"),
+            (SpecKind::Unknown, Origin::Unknown)
+        );
+        assert_eq!(
+            classify("https://example.com/owner/repo"),
+            (SpecKind::Unknown, Origin::Unknown)
+        );
+        // 反例：不在已知托管站点列表内
+        assert_eq!(
+            classify("https://gitea.example.com/o/r"),
+            (SpecKind::Unknown, Origin::Unknown)
+        );
     }
 
     #[test]

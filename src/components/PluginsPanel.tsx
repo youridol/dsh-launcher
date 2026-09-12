@@ -219,7 +219,7 @@ export default function PluginsPanel() {
       {/* 安装 */}
       <div className="space-y-2">
         <Label htmlFor="plugin-spec" className="text-xs">
-          安装插件（npm 包名 / github:owner/repo#sha / 本地路径）
+          安装插件（npm 包名 / GitHub URL / 本地路径）
         </Label>
         {/* 输入 + 来源 + 安装：窄宽度自动换行，输入框保持整行可读 */}
         <div className="flex flex-wrap items-center gap-1.5">
@@ -227,7 +227,7 @@ export default function PluginsPanel() {
             id="plugin-spec"
             value={spec}
             onChange={(e) => setSpec(e.target.value)}
-            placeholder="dsh-cost-meter 或 github:owner/repo#<sha>"
+            placeholder="dshmarket 或 https://github.com/owner/repo"
             className="min-w-[12rem] flex-1 text-xs"
           />
           <select
@@ -252,7 +252,13 @@ export default function PluginsPanel() {
           </Button>
         </div>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          git 源建议钉 commit（<code className="dsh-code">github:owner/repo#&lt;sha&gt;</code>）。
+          <strong>npm 包名</strong>请填 registry 上的真实包名（例：
+          <code className="dsh-code">dshmarket</code>，不是行 id
+          <code className="dsh-code">dsh-market</code>）；
+          <strong>GitHub 仓库</strong>可直接粘 URL
+          （<code className="dsh-code">https://github.com/&lt;owner&gt;/&lt;repo&gt;</code>；
+          建议钉 commit：<code className="dsh-code">…#&lt;sha&gt;</code>）；
+          也可用 <code className="dsh-code">github:owner/repo</code>。
           pnpm 若拒绝执行构建脚本，请按安装日志的提示自行处理
           （启动器把 pnpm 输出原样转发，不代写任何 pnpm 配置）。
         </p>

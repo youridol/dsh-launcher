@@ -585,23 +585,32 @@ fn backup_dir(package: &str) -> PathBuf {
 /// `src-tauri/src/**` 中不存在任何写这三个 profile 文件的调用点。
 /// 该不变量由 `tests/part_b_compliance_test.rs` 的静态断言守护（ADR-0009 D19 订正：
 /// 此前此处引用的是并不存在的 `tests/plugin_whitelist_test.rs`）。
+/// 从备份还原 profile 文件，并紧随一次官方通道收敛（ADR-0005 D18）。
+///
+/// BUG-2（审计）：返回**是否完全还原**。调用方（安装/卸载失败路径）据此决定
+/// 要不要重启 dsh —— 完全还原就无需重启（避免无谓地中断会话 + 误导性日志）。
 fn rollback_after_failed_official_op(
     profile_name: &str,
     backup: &std::path::Path,
     targets: &[(PathBuf, PathBuf)],
     logger: &Arc<Logger>,
-) {
+) -> bool {
+    let mut restored_ok = true;
     match profile::restore_files(backup, targets) {
         Ok(restored) => logger.warn(&format!(
             "已从备份还原 {} 个 profile 文件（官方无回退能力，D18 唯一例外）",
             restored.len()
         )),
-        Err(error) => logger.error(&format!("从备份还原 profile 文件失败: {error}")),
+        Err(error) => {
+            restored_ok = false;
+            logger.error(&format!("从备份还原 profile 文件失败: {error}"));
+        }
     }
     // 紧随官方通道收敛（D18 强制）：让 node_modules 与还原后的 manifest 一致
     if let Err(error) = run_plugin_forward(profile_name, &["install".to_string()], logger) {
         logger.warn(&format!("回滚后的官方通道收敛失败（请手动执行 dsh plugin install）: {error}"));
     }
+    restored_ok
 }
 
 /// 停止 dsh（返回是否曾运行）。
@@ -650,6 +659,15 @@ fn restart_if_needed(
 }
 
 /// 以流式方式运行 `dsh plugin --profile <p> <args...>`。
+///
+/// BUG-3b（审计）：若用户配置了 npm 镜像源，且本次操作会访问 registry，
+/// 则额外追加 pnpm 原生的 `--registry <url>`。
+///
+/// 为何用这种方式（而非自己写 .npmrc）：`dsh plugin` 就是 pnpm 的**薄转发器**
+/// （官方 `apps/cli/src/plugin.ts:120-163`：`spawnSync('pnpm', args, { cwd: profileDir })`，
+/// 所有 args 原样透传），因此附赠 pnpm 参数是**官方开放的**注入通道；
+/// 不触碰 profile 目录的 pnpm-workspace.yaml / .npmrc，也就不违反
+/// ADR-0005「白名单唯一例外」的约束。
 fn run_plugin_forward(
     profile_name: &str,
     pnpm_args: &[String],
@@ -661,6 +679,13 @@ fn run_plugin_forward(
         profile_name.to_string(),
     ];
     args.extend(pnpm_args.iter().cloned());
+    // 镜像注入：仅当（a）用户配了 registry 且（b）本操作确实会拉 npm 包。
+    // 纯 git/路径依赖不访问 registry，加 --registry 反而多余。
+    if let Some(registry) = registry_for_args(pnpm_args) {
+        logger.info(&format!("使用配置的 npm 镜像源：{registry}"));
+        args.push("--registry".to_string());
+        args.push(registry);
+    }
     let cmd = profile::build_dsh_command(&args)?;
     let logger_cb = Arc::clone(logger);
     let callback: Arc<stream::LineCallback> = Arc::new(move |_level, line| {
@@ -676,14 +701,101 @@ fn run_plugin_forward(
             trimmed.chars().take(200).collect::<String>(),
         );
     });
-    stream::run_streamed(
+    // BUG-1（审计）：改用 checked 变体，拿回 stderr 尾部 —— 让失败原因能上抛给用户。
+    stream::run_streamed_checked(
         logger,
         cmd,
         crate::core::logging::LogLevel::Info,
         crate::core::logging::LogLevel::Warn,
         Some(callback),
     )
-    .map_err(|e| PluginError::internal(format!("dsh plugin 执行失败: {e}")))
+    .map_err(|failure| PluginError::internal(format!("dsh plugin 执行失败: {}", describe_pnpm_failure(&failure))))
+}
+
+/// 从配置取 npm 镜像源（仅当本次 pnpm 参数会访问 registry 时）。
+///
+/// - `add` 带 npm/git/tarball spec：只有 **npm 包名**才需要 registry；
+/// - `install`（无 spec，如回滚后收敛）：会照 lockfile 拉包，需按需走 registry；
+/// - 用户未配置镜像 → 返回 None（走官方 registry，行为不变）。
+fn registry_for_args(pnpm_args: &[String]) -> Option<String> {
+    let Some(registry) = crate::core::config::current_npm_registry() else {
+        return None;
+    };
+    if !registry_should_apply(pnpm_args) {
+        return None;
+    }
+    Some(registry)
+}
+
+/// 纯函数：本次 pnpm 参数是否需要访问 npm registry。
+///
+/// 抽为纯函数以便单测直接覆盖（不依赖全局配置）。
+fn registry_should_apply(pnpm_args: &[String]) -> bool {
+    let Some(subcommand) = pnpm_args.first().map(String::as_str) else {
+        return false;
+    };
+    match subcommand {
+        // 无 spec 的 install：按 lockfile 拉包，需 registry
+        "install" | "i" => true,
+        "add" => {
+            // 有任一 npm 形态 spec 才需要；纯 git/路径/tarball 不需要
+            pnpm_args[1..].iter().any(|arg| {
+                !arg.starts_with('-')
+                    && !arg.starts_with("--registry")
+                    && spec::classify(arg).0 == spec::SpecKind::Npm
+            })
+        }
+        // remove / why / list 等不注入（remove 不访问网络）
+        _ => false,
+    }
+}
+
+/// 把 pnpm 失败翻译成**可自助定位**的说明（BUG-1）。
+///
+/// 依据：`dsh plugin` 是 pnpm 的**薄转发器**（官方 `apps/cli/src/plugin.ts:120-163`
+/// 的 `spawnSync('pnpm', args, { cwd: profileDir })`），所以 pnpm 的原始 stderr
+/// 就是权威诊断。此前启动器把它丢弃成「命令退出码: 1」，用户无从下手。
+///
+/// 这里保留退出码与 stderr 尾部，并对已知的高频失败给出**指向性提示**；
+/// 未识别的情形原样透传（不猜测、不编造）。
+fn describe_pnpm_failure(failure: &stream::StreamFailure) -> String {
+    // 关键词匹配用合并后的诊断（stdout + stderr）—— pnpm 把错误写在 stdout。
+    let joined = failure.diagnostics();
+    let mut detail = failure.detail();
+
+    // ① 包不存在 / 无权限（ERR_PNPM_FETCH_404）—— 最常见的输错包名情形。
+    if joined.contains("ERR_PNPM_FETCH_404") || joined.contains("is not in the npm registry") {
+        detail.push_str(
+            "\n提示：该 npm 包在 registry 中不存在（或名称拼写有误 / 无访问权限）。\n  ",
+        );
+        detail.push_str(
+            "请核对包名；若想装 GitHub 仓库，请改用 git 形态（建议钉 commit）：\n  ",
+        );
+        detail.push_str("  https://github.com/<owner>/<repo>.git#<commit>\n  ");
+        detail.push_str("  或 github:<owner>/<repo>#<commit>");
+    }
+    // ② pnpm ≥10 拦下 git 依赖的构建（prepare）脚本。
+    //   实测错误码：`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`（git 源）
+    //   或 `Ignored build scripts` / `allowBuilds`（registry 源）。
+    //   官方 dsh CLI 对此有同样的指导（`apps/cli/src/plugin.ts:151-160`）。
+    if joined.contains("allowBuilds")
+        || joined.contains("Ignored build scripts")
+        || joined.contains("PREPARE_NOT_ALLOWED")
+        || joined.contains("needs to execute build scripts")
+    {
+        detail.push_str(
+            "\n提示：pnpm 阻止了该依赖的构建脚本（build/prepare），安装未完成。\n  ",
+        );
+        detail.push_str(
+            "请按上方 pnpm 打印的**确切键名**，在 profile 的 pnpm-workspace.yaml 的 allowBuilds 下\n  ",
+        );
+        detail.push_str("将其设为 true，然后重试。该文件路径见上方 “profile directory”。");
+    }
+    // ③ 网络 / registry 不可达。
+    if joined.contains("ERR_PNPM_FETCH") && !joined.contains("ERR_PNPM_FETCH_404") {
+        detail.push_str("\n提示：拉取失败，请检查网络或在设置中配置 npm 镜像源后重试。");
+    }
+    detail
 }
 
 /// 安装插件。
@@ -731,8 +843,18 @@ pub fn install(
     let args = vec!["add".to_string(), spec_value.clone()];
     if let Err(error) = run_plugin_forward(profile_name, &args, logger) {
         logger.error(&format!("插件安装失败，开始回滚：{error}"));
-        rollback_after_failed_official_op(profile_name, &backup, &targets, logger);
-        restart_if_needed(process, logger, was_running);
+        // BUG-2（审计）：安装失败且已回滚时**不重启** dsh。
+        // 回滚已把 profile 文件还原到操作前状态，dsh 本来就未带这个包启动过，
+        // 重启毫无收益，却会：中断用户会话、并在日志里留下一串「dsh 已启动」
+        // 让人误以为安装成功。仅当回滚**未能完全还原**时，才需要重启以回到
+        // 磁盘上的真实状态。
+        let rollback_ok = rollback_after_failed_official_op(profile_name, &backup, &targets, logger);
+        if !rollback_ok {
+            logger.warn("回滚未完全还原，重启 dsh 以对齐磁盘状态…");
+            restart_if_needed(process, logger, was_running);
+        } else if was_running {
+            logger.info("回滚完成，dsh 保持未运行状态（未做无谓重启）");
+        }
         return Err(PluginError::verification(format!(
             "插件安装失败（已回滚）: {error}"
         )));
@@ -1215,6 +1337,112 @@ pub fn sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-3b（审计）：镜像注入的适用性判定（不依赖真实全局配置）。
+    #[test]
+    fn test_registry_args_applicability() {
+        // 纯 git 源 add → 不需 registry
+        assert!(!registry_should_apply(&[
+            "add".to_string(),
+            "https://github.com/dsh-market/dsh-market".to_string()
+        ]));
+        assert!(!registry_should_apply(&[
+            "add".to_string(),
+            "github:o/r#abc1234".to_string()
+        ]));
+        // 本地路径 / tarball → 不需 registry
+        assert!(!registry_should_apply(&[
+            "add".to_string(),
+            "link:../p".to_string()
+        ]));
+        // npm 包名 → 需 registry
+        assert!(registry_should_apply(&[
+            "add".to_string(),
+            "dshmarket".to_string()
+        ]));
+        assert!(registry_should_apply(&[
+            "add".to_string(),
+            "@scope/pkg@^1.0.0".to_string()
+        ]));
+        // install（无 spec，按 lockfile 拉包）→ 需 registry
+        assert!(registry_should_apply(&["install".to_string()]));
+        // remove 等其他命令 → 不注入
+        assert!(!registry_should_apply(&[
+            "remove".to_string(),
+            "dshmarket".to_string()
+        ]));
+    }
+
+    /// BUG-1（审计）：pnpm 失败描述应保留退出码 + stderr 尾部，并对 404 给提示。
+    #[test]
+    fn test_describe_pnpm_failure_404_hint() {
+        // pnpm 把错误写在 **stdout**（本仓实测），故此处按真实行为构造
+        let failure = stream::StreamFailure {
+            exit_code: Some(1),
+            stdout_tail: vec![
+                "[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/dsh-market: Not Found - 404"
+                    .to_string(),
+                "dsh-market is not in the npm registry, or you have no permission to fetch it."
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+        let text = describe_pnpm_failure(&failure);
+        assert!(text.contains("命令退出码 1"), "{text}");
+        assert!(text.contains("ERR_PNPM_FETCH_404"), "应保留原始 stderr：{text}");
+        assert!(text.contains("不存在"), "应给出 404 提示：{text}");
+        assert!(text.contains("github.com"), "应给出 git 形态建议：{text}");
+    }
+
+    /// BUG-1/URL 形态：pnpm ≥10 拦下 git 依赖的构建脚本（实测错误码）。
+    #[test]
+    fn test_describe_pnpm_failure_allow_builds_hint() {
+        let failure = stream::StreamFailure {
+            exit_code: Some(1),
+            stdout_tail: vec![
+                "[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] Failed to prepare git-hosted package fetched from \"https://codeload.github.com/dsh-market/dsh-market/tar.gz/efce445\": The git-hosted package \"dshmarket@1.45.1\" needs to execute build scripts but is not in the \"allowBuilds\" allowlist."
+                    .to_string(),
+                "Add the package to \"allowBuilds\" in your project's pnpm-workspace.yaml to allow it to run scripts."
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+        let text = describe_pnpm_failure(&failure);
+        assert!(text.contains("ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED"), "{text}");
+        assert!(text.contains("allowBuilds"), "应给出 allowBuilds 指引：{text}");
+    }
+
+    /// 诊断展示应过滤 dsh 自身的尾部噪声行（否则会挤掉 pnpm 的真实原因）。
+    #[test]
+    fn test_describe_pnpm_failure_filters_dsh_trailer() {
+        let failure = stream::StreamFailure {
+            exit_code: Some(1),
+            stdout_tail: vec![
+                "[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/x: Not Found - 404".to_string(),
+            ],
+            stderr_tail: vec![
+                r"dsh: pnpm failed in profile directory C:\Users\x\.dsh\profiles\web".to_string(),
+            ],
+            ..Default::default()
+        };
+        let text = describe_pnpm_failure(&failure);
+        assert!(text.contains("ERR_PNPM_FETCH_404"), "{text}");
+        assert!(!text.contains("dsh: pnpm failed"), "应过滤 dsh 噪声行：{text}");
+    }
+
+    /// BUG-1：未识别的失败仍应带上 stderr（不丢信息），且不编造提示。
+    #[test]
+    fn test_describe_pnpm_failure_passthrough() {
+        let failure = stream::StreamFailure {
+            exit_code: Some(2),
+            stdout_tail: vec!["some unknown pnpm error".to_string()],
+            ..Default::default()
+        };
+        let text = describe_pnpm_failure(&failure);
+        assert!(text.contains("命令退出码 2"), "{text}");
+        assert!(text.contains("some unknown pnpm error"), "{text}");
+        assert!(!text.contains("提示："), "未识别时不应编造提示：{text}");
+    }
 
     fn fixture_sections() -> Vec<DumpSection> {
         let text = "# == dsh-cost-meter\n- id: cost-meter\n  name: dsh-cost-meter\n# == dshmarket\n- id: dsh-market\n  name: dshmarket\n  disabled: true\n";
