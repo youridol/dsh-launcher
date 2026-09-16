@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.9.8] - 2026-09-16
+
+### 修复（全链路：patch 配置损坏导致 dsh 无法启动 + 插件面板瘫痪）
+
+- 故障现象（用户实测）：启动 dsh 报「dsh 进程已退出，未能就绪」，日志停在
+  `自动归因未命中具体插件（不做任何自动卸载）；请在"插件"面板中逐个禁用排查`；
+  同时插件面板降级只读（`dsh --dump-config 失败（退出码 1）`），启停全部不可用。
+- 真实病根：`~/.dsh/profiles/web/cordis.patch.yml` 被写坏——模板头被切 33 字节后
+  与原文重复拼接，dsh 解析 YAML 直接抛 `YAMLException ... (9:1)`，boot 阶段即退出。
+- 损坏归因（字节级复现，非推测）：用 Python 逐字节重构验证
+  `损坏 = 原内容 + [标记区间] + 原内容[33:]`，与现场文件完全一致；该形态由
+  `str.find() 返回 -1 后继续切片`产生（负索引语言行为）。Rust 侧 `apply_body`
+  全程 `usize` 索引，不可能产生负偏移；文件 mtime（18:07:52）亦早于 0.9.7
+  编译（18:10:22）。结论：损坏来自外部工具/诊断脚本，非 launcher 写入器——
+  但 launcher 在「配置损坏」这条链上确有 3 个真实缺陷，本版全部修复。
+
+### 变更
+
+- **BUG-1（0.9.7 真 BUG，端到端回归证明并修复）影子记忆被空扫描覆盖**：
+  连续 disable（disable→disable→enable，真实触发路径含 repair 重放与 live 重载）
+  时，第二次扫描因官方行已被受管启用行覆盖而返回空，`shadow_restored` 记忆被
+  清空 → 之后 enable 的移除集合为空 → 受管启用行残留 → 官方行与插件子类同时
+  启用 → cordis 报 `service "workspaceRegistry" has been registered` → 插件无法
+  激活。修复：记忆与本次扫描结果取**并集**（不因空扫描清空），并补充
+  「连续两次 disable」端到端回归断言。
+- **BUG-2 损坏配置无法自愈 + 降级原因不可操作**：
+  - 新增 `plugin::inspect_patch_file`：只读体检（marker 成对性/重复、顶层是否
+    YAML 数组、模板头重复等典型误写），产出人话诊断；
+  - 新增 `plugin::heal_patch_file`：**先备份**（`cordis.patch.yml.corrupt-<ts>`，
+    绝不静默丢数据）→ 抢救块外用户行（非注释的 `- ` 行，去重）→ 保留受管区块
+    原文 → 重建合法骨架；
+  - `discover()` 的降级原因升级为「结构损坏 + 修复入口」的可操作提示；
+  - 新增 IPC `plugin_heal_config` + 前端 `pluginHealConfig()`；插件面板在降级
+    横幅内直接提供「修复配置文件」按钮，一键恢复后启停自动可用。
+- **BUG-3 启动失败归因误导**：`handle_boot_failure` 在 stderr 命中
+  `failed to parse` 时不再做插件名匹配（不可能命中，且会把用户引向"逐个禁用
+  插件"的错误方向），改为直接输出「profile 配置文件结构损坏 + 文件路径 + 修复
+  入口」的精确指引。
+- 测试：新增 `tests/heal_e2e.rs`（真实 dsh 端到端：损坏 → inspect 识别 → heal →
+  dsh `--dump-config` 成功 → 用户行保留；含 BUG-3 归因分支断言；真实 profile
+  文件操作用互斥锁串行，测试后还原）；lib 单测 222/222（新增损坏识别/自愈/正常
+  文件不误报 3 项断言）；`shadow_restore_e2e` 增加连续 disable 回归。
+- 验证：`cargo check --all-targets` 0 错误 0 警告；`tsc --noEmit` 干净；
+  `npm run build` 成功；版本一致性 0.9.8（五文件六落点）。
+- 现场处置：损坏文件已按上述语义修复并验证可解析；原始损坏样本保留于
+  `%LOCALAPPDATA%\dsh-launcher\backups\manual-2026-09-16\` 供审计。
+
 ## [0.9.7] - 2026-09-16
 
 ### 修复（P0 影子恢复行：禁用「替换型插件」后 Sessions/工作区仍不可访问）

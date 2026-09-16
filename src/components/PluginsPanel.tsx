@@ -15,6 +15,7 @@ import {
   listenPluginChanged,
   pluginInstall,
   pluginList,
+  pluginHealConfig,
   pluginRepair,
   pluginSetState,
   pluginSync,
@@ -211,8 +212,19 @@ export default function PluginsPanel() {
       </div>
 
       {degraded && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
-          {degraded}（启停已禁用，仅可查看）
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive space-y-2">
+          <div>{degraded}（启停已禁用，仅可查看）</div>
+          {degraded.includes("修复配置文件") && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy !== null}
+              onClick={() => run("heal", () => pluginHealConfig())}
+            >
+              {busy === "heal" && <Loader2 className="size-3 animate-spin" />}
+              修复配置文件
+            </Button>
+          )}
         </div>
       )}
 

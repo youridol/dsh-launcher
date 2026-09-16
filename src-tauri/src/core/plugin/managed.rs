@@ -390,7 +390,7 @@ fn sorted(entries: &[ManagedEntry]) -> Vec<ManagedEntry> {
 }
 
 /// 渲染 managed 区块体（不含 marker）。
-fn render_managed_body(entries: &[ManagedEntry], eol: &str) -> String {
+pub fn render_managed_body(entries: &[ManagedEntry], eol: &str) -> String {
     let mut out = String::new();
     for entry in sorted(entries) {
         out.push_str(&format!("- id: {}", entry.id));
@@ -405,6 +405,14 @@ fn render_managed_body(entries: &[ManagedEntry], eol: &str) -> String {
         out.push_str(eol);
     }
     out
+}
+
+/// 以既有区块**原文**渲染完整 managed 区块（含 marker）。
+/// 用于自愈路径：不解析条目，原样保留用户/受管内容，只修复文件骨架。
+pub fn render_block_body(body: &str) -> String {
+    let eol = "\n";
+    let trimmed = body.trim_end_matches(|c| c == '\n' || c == '\r');
+    format!("{}{eol}{}{eol}{}", mark_begin(), trimmed, mark_end())
 }
 
 /// 渲染完整 managed 区块（含 marker）。

@@ -400,6 +400,15 @@ export function pluginSync(apply: boolean, pkg?: string): Promise<SyncReport> {
 }
 
 /** 收敛：重新对账 bundles 并重放期望态 */
+/**
+ * 修复 profile patch 配置文件（BUG-2，v0.9.8）。
+ * 当 cordis.patch.yml 被外部工具写坏导致 dsh 无法启动/枚举插件时调用：
+ * 自动备份原文件后把骨架重建为合法形态。
+ */
+export function pluginHealConfig(): Promise<string> {
+  return invoke("plugin_heal_config");
+}
+
 export function pluginRepair(pkg?: string): Promise<OpResult> {
   return invoke("plugin_repair", { package: pkg ?? null });
 }

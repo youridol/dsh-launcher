@@ -16,6 +16,16 @@ fn have_dsh() -> bool {
     std::env::var("DSH_LAUNCHER_E2E").is_ok()
 }
 
+fn registry_shadow_of(package: &str) -> Vec<String> {
+    let registry = dsh_launcher_lib::core::plugin::registry::Registry::load("web");
+    registry
+        .plugins
+        .iter()
+        .find(|record| record.package == package)
+        .map(|record| record.shadow_restored.clone())
+        .unwrap_or_default()
+}
+
 #[test]
 fn shadow_restore_end_to_end() {
     if !have_dsh() {
@@ -55,6 +65,31 @@ fn shadow_restore_end_to_end() {
     assert!(
         after_enable.iter().all(|entry| entry.id != "workspace"),
         "enable 后影子启用行应被移除，实际: {after_enable:?}"
+    );
+
+    // 3b) v0.9.8 真实回归：连续两次 disable（幂等路径）不得清空影子记忆 ——
+    // 序列 disable → disable → enable 必须仍然移除影子行。
+    let r1 = plugin::set_state("web", "@michengai/dsh-archive-manager", false, &logger);
+    assert!(r1.is_ok(), "重复 disable 失败: {r1:?}");
+    // 连续第二次 disable（真实触发序列：dsh live 重载/repair 收敛会重放期望态）
+    let r1b = plugin::set_state("web", "@michengai/dsh-archive-manager", false, &logger);
+    assert!(r1b.is_ok(), "连续 disable 失败: {r1b:?}");
+    assert!(
+        !registry_shadow_of("@michengai/dsh-archive-manager").is_empty(),
+        "连续 disable 后注册表影子记忆被清空（BUG）：{:?}",
+        registry_shadow_of("@michengai/dsh-archive-manager")
+    );
+    let after_repeat_disable = managed::read_block(&patch_path).unwrap().unwrap_or_default();
+    assert!(
+        after_repeat_disable.iter().any(|e| e.id == "workspace"),
+        "重复 disable 后影子行仍在受管区块，实际: {after_repeat_disable:?}"
+    );
+    let r2 = plugin::set_state("web", "@michengai/dsh-archive-manager", true, &logger);
+    assert!(r2.is_ok(), "重复 disable 后的 enable 失败: {r2:?}");
+    let after_repeat_enable = managed::read_block(&patch_path).unwrap().unwrap_or_default();
+    assert!(
+        after_repeat_enable.iter().all(|e| e.id != "workspace"),
+        "重复 disable 后再 enable 应移除影子行（记忆被清空的 BUG），实际: {after_repeat_enable:?}"
     );
 
     // 4) 现场还原：受管区块回到测试前状态

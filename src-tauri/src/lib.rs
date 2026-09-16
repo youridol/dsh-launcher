@@ -363,6 +363,7 @@ pub fn run() {
             commands::plugin::plugin_uninstall,
             commands::plugin::plugin_sync,
             commands::plugin::plugin_repair,
+            commands::plugin::plugin_heal_config,
             // ADR-0007：技能管理（列出 / 启停 / 删除）。
             // 旧共享命令 skill_status/skill_apply/skill_migrate 的前端入口已退役，
             // Rust 后端保留在 core::skill::sharing 供 CLI 使用。

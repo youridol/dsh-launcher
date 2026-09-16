@@ -184,6 +184,165 @@ impl Drop for OpGuard {
 
 // ============================ 只读发现 ============================
 
+/// patch 文件结构体检（BUG-2，v0.9.8）：把「dsh 无法解析该文件」这一事实
+/// 转成可操作的诊断。
+///
+/// 背景（2026-09-16 实测）：cordis.patch.yml 一旦被外部工具写坏（重复内容、
+/// 顶层不是数组、marker 不成对），dsh 的 dump/启动都会整体失败，而启动器此前
+/// 只会显示 "dsh --dump-config 失败（退出码 1）" + 大段 Node 堆栈，用户无从下手；
+/// 且损坏文件**无法经 UI 自愈**（apply_block 对非法顶层拒绝写入）。
+///
+/// 本函数只做两件事（都只读，不修改文件）：
+/// 1. 结构体检：marker 是否成对、顶层是否是数组（`[]` / 块序列 / 纯注释），
+///    以及文件是否出现「同一段模板头重复」这类典型误写；
+/// 2. 产出 human-readable 原因，供 UI/日志展示。
+/// @returns None = 文件不存在或结构可信；Some(原因) = 结构异常及说明
+pub fn inspect_patch_file(path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    if content.trim().is_empty() {
+        return None;
+    }
+    // 1) marker 成对性（与 apply_body 的 locate 语义一致）
+    let begin_count = content.matches(&managed::mark_begin()).count();
+    let end_count = content.matches(&managed::mark_end()).count();
+    if begin_count != end_count {
+        return Some(format!(
+            "受管区块 marker 不成对（起始 {begin_count} 个 / 结束 {end_count} 个）"
+        ));
+    }
+    if begin_count > 1 {
+        return Some(format!(
+            "受管区块 marker 重复（起始 {begin_count} 个，应为 1）——文件可能被重复写入或外部工具拼接损坏"
+        ));
+    }
+    // 2) 顶层必须是 YAML 数组：`[]` 占位符 / 块序列 / 纯注释（与 apply_body 判定一致）
+    let has_array_placeholder = content
+        .lines()
+        .any(|line| line.trim() == "[]");
+    let looks_like_block_sequence = content.lines().all(|line| {
+        let trimmed = line.trim_start();
+        trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("- ")
+            || line.starts_with(' ')
+            || line.starts_with('\t')
+    });
+    if !has_array_placeholder && !looks_like_block_sequence {
+        // 找第一行"看起来不是注释/空行/序列项"的内容，作为定位提示
+        let offender = content
+            .lines()
+            .enumerate()
+            .find(|(_, line)| {
+                let trimmed = line.trim();
+                !trimmed.is_empty()
+                    && !trimmed.starts_with('#')
+                    && !trimmed.starts_with("- ")
+                    && !line.starts_with(' ')
+                    && !line.starts_with('\t')
+            })
+            .map(|(index, line)| format!("第 {} 行: {}", index + 1, line.trim()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        return Some(format!(
+            "顶层不是 YAML 数组（既不是 `[]` 也不是块序列）：{offender}——文件可能被外部工具写坏"
+        ));
+    }
+    // 3) 典型误写：同一段模板头出现两次（外部脚本拼接损坏）
+    let head_signature = "# Your patch layer for this dsh profile";
+    if content.matches(head_signature).count() > 1 {
+        return Some(format!(
+            "模板头重复出现 {} 次——文件被重复拼接（外部工具写坏）",
+            content.matches(head_signature).count()
+        ));
+    }
+    None
+}
+
+/// patch 文件自愈（BUG-2，v0.9.8）：当文件被写坏、dsh 无法解析时，把文件恢复成
+/// dsh 可接受的最小合法形态，**并保留用户数据**。
+///
+/// 恢复策略（保守，逐级回退）：
+/// 1. 备份原文件到 `cordis.patch.yml.corrupt-<timestamp>`（绝不静默丢弃数据）；
+/// 2. 若受管区块的 marker 成对，提取区块内容 → 重建「模板头 + 区块」；
+/// 3. 若无法提取，退化为「模板头 + `[]`」（用户非受管内容由备份保全）。
+/// @returns 恢复后的内容摘要（成功）或错误
+pub fn heal_patch_file(path: &std::path::Path) -> Result<String, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+    let backup = path.with_extension(format!(
+        "yml.corrupt-{}",
+        profile::timestamp().replace([':', ' '], "-")
+    ));
+    std::fs::write(&backup, &content)
+        .map_err(|e| format!("备份 {} 失败: {e}", backup.display()))?;
+
+    // 受管区块原文（marker 成对且内容非空时提取）
+    let block_body = match managed::read_body(path, managed::MANAGED) {
+        Ok(Some(body)) if !body.trim().is_empty() => Some(body),
+        _ => None,
+    };
+
+    // 块外用户数据抢救（数据保护）：收集「合法 YAML 行」并去重。
+    // 判据：非空、非注释、且形如 `- ...` 或缩进行——这正是用户/插件的行；
+    // 损坏残留（如裸文本 `rofile, applied ...`、重复的模板头注释）天然被排除。
+    let mut user_lines: Vec<String> = Vec::new();
+    let outside = managed::split_outside(&content, managed::MANAGED).ok().flatten();
+    let (before_text, after_text) = match &outside {
+        Some((before, after)) => (before.as_str(), after.as_str()),
+        None => (content.as_str(), ""),
+    };
+    for line in before_text.lines().chain(after_text.lines()) {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.is_empty() || trimmed_start.starts_with('#') {
+            continue;
+        }
+        let is_yaml_row = trimmed_start.starts_with("- ")
+            || line.starts_with(' ')
+            || line.starts_with('\t');
+        if is_yaml_row && !user_lines.iter().any(|existing| existing == line) {
+            user_lines.push(line.to_string());
+        }
+    }
+
+    // 重建：模板头（`[]` 占位按需替换）+ 抢救出的用户行 +（可选）受管区块
+    let template = PROFILE_PATCH_TEMPLATE.trim_end_matches(|c| c == '\n');
+    let template_without_placeholder = template
+        .strip_suffix("[]")
+        .map(|head| head.trim_end())
+        .unwrap_or(template);
+    let mut out = String::new();
+    if user_lines.is_empty() && block_body.is_none() {
+        // 无任何内容：保持标准模板（含 `[]` 占位）
+        out.push_str(PROFILE_PATCH_TEMPLATE);
+    } else {
+        out.push_str(template_without_placeholder);
+        out.push('\n');
+        for line in &user_lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if let Some(body) = &block_body {
+            out.push_str(&managed::render_block_body(body));
+            out.push('\n');
+        }
+    }
+    std::fs::write(path, &out).map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    Ok(format!(
+        "已修复 {}（原文件备份到 {}；保留 {} 行用户内容{}）",
+        path.display(),
+        backup.display(),
+        user_lines.len(),
+        if block_body.is_some() { "与受管区块" } else { "" }
+    ))
+}
+
+/// profile patch 文件的标准模板头（与 dsh `initProfile` 写入的模板一致）。
+const PROFILE_PATCH_TEMPLATE: &str = "# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+# []
+";
+
+
 /// 读取 profile 依赖 + bundles + dump 段。
 struct Discovered {
     profile_dir: PathBuf,
@@ -208,10 +367,25 @@ fn discover(profile_name: &str, logger: &Arc<Logger>) -> Result<Discovered, Plug
         // dsh 不可用是"能力缺失"，不是可降级情形：直接上抛（CLI 退出码 8）
         Err(error) if error.kind == PluginErrorKind::DshNotInstalled => return Err(error),
         Err(error) => {
+            // BUG-2（v0.9.8）：dump 失败时先对 profile patch 做结构体检。
+            // 若病根是 patch 文件损坏，给出可操作诊断（而不是只丢 Node 堆栈），
+            // 并提示「一键修复」入口（heal_patch_file）；这能把用户从
+            // "插件面板逐个禁用排查" 的错误方向拉回真正的病根。
+            let patch_path = dshhome::profile_patch_path(profile_name).ok();
+            let diagnose = patch_path
+                .as_deref()
+                .and_then(inspect_patch_file)
+                .map(|reason| {
+                    format!(
+                        "profile patch 文件结构损坏（{reason}）。dsh 因此无法启动/枚举插件。                         可在本面板点击「修复配置文件」（自动备份原文件后重建），或手工修复后重试。                         原始错误：{}",
+                        error.message
+                    )
+                });
+            let message = diagnose.unwrap_or_else(|| error.message.clone());
             logger.warn(&format!(
-                "解析 dsh --dump-config 失败，插件列表降级为只读：{error}"
+                "解析 dsh --dump-config 失败，插件列表降级为只读：{message}"
             ));
-            (Vec::new(), Some(error.message))
+            (Vec::new(), Some(message))
         }
     };
     Ok(Discovered {
@@ -506,6 +680,14 @@ fn set_state_inner(
     let remembered_shadow: Vec<String> = record
         .map(|r| r.shadow_restored.clone())
         .unwrap_or_default();
+    // BUG-1（v0.9.8 修复）：记忆与本次扫描结果取【并集】，不得被空扫描覆盖。
+    //
+    // 触发序列（2026-09-16 实测）：disable → disable → enable。
+    // 第 1 次 disable：扫描到官方行（disabled）→ 写受管启用行 + 记忆 [workspace]。
+    // 第 2 次 disable：官方行已 enabled（被受管块覆盖）→ 扫描返回**空** →
+    //   若用空覆盖记忆，则 enable 时 remove 集合为空 → 受管启用行残留 →
+    //   官方行与插件子类同时启用 → cordis 报 service 重复注册 → 插件无法激活。
+    // 并集语义同时也覆盖 repair/sync 重放期望态（重复 disable）与 live 重载。
     let (shadow_updates, remove_ids, shadow_to_remember): (Vec<ManagedEntry>, Vec<String>, Vec<String>) =
         if enabled {
             (
@@ -514,7 +696,14 @@ fn set_state_inner(
                 Vec::new(),
             )
         } else {
-            let ids = shadow_restore_rows(&discovered, package);
+            let mut ids = shadow_restore_rows(&discovered, package);
+            for id in &remembered_shadow {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+            ids.sort();
+            ids.dedup();
             (
                 ids.iter()
                     .map(|id| ManagedEntry::new(id.clone(), false, Some(package.to_string())))
@@ -1214,6 +1403,32 @@ pub fn handle_boot_failure(logger: &Arc<Logger>) -> Option<String> {
         logger.warn("dsh stderr 为空，无法归因启动失败原因");
         return None;
     }
+    // BUG-3（v0.9.8）：配置文件解析失败 ≠ 插件不兼容。
+    // 此前 dsh 因 cordis.patch.yml 损坏而启动失败时，这里仍做插件名匹配，
+    // 匹配不到就报「请在插件面板逐个禁用排查」——把用户引向完全错误的方向
+    //（2026-09-16 实测：用户照着提示禁用插件一小时无果，真实病根是配置文件）。
+    // 现在先识别解析类错误，直接给出精确诊断与修复入口。
+    if tail.contains("failed to parse overlay") || tail.contains("failed to parse") {
+        let patch_hint = dshhome::profile_patch_path(dshhome::MANAGED_PROFILE)
+            .ok()
+            .and_then(|path| {
+                inspect_patch_file(&path).map(|reason| (path, reason))
+            });
+        match patch_hint {
+            Some((path, reason)) => {
+                logger.error(&format!(
+                    "启动失败：profile 配置文件结构损坏（{reason}）；文件 {}。                     请在插件面板点击「修复配置文件」（自动备份后重建），或手工修复后重试。                     这不是插件不兼容，无需逐个禁用插件。",
+                    path.display()
+                ));
+            }
+            None => {
+                logger.error(
+                    "启动失败：dsh 报告配置文件解析错误（failed to parse）。                     请检查 ~/.dsh/profiles/web/cordis.patch.yml 与 ~/.dsh/cordis.patch.yml 的 YAML 结构；                     这不是插件不兼容，无需逐个禁用插件。",
+                );
+            }
+        }
+        return None;
+    }
     let registry = Registry::load(dshhome::MANAGED_PROFILE);
     let mut matched: Option<String> = None;
     'outer: for record in &registry.plugins {
@@ -1684,6 +1899,66 @@ mod tests {
         drop(op);
         // 释放后可再次获取
         assert!(OpGuard::acquire("pkg-a").is_ok());
+    }
+
+    /// v0.9.8：损坏 patch 文件识别 + 自愈（样本取自 2026-09-16 实测损坏文件）。
+    #[test]
+    fn test_inspect_and_heal_corrupt_patch() {
+        let dir = std::env::temp_dir().join(format!("dsh-heal-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cordis.patch.yml");
+        // 实测损坏样本：模板头 + mnemon + 空区块 + 原内容[33:] 拼接（字节级重构已验证）
+        let template = "# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+# []
+- id: mnemon
+  disabled: false
+";
+        let mark_b = "# >>> dsh-launcher managed v1 — 由启动器维护，请勿手工编辑 >>>
+";
+        let mark_e = "# <<< dsh-launcher managed v1 <<<
+";
+        let corrupt = format!("{template}{mark_b}{mark_e}{}", &template[33..]);
+        std::fs::write(&path, &corrupt).unwrap();
+
+        // 1) 识别：重复模板头（外部拼接损坏）
+        let reason = plugin_inspect(&path).expect("应识别为损坏");
+        assert!(reason.contains("模板头重复") || reason.contains("顶层不是"), "reason={reason}");
+
+        // 2) 自愈：文件恢复为合法形态，且原文件已备份
+        let backups_before = std::fs::read_dir(&dir).unwrap().count();
+        let msg = plugin_heal(&path).expect("自愈应成功");
+        assert!(msg.contains("已修复"), "msg={msg}");
+        let after = std::fs::read_to_string(&path).unwrap();
+        // 健康模板本身含 "profile, applied" 子串，故用「模板头出现次数」判重：
+        // 损坏文件 = 两份拼接（模板头 ×2），自愈后应恰为 1 份且不含重复的 mnemon 行。
+        assert_eq!(
+            after.matches("# Your patch layer for this dsh profile").count(),
+            1,
+            "自愈后模板头应恰有 1 份，实际:\n{after}"
+        );
+        assert_eq!(
+            after.matches("- id: mnemon").count(),
+            1,
+            "自愈后不应有重复的 mnemon 行，实际:\n{after}"
+        );
+        assert!(plugin_inspect(&path).is_none(), "自愈后结构应正常");
+        let backups_after = std::fs::read_dir(&dir).unwrap().count();
+        assert!(backups_after > backups_before, "应生成备份文件");
+
+        // 3) 结构正常文件不误报
+        let ok = format!("{template}");
+        std::fs::write(&path, &ok).unwrap();
+        assert!(plugin_inspect(&path).is_none(), "正常文件不应报损坏");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn plugin_inspect(path: &std::path::Path) -> Option<String> {
+        super::inspect_patch_file(path)
+    }
+    fn plugin_heal(path: &std::path::Path) -> Result<String, String> {
+        super::heal_patch_file(path)
     }
 
     /// v0.9.7 影子恢复行判定（2026-09-16 故障的回归测试）：

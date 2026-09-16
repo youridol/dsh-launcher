@@ -75,6 +75,38 @@ pub async fn plugin_set_state(
     Ok(result)
 }
 
+/// 修复 profile patch 配置文件（BUG-2，v0.9.8）。
+///
+/// 当 cordis.patch.yml 被外部工具写坏（重复拼接/顶层非法/marker 不成对）时，
+/// dsh 无法启动且插件面板降级为只读。本命令把文件恢复成 dsh 可接受的最小合法
+/// 形态：先备份原文件（`.corrupt-<ts>`，绝不静默丢弃数据），保留可提取的受管
+/// 区块内容，再重建「模板头 + 受管区块」。
+#[tauri::command]
+pub async fn plugin_heal_config(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let logger = Arc::clone(&state.logger);
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let path = crate::core::dshhome::profile_patch_path(crate::core::dshhome::MANAGED_PROFILE)
+            .map_err(|e| e)?;
+        if !path.exists() {
+            return Err(format!("{} 不存在，无需修复", path.display()));
+        }
+        // 体检：结构可信时不做无谓写入
+        if plugin::inspect_patch_file(&path).is_none() {
+            return Ok(format!("{} 结构正常，无需修复", path.display()));
+        }
+        let message = plugin::heal_patch_file(&path)?;
+        logger.warn(&format!("已修复损坏的 profile patch：{message}"));
+        Ok(message)
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {e}"))??;
+    crate::core::events::emit_plugin_changed(&app);
+    Ok(result)
+}
+
 /// 卸载插件
 #[tauri::command]
 pub async fn plugin_uninstall(
