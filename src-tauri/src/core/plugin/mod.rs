@@ -184,6 +184,23 @@ impl Drop for OpGuard {
 
 // ============================ 只读发现 ============================
 
+/// 陈旧 lastError 分类（v0.9.9）：历史记录只有文案、没有类别字段，
+/// 而「环境类」错误（dsh 不可用）具有可判定的文案特征——它们由本仓库
+/// 固定常量产生（`resolve_entry` / `process::start_locked` 的 DshNotInstalled 文案）。
+/// 一旦 dsh 恢复可用，这类错误即不成立，应在对账时清除；插件自身错误（校验失败、
+/// 安装失败）不在此列，需保留到用户处理。
+///
+/// @returns true = 环境类（dsh 可用时应清除）
+pub fn is_environment_error(message: &str) -> bool {
+    const MARKERS: [&str; 4] = [
+        "dsh 安装目录缺失",
+        "未找到 dsh",
+        "未找到 node.exe",
+        "dsh 未安装或不可用",
+    ];
+    MARKERS.iter().any(|marker| message.contains(marker))
+}
+
 /// patch 文件结构体检（BUG-2，v0.9.8）：把「dsh 无法解析该文件」这一事实
 /// 转成可操作的诊断。
 ///
@@ -499,12 +516,6 @@ pub fn list(profile_name: &str, logger: &Arc<Logger>) -> Result<PluginList, Plug
     let discovered = discover(profile_name, logger)?;
     let mut dirty =
         bootstrap_registry(&mut registry, &discovered.manifest, &discovered.sections, logger);
-    let views = build_views(
-        &discovered.profile_dir,
-        &discovered.manifest,
-        &discovered.sections,
-        &registry,
-    );
     // 清理手工删除后残留的注册表记录（磁盘为事实源）
     let known: HashSet<&str> = discovered
         .manifest
@@ -517,11 +528,46 @@ pub fn list(profile_name: &str, logger: &Arc<Logger>) -> Result<PluginList, Plug
     if registry.plugins.len() != before {
         dirty = true;
     }
+    // BUG-A（v0.9.9，2026-09-16 实测）：清除「环境类」陈旧错误。
+    //
+    // 场景：10:21 dsh 安装目录被换通道清空的窗口内，同步失败给每个插件写入了
+    // lastError「dsh 安装目录缺失（GitHub shim 指向的目录已不存在或为空），请重新
+    // 安装 dsh」；10:29 重装后目录恢复、dsh 可用，但该错误**没有任何清除路径**
+    // （只有再次同步成功、或再次操作该插件才会清），于是面板永久显示已不成立的
+    // 错误，误导用户"重新安装 dsh"。此处在每次 list 对账时重验：dsh 当前可用
+    // 且错误属于环境类 → 清除并落盘。
+    if profile::resolve_entry().is_ok() {
+        let mut cleared: Vec<String> = Vec::new();
+        for record in registry.plugins.iter_mut() {
+            if let Some(message) = &record.last_error {
+                if is_environment_error(message) {
+                    record.last_error = None;
+                    cleared.push(record.package.clone());
+                }
+            }
+        }
+        if !cleared.is_empty() {
+            dirty = true;
+            logger.info(&format!(
+                "已清除 {} 个插件的陈旧环境错误（dsh 当前可用）：{}",
+                cleared.len(),
+                cleared.join(", ")
+            ));
+        }
+    }
     if dirty {
         if let Err(e) = registry.save() {
             logger.warn(&format!("保存插件注册表失败: {e}"));
         }
     }
+    // 视图必须在全部注册表清理/清除**之后**构建：否则本次响应仍会带上
+    // 刚刚被清除的陈旧 lastError（v0.9.9 端到端测试抓到的顺序缺陷）。
+    let views = build_views(
+        &discovered.profile_dir,
+        &discovered.manifest,
+        &discovered.sections,
+        &registry,
+    );
     Ok(PluginList {
         profile: profile_name.to_string(),
         plugins: views,
@@ -1585,7 +1631,15 @@ pub fn sync(
         let args = vec!["add".to_string(), new_spec.clone()];
         match run_plugin_forward(profile_name, &args, logger) {
             Err(error) => {
-                registry.set_error(&item.package, Some(error.message.clone()));
+                // BUG-B（v0.9.9）：环境类错误（dsh/node 不可用）是**全局**故障，
+                // 不是这个插件的问题。此前一律 set_error(package)，导致一次环境
+                // 故障被放大成「每个插件各自失败」，面板上 N 条相同且与插件无关的
+                // 错误（2026-09-16 实测：dshmarket 与 @xmanrui/dsh-im 同时显示
+                // "dsh 安装目录缺失…请重新安装 dsh"）。环境类错误只进结果消息与
+                // 日志，不写插件级 lastError；插件自身失败（安装/校验）照旧记录。
+                if !is_environment_error(&error.message) {
+                    registry.set_error(&item.package, Some(error.message.clone()));
+                }
                 results.push(SyncItemResult {
                     package: item.package.clone(),
                     origin: item.origin,
@@ -1899,6 +1953,22 @@ mod tests {
         drop(op);
         // 释放后可再次获取
         assert!(OpGuard::acquire("pkg-a").is_ok());
+    }
+
+    /// v0.9.9 BUG-A/BUG-B：环境类错误识别（陈旧 lastError 清除 + sync 分流共用）。
+    #[test]
+    fn test_is_environment_error() {
+        // 命中：本仓库产生的 DshNotInstalled 常量文案（实测样本）
+        assert!(super::is_environment_error(
+            "dsh 安装目录缺失（GitHub shim 指向的目录已不存在或为空），请重新安装 dsh"
+        ));
+        assert!(super::is_environment_error("未找到 dsh（PATH 无 dsh 且无 GitHub 安装目录），请先在版本管理中安装 dsh"));
+        assert!(super::is_environment_error("未找到 node.exe，无法调用 dsh（请先安装 Node 工具链）"));
+        assert!(super::is_environment_error("dsh 未安装或不可用: 命令执行超时"));
+        // 不命中：插件自身错误必须保留
+        assert!(!super::is_environment_error("校验失败：期望 Some(\"1.47.0\")，实际 Some(\"1.46.0\")"));
+        assert!(!super::is_environment_error("安装失败: ERR_PNPM_FETCH_404"));
+        assert!(!super::is_environment_error(""));
     }
 
     /// v0.9.8：损坏 patch 文件识别 + 自愈（样本取自 2026-09-16 实测损坏文件）。
