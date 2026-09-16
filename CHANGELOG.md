@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.9.7] - 2026-09-16
+
+### 修复（P0 影子恢复行：禁用「替换型插件」后 Sessions/工作区仍不可访问）
+
+- 0.9.6 的健康审查 + 自动重启上线后，用户实测 pending 依旧复现且 3 次重启全部命中——
+  证明是**确定性故障**而非瞬态竞态。深入二分定位（bundles 剥离法）锁定元凶：
+  `@michengai/dsh-archive-manager@0.1.43` 的 bundle patch 含
+  `- id: workspace / disabled: true` —— 它禁用官方 web-app 的 `workspace` 行
+  （workspaceRegistry 服务的提供者），并 insert 子类 `workspace-archive-manager` 接管。
+  此前用户在插件面板禁用该插件时，启动器只写子类行的禁用行 → 子类与官方行**同时
+  被禁用** → workspaceRegistry 无人提供 → session/workspace-controller、ui-git-graph、
+  ui-task-board、ui-deliverables 全链 pending。上午"手动健康"是因为当时
+  archive-manager 恰被 reconcile 移出 bundles；用户更新插件（0.1.43）后组合条件
+  100% 触发。
+- 修复语义（`plugin::set_state`）：
+  - **disable** 插件 X → 除禁用 X 的行外，对所有「被 X 替换的官方行」写受管启用行
+    （shadow restore），保证服务有人提供；恢复清单记入注册表
+    `PluginRecord.shadow_restored`；
+  - **enable** 插件 X → 按注册表记录移除这些启用行（子类 patch 重新接管）并清空记录。
+    按记录而非重新计算：enable 后官方行已 enabled，重新计算得空清单会导致启用行
+    残留（实测缺陷，已修）。
+- 「被 X 替换的官方行」判定（`shadow_restore_rows`，基于 dump 不猜语义）：段头
+  `patched by` 含 X + 官方 bundle 层（owner 非用户 patch 路径）+ 行当前 disabled +
+  id 不在 X 自己的行里 + X 拥有子类行。表达式控制的行跳过（与受管区块约束一致）。
+- 写后校验扩展：影子恢复行必须恢复为 enabled，否则整体回滚受管区块。
+- 测试：2 个新单测（替换模式命中 / 四类反例）+ 1 个端到端回归
+  （`tests/shadow_restore_e2e.rs`，真实 dsh + 真实 profile 走 set_state 往返，
+  断言受管区块与 dump 的双向状态；CI 无 dsh 环境自动跳过）。
+- 实测闭环：禁用态（官方行恢复）与启用态（子类接管）两种组合下 dsh 启动均为
+  0 did-not-activate，`session/list` RPC 正常返回。
+
 ## [0.9.6] - 2026-09-16
 
 ### 修复（依据 2026-09-16 dsh-v0.1.6-alpha.1 升级故障审计）

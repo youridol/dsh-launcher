@@ -371,6 +371,70 @@ fn rows_for(discovered: &Discovered, package: &str) -> (Vec<String>, Vec<RowStat
     (ids, states)
 }
 
+/// 影子恢复行判定（v0.9.7，修复 2026-09-16 故障）：
+///
+/// 部分插件采用「禁用官方行 + 子类替换」模式——插件 bundle patch 把官方行
+/// （如 @michengai/dsh-archive-manager@0.1.43 禁用 @deepseek-ai/dsh-web-app 的
+/// `workspace` 行）置 disabled，再 insert 同服务的子类行。此时启动器「禁用该插件」
+/// 只禁子类行的话，官方行仍是 disabled → 服务无人提供 → 下游全部 pending
+///（实测：workspaceRegistry pending → session/workspace-controller、ui-git-graph、
+/// ui-task-board、ui-deliverables 全链瘫痪，Sessions/工作区不可访问）。
+///
+/// 修复语义：
+/// - **disable** 插件 X：除禁用 X 的行外，对所有「被 X 替换的官方行」写受管
+///   `disabled: false`（恢复官方行兜底）；
+/// - **enable** 插件 X：移除这些官方行的受管条目（子类 patch 自然重新接管），
+///   并保留子类禁用行的移除。
+///
+/// 「被 X 替换的官方行」判定（基于 dump，不猜语义）：
+/// 1. 行 Y 所在段头为 `A, patched by ..., X, ...`（X 参与覆盖了该段）；
+/// 2. Y 属于**官方 bundle 层**（owner 是 bundle，非用户 patch 路径）；
+/// 3. Y.effective_enabled() == Some(false)（当前被禁用）；
+/// 4. Y.id 不在 X 自己拥有的行里（否则是 X 对自己行的改动，不属于替换）；
+/// 5. X 自己拥有至少一行（rows_of_owner 非空——有子类才有「替换」可言）。
+///
+/// 表达式控制的行跳过（启动器不覆盖表达式，与受管区块既有约束一致）。
+/// 恢复动作写入受管区块，enable 时自动移除 → 完全可回滚。
+fn shadow_restore_rows(discovered: &Discovered, package: &str) -> Vec<String> {
+    let own_rows = dump::rows_of_owner(&discovered.sections, package);
+    if own_rows.is_empty() {
+        return Vec::new();
+    }
+    let own: std::collections::BTreeSet<&str> =
+        own_rows.iter().map(|s| s.as_str()).collect();
+    let mut restored = Vec::new();
+    for section in &discovered.sections {
+        // 段头必须明确列出本插件参与覆盖（"A, patched by ..., <package>, ..."）
+        if !section.patched_by.iter().any(|who| who == package) {
+            continue;
+        }
+        // 只处理官方 bundle 层：用户 patch 层 owner 是绝对文件路径
+        //（Windows 形如 C:\Users\...，含盘符冒号+反斜杠；bundle 包名如
+        // @scope/pkg 只含正斜杠，绝不包含反斜杠或盘符冒号模式）。
+        let owner = &section.owner;
+        let is_user_patch_layer = owner.contains('\\')
+            || (owner.len() >= 2 && owner.as_bytes()[1] == b':')
+            || owner.starts_with('/');
+        if is_user_patch_layer {
+            continue;
+        }
+        for row in &section.rows {
+            if own.contains(row.id.as_str()) {
+                continue;
+            }
+            if row.is_expression_controlled() {
+                continue;
+            }
+            if row.effective_enabled() == Some(false) {
+                restored.push(row.id.clone());
+            }
+        }
+    }
+    restored.sort();
+    restored.dedup();
+    restored
+}
+
 // ============================ 启停 ============================
 
 /// 启用/禁用插件（写受管区块，dsh 热重载，不重启）。
@@ -432,7 +496,36 @@ fn set_state_inner(
             "插件 {package} 的行全部由表达式控制，启动器拒绝覆盖"
         )));
     }
-    let desired_entries = managed::upsert(existing.clone(), &updates, &[]);
+    // 影子恢复行（v0.9.7，修复「插件禁用官方行+子类替换」模式下的孤儿服务）：
+    // disable → 对被本插件替换的官方行写启用行（保证服务有人提供），
+    //           并把恢复清单记入注册表（shadow_restored）；
+    // enable → 按注册表记录移除这些官方行的受管启用条目（子类 patch 重新接管），
+    //           并清空记录。按记录而非重新计算：enable 后官方行已是 enabled，
+    //           重新计算会得到空清单导致启用行残留（实测缺陷）。
+    let record = registry.plugins.iter().find(|r| r.package == package);
+    let remembered_shadow: Vec<String> = record
+        .map(|r| r.shadow_restored.clone())
+        .unwrap_or_default();
+    let (shadow_updates, remove_ids, shadow_to_remember): (Vec<ManagedEntry>, Vec<String>, Vec<String>) =
+        if enabled {
+            (
+                Vec::new(),
+                remembered_shadow.clone(),
+                Vec::new(),
+            )
+        } else {
+            let ids = shadow_restore_rows(&discovered, package);
+            (
+                ids.iter()
+                    .map(|id| ManagedEntry::new(id.clone(), false, Some(package.to_string())))
+                    .collect(),
+                Vec::new(),
+                ids,
+            )
+        };
+    let mut all_updates = updates.clone();
+    all_updates.extend(shadow_updates.iter().cloned());
+    let desired_entries = managed::upsert(existing.clone(), &all_updates, &remove_ids);
     let outcome = managed::apply_block(&patch_path, &desired_entries).map_err(|e| {
         PluginError::new(PluginErrorKind::ManagedBlockConflict, e)
     })?;
@@ -443,6 +536,7 @@ fn set_state_inner(
             .find(|record| record.package == package)
         {
             record.rows = row_ids;
+            record.shadow_restored = shadow_to_remember;
         }
         registry.set_desired(package, Some(if enabled { "enabled" } else { "disabled" }));
         let _ = registry.save();
@@ -452,7 +546,7 @@ fn set_state_inner(
         ));
     }
 
-    // 写后校验：重新 dump 并核对目标行
+    // 写后校验：重新 dump 并核对目标行（含影子恢复行）
     let verify = (|| -> Result<(), PluginError> {
         let text = profile::dump_config(profile_name)?;
         let sections = dump::parse_dump(&text).map_err(|e| PluginError::internal(e))?;
@@ -472,6 +566,21 @@ fn set_state_inner(
                         entry.id
                     )))
                 }
+            }
+        }
+        // 影子恢复行（仅 disable 分支存在）：官方行必须已恢复启用
+        for entry in &shadow_updates {
+            let Some((_, row)) = index.get(&entry.id) else {
+                return Err(PluginError::verification(format!(
+                    "校验失败：影子恢复行 {} 在 dump 中不存在",
+                    entry.id
+                )));
+            };
+            if row.effective_enabled() != Some(true) {
+                return Err(PluginError::verification(format!(
+                    "校验失败：影子恢复行 {} 未恢复启用",
+                    entry.id
+                )));
             }
         }
         Ok(())
@@ -494,6 +603,7 @@ fn set_state_inner(
         .find(|record| record.package == package)
     {
         record.rows = row_ids;
+        record.shadow_restored = shadow_to_remember;
     }
     registry.set_desired(package, Some(if enabled { "enabled" } else { "disabled" }));
     registry.set_error(package, None);
@@ -1574,5 +1684,99 @@ mod tests {
         drop(op);
         // 释放后可再次获取
         assert!(OpGuard::acquire("pkg-a").is_ok());
+    }
+
+    /// v0.9.7 影子恢复行判定（2026-09-16 故障的回归测试）：
+    /// 插件 X（archive-manager）patch 禁用官方 web-app 的 workspace 行并 insert 子类，
+    /// disable X 时必须把 workspace 识别为「被 X 替换的官方行」。
+    fn section(owner: &str, patched_by: &[&str], rows: Vec<(&str, Option<bool>)>) -> dump::DumpSection {
+        dump::DumpSection {
+            owner: owner.to_string(),
+            patched_by: patched_by.iter().map(|s| s.to_string()).collect(),
+            rows: rows
+                .into_iter()
+                .map(|(id, disabled)| dump::DumpRow {
+                    id: id.to_string(),
+                    name: None,
+                    disabled: disabled.map(dump::DisabledValue::Bool),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_shadow_restore_rows_replacement_pattern() {
+        let discovered = Discovered {
+            profile_dir: std::path::PathBuf::from("C:/tmp/profile"),
+            manifest: profile::ProfileManifest::default(),
+            sections: vec![
+                // web-app 拥有 workspace 行；被 archive-manager patch 禁用
+                section(
+                    "@deepseek-ai/dsh-web-app",
+                    &["@michengai/dsh-archive-manager"],
+                    vec![
+                        ("session-reference", Some(false)),
+                        ("workspace", Some(true)), // 被插件禁用的官方行
+                    ],
+                ),
+                // 插件自己的段：子类行
+                section(
+                    "@michengai/dsh-archive-manager",
+                    &[],
+                    vec![
+                        ("workspace-archive-manager", Some(true)),
+                        ("ui-workspace-archive-manager", Some(true)),
+                    ],
+                ),
+                // 用户 patch 层（绝对路径）：同有禁用行，但不属于官方 bundle 层
+                section(
+                    "C:\\Users\\t\\.dsh\\profiles\\web\\cordis.patch.yml",
+                    &[],
+                    vec![("mcp-github", Some(true))],
+                ),
+                // 另一官方 bundle 的禁用行：段头无 archive-manager 参与 → 不恢复
+                section(
+                    "@deepseek-ai/dsh-base",
+                    &["@deepseek-ai/dsh-web-app"],
+                    vec![("telemetry", Some(true))],
+                ),
+            ],
+            degraded_reason: None,
+        };
+        let rows = shadow_restore_rows(&discovered, "@michengai/dsh-archive-manager");
+        assert_eq!(rows, vec!["workspace".to_string()]);
+    }
+
+    #[test]
+    fn test_shadow_restore_rows_negative_cases() {
+        // 无子类行（own_rows 空）→ 无影子行
+        let mut d = Discovered {
+            profile_dir: std::path::PathBuf::from("C:/tmp/profile"),
+            manifest: profile::ProfileManifest::default(),
+            sections: vec![section(
+                "@deepseek-ai/dsh-web-app",
+                &["@some-plugin"],
+                vec![("workspace", Some(true))],
+            )],
+            degraded_reason: None,
+        };
+        assert!(shadow_restore_rows(&d, "@some-plugin").is_empty());
+
+        // 插件对官方行的禁用属于自己行的改动（id 在 own_rows）→ 不恢复
+        d.sections = vec![section(
+            "@deepseek-ai/dsh-web-app",
+            &["@some-plugin"],
+            vec![("plugin-row", Some(true))],
+        )];
+        // own_rows 需要来自同 sections 的 rows_of_owner，插件段必须有行
+        d.sections.push(section("@some-plugin", &[], vec![("plugin-row", Some(true))]));
+        assert!(shadow_restore_rows(&d, "@some-plugin").is_empty());
+
+        // 官方行是启用状态 → 不需要恢复
+        d.sections = vec![
+            section("@deepseek-ai/dsh-web-app", &["@some-plugin"], vec![("workspace", Some(false))]),
+            section("@some-plugin", &[], vec![("sub", Some(true))]),
+        ];
+        assert!(shadow_restore_rows(&d, "@some-plugin").is_empty());
     }
 }

@@ -69,6 +69,10 @@ pub struct PluginRecord {
     pub quarantine: bool,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// 影子恢复行（v0.9.7）：禁用该插件时被受管启用行恢复的官方行 id。
+    /// 重新启用时按此清单移除这些启用行（插件 patch 重新接管），并清空本字段。
+    #[serde(default)]
+    pub shadow_restored: Vec<String>,
 }
 
 impl PluginRecord {
@@ -83,6 +87,7 @@ impl PluginRecord {
             protected: false,
             quarantine: false,
             last_error: None,
+            shadow_restored: Vec::new(),
         }
     }
 }
