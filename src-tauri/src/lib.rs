@@ -294,6 +294,24 @@ pub fn run() {
                                         "插件自动同步完成：成功 {applied}，失败 {failed}"
                                     ));
                                 }
+                                // v0.9.6（预防计划 P1-2）：同步失败不得静默。
+                                // 失败 = profile 的 node_modules/lockfile 处于半更新状态，
+                                // 而 sync 成功路径会照常重启 dsh —— 带病状态悄悄上线
+                                // 正是 2026-09-16 审计案例（dsh 0.1.6 升级后 workspace
+                                // 行 pending）的诱因之一。这里升级为 Error 并给出指引，
+                                // 让"失败"在日志里不可被忽略。
+                                if failed > 0 {
+                                    let names: Vec<String> = report
+                                        .items
+                                        .iter()
+                                        .filter(|item| item.result == "failed")
+                                        .map(|item| item.package.clone())
+                                        .collect();
+                                    logger.error(&format!(
+                                        "插件自动同步有 {failed} 个失败（{}）；profile 可能处于半更新状态。建议在插件面板对失败项重试同步，或执行一次「收敛」后再重启 dsh",
+                                        names.join(", ")
+                                    ));
+                                }
                             }
                             Err(error) => {
                                 logger.warn(&format!("插件自动同步跳过：{error}"));

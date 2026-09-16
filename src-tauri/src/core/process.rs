@@ -2,7 +2,8 @@
 //!
 //! 语义（docs/DESIGN.md §4.3、ADR-0002）：
 //! - 启动：spawn `dsh web --port <p>`，CWD = dsh 官方默认（运行目录不干预）
-//! - 停止：SIGTERM 优雅排空（Windows 用 taskkill /PID /T），等待 ≤5s，超时强杀
+//! - 停止：SIGTERM 优雅排空（Windows 用 taskkill /PID /T），等待 ≤10s，超时强杀；
+//!   强杀后清理 dsh 已知的进程级残留锁（如 task-board ledger）
 //! - 重启：停止后同配置重启
 //! - 状态：事件驱动（进程退出回调）+ 端口探活兜底
 
@@ -11,7 +12,7 @@ use crate::core::logging::{LogLevel, LogSource, Logger};
 use crate::core::port;
 use std::io::Read;
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -54,10 +55,22 @@ pub struct ProcessManager {
     /// 5 秒一轮的对账若每轮都打日志，长期端口冲突会淹没日志（10MB 轮转）；
     /// 只告警一次，由 `start_locked` 在新一轮启动时复位。
     starting_port_conflict_logged: AtomicBool,
+    /// 启动健康判定（v0.9.6 P0-1）：探活线程发现 stderr 含
+    /// "entries did not activate" 时置位，请求一次自动重启；对账线程消费。
+    /// requested 由 `start_locked` 在新一轮启动时复位；
+    /// count 是**生命周期内累计**的自动重启次数（绝不复位）——每轮启动最多触发
+    /// 一次，且总数封顶 MAX_PENDING_AUTO_RESTARTS：若连续多轮启动都有未激活条目，
+    /// 说明是持久性问题（数据/插件/版本兼容），继续重启只会无限循环 + 淹没日志。
+    pending_restart_requested: Arc<AtomicBool>,
+    pending_restart_count: Arc<AtomicU32>,
     /// 生命周期操作互斥锁：保证同一时刻只有一个 start/stop/restart 在执行
     /// （防止多线程并发调用导致双进程/双杀竞态）
     op_lock: Mutex<()>,
 }
+
+/// 启动健康审查（P0-1）：pending 自动重启的生命周期累计上限。
+/// 每轮启动最多触发一次；连续命中即持久性问题，交由用户处置。
+const MAX_PENDING_AUTO_RESTARTS: u32 = 3;
 
 /// 取锁并容忍中毒：与仓库其它模块（`commands/config.rs`、`plugin/managed.rs`、
 /// `plugin/mod.rs` 的 `in_flight`）的 `unwrap_or_else(|e| e.into_inner())` 语义一致。
@@ -82,6 +95,8 @@ impl ProcessManager {
             logger,
             stopping: AtomicBool::new(false),
             starting_port_conflict_logged: AtomicBool::new(false),
+            pending_restart_requested: Arc::new(AtomicBool::new(false)),
+            pending_restart_count: Arc::new(AtomicU32::new(0)),
             op_lock: Mutex::new(()),
         }
     }
@@ -380,6 +395,9 @@ impl ProcessManager {
         self.stopping.store(false, Ordering::SeqCst);
         // 新一轮启动：复位"端口冲突已告警"标志（见结构体字段注释）
         self.starting_port_conflict_logged.store(false, Ordering::SeqCst);
+        // 新一轮启动：复位"pending 自动重启"请求位（count 生命周期累计，不复位，
+        // 见结构体字段注释）
+        self.pending_restart_requested.store(false, Ordering::SeqCst);
         // v0.5.4（启动时序修复）：清空**上一轮** dsh 的 token 内存与缓存。
         // 此前 start 不清 last-web-url 缓存：冷启动/异常退出后重启时旧缓存残留，
         // 前端 waitForWebUrl 经 get_web_url 兜底读到旧 token 秒回 → 内嵌窗口在
@@ -467,10 +485,16 @@ impl ProcessManager {
                 .output()
         };
 
-        // 等待优雅退出，最多 1 秒（v0.3.5：child 句柄已被监视线程 take 走，
-        // 用 tasklist 探测进程存活；node/pnpm 进程树对无 /F 的 taskkill 常不响应，
-        // 快速升级强杀，避免退出/停止卡顿）
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // 等待优雅退出，最多 10 秒（v0.9.6 停止加固：此前仅 1 秒）。
+        // dsh 的 cordis shutdown waterfall（KV 排空/锁释放/子进程收尾）实测需要 3-8 秒，
+        // 1 秒即强杀会留下进程级残留：task-board ledger 锁（下次启动 ui-task-board 报
+        // "ledger is already owned"）、storage KV 半写状态。审计案例：2026-09-16
+        // dsh 0.1.6-alpha.1 升级后连续 4 次 pending（entries did not activate）均发生在
+        // 前一实例被强杀之后（优雅等待仅 1s）。
+        // 仍保留强杀兑底：node/pnpm 进程树对无 /F 的 taskkill 常不响应，
+        // 无限期等待会让"停止/重启"永不返回。
+        const GRACEFUL_STOP_SECS: u64 = 10;
+        let deadline = Instant::now() + Duration::from_secs(GRACEFUL_STOP_SECS);
         let mut exited = false;
         loop {
             if !process_alive(pid) {
@@ -480,14 +504,20 @@ impl ProcessManager {
             if Instant::now() >= deadline {
                 break;
             }
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(300));
         }
 
-        if !exited {
+        if exited {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Info,
+                &format!("dsh (pid={pid}) 已优雅退出（≤{GRACEFUL_STOP_SECS}s）"),
+            );
+        } else {
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Warn,
-                &format!("dsh (pid={pid}) 1 秒内未优雅退出，强制终止…"),
+                &format!("dsh (pid={pid}) {GRACEFUL_STOP_SECS} 秒内未优雅退出，强制终止…"),
             );
             let _ = {
                 let mut c = command::hidden("taskkill");
@@ -552,6 +582,14 @@ impl ProcessManager {
             }
         }
 
+        // v0.9.6（停止加固 P0-2）：强杀路径后清理 dsh 的进程级残留锁。
+        // dsh 子系统（task-board ledger 等）用「pid + 死亡探测」的锁文件，正常
+        // 退出时自行删除；强杀没有机会收尾 → 锁残留 → 下次启动对应插件报
+        // "already owned by process <pid>"（2026-09-16 审计案例）。
+        // 仅当锁内 pid 已死亡（或锁不可读）才清理：锁内 pid 仍活说明真有宿主，
+        // 删了会破坏活实例的互斥。幂等：无锁文件时静默跳过。
+        cleanup_stale_dsh_locks(&self.logger);
+
         match sigterm {
             Ok(out) if out.status.success() => {
                 self.logger.log(LogSource::Launcher, LogLevel::Info, "dsh 已停止");
@@ -609,6 +647,7 @@ impl ProcessManager {
         let logger = Arc::clone(&self.logger);
         let status_arc = Arc::clone(&self.status);
         let pid_arc = Arc::clone(&self.pid);
+        let restart_request = Arc::clone(&self.pending_restart_requested);
         thread::spawn(move || {
             // 最多等 8 秒（dsh 冷启动 + 插件加载）——仅用于快速识别"启动即崩"
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -618,13 +657,37 @@ impl ProcessManager {
                     *p != 0 && *p == pid
                 };
                 if port::probe(port) == Some(true) {
-                    // 端口监听 → 启动成功
+                    // 端口监听 → 置 Running，但**先做启动健康审查**（v0.9.6 P0-1）：
+                    // 端口就绪 ≠ 服务健康。dsh 在 boot 收尾（auditStartupEntries）时把
+                    // "entries did not activate" 写到 stderr——本次启动有服务卡 pending
+                    //（2026-09-16 审计案例：workspaceRegistry pending → Sessions/工作区
+                    // 全部不可访问，端口却正常监听、状态显示"运行中"）。
+                    // 命中 → 升级为 Error 并自动重启一次（幂等防循环）。
                     let mut s = lock_or_recover(&status_arc);
                     if *s == DshStatus::Starting {
                         *s = DshStatus::Running;
                         logger.log(LogSource::Launcher, LogLevel::Info, "dsh 已就绪（端口监听中）");
                     }
                     drop(s);
+                    // 宽限窗口：让 audit 输出落盘（dsh 就绪行与 audit 行几乎同刻打印，
+                    // 文件写入有先后；3 秒内不出现即视为健康，不阻塞正常路径）。
+                    thread::sleep(Duration::from_secs(3));
+                    // 宽限期内用户可能已停止/重启：仅当本实例仍被托管时才审查。
+                    let still_owner = { *lock_or_recover(&pid_arc) == pid };
+                    if still_owner {
+                        if let Some(summary) = stderr_inactive_entries_summary() {
+                            logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Error,
+                                &format!(
+                                    "启动健康审查：dsh 报告存在未激活条目，部分功能（如 Sessions/工作区）将不可用；请求自动重启一次。明细：\n{summary}"
+                                ),
+                            );
+                            // 只置请求位；执行在对账线程（Arc<Self> 持有者）里完成，
+                            // 探活线程本身无法直接调用 restart（&self 不能 move 进线程）。
+                            restart_request.store(true, Ordering::SeqCst);
+                        }
+                    }
                     return;
                 }
                 if !alive {
@@ -677,6 +740,7 @@ impl ProcessManager {
             );
         });
     }
+
 
     /// 后台监视线程：tail dsh 输出落盘文件写日志/捕获 URL + 进程退出时更新状态
     fn spawn_monitor(&self, pid: u32) {
@@ -759,6 +823,50 @@ impl ProcessManager {
         thread::spawn(move || loop {
             thread::sleep(Duration::from_secs(5));
             me.reconcile_once();
+            me.consume_pending_restart_request();
+        });
+    }
+
+    /// 消费「pending 自动重启」请求（只执行一次，防循环，v0.9.6 P0-1）。
+    ///
+    /// pending（entries did not activate）的实测成因（2026-09-16 审计）是上一实例
+    /// 被强杀后的残留状态 + 安装期 pnpm 中间态，一次干净重启即可恢复；若重启后
+    /// 仍 pending，则为持久性问题（数据/插件/版本兼容），交由用户在日志/插件面板
+    /// 处置，不再重试。
+    fn consume_pending_restart_request(self: &Arc<Self>) {
+        if !self.pending_restart_requested.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        // 生命周期累计上限（不复位）：防「重启后仍 pending → 再重启」的无限循环。
+        // 实测一次干净重启即可恢复（成因为强杀残留 + pnpm 中间态）；连续多轮命中
+        // 即持久性问题（数据/插件/版本），应交由用户处置。
+        let count = self.pending_restart_count.fetch_add(1, Ordering::SeqCst);
+        if count >= MAX_PENDING_AUTO_RESTARTS {
+            self.logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                &format!(
+                    "pending 自动重启已达上限（{MAX_PENDING_AUTO_RESTARTS} 次，本次启动仍存在未激活条目），                     不再自动重启。请按日志中 did not activate 明细排查：插件面板禁用可疑插件，                     或在版本管理重装 dsh"
+                ),
+            );
+            return;
+        }
+        let me = Arc::clone(self);
+        // 独立线程：restart 内部优雅等待最长 10s，不能阻塞对账循环。
+        thread::spawn(move || match me.restart() {
+            Ok(()) => me.logger.log(
+                LogSource::Launcher,
+                LogLevel::Info,
+                &format!(
+                    "pending 自动重启完成（第 {}/{} 次）；若 UI 仍缺功能请查看日志中的 did not activate 明细",
+                    count + 1, MAX_PENDING_AUTO_RESTARTS
+                ),
+            ),
+            Err(e) => me.logger.log(
+                LogSource::Launcher,
+                LogLevel::Error,
+                &format!("pending 自动重启失败（请手动重启 dsh）: {e}"),
+            ),
         });
     }
 
@@ -1177,10 +1285,110 @@ fn extract_web_url(line: &str) -> Option<String> {
     }
 }
 
+/// 扫描本次启动的 dsh stderr 落盘文件中的「未激活条目」汇总。
+///
+/// 判据：`entries did not activate`（dsh `auditStartupEntries` 的固定措辞，
+/// packages/boot/app-boot/src/index.ts:801）。stderr 文件每次启动被截断重建
+/// （open_redirect_file），因此文件内容即本次启动的输出，无需按时间过滤。
+/// 单条目的失败同样命中（"1 entry did not activate"，共用名词单复数之外的
+/// severity 前缀结构一致）。
+///
+/// 返回 Some(摘要)：汇总行 + 全部 pending/失败明细（最多 16 行，防淹没）；
+/// 返回 None：健康（或文件不可读——宁勿误报不误杀启动，P0-1 语义）。
+fn stderr_inactive_entries_summary() -> Option<String> {
+    let path = dsh_stderr_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut lines = text.lines().filter(|line| {
+        let t = line.trim();
+        // 剥离可能的日志前缀后匹配固定短语/明细行
+        t.contains("did not activate")
+            || t.contains("): pending")
+            || t.contains("): failed")
+            || t.contains("failed to import")
+    });
+    let summary = lines.next()?.trim().to_string();
+    let detail: Vec<String> = lines
+        .take(16)
+        .map(|l| l.trim().to_string())
+        .collect();
+    Some(if detail.is_empty() {
+        summary
+    } else {
+        format!("{summary}
+  {}", detail.join("
+  "))
+    })
+}
+
 /// 解码 Windows 控制台输出（UTF-8 优先，失败回退代码页 GBK/OEM）
 /// 实现见 core/text.rs（统一解码，全部子进程输出解码都走它，避免各点乱码）
 pub(crate) fn decode_console_text(bytes: &[u8]) -> String {
     crate::core::text::decode(bytes)
+}
+
+/// dsh 已知的「进程级残留锁」清单（停止路径 P0-2）。
+///
+/// 来源与格式（逐项实测 / 官方源码核对）：
+/// - task-board ledger：`$DSH_HOME/task-board/ledger-v2.lock`，内容为 JSON
+///   `{"pid":<u32>,...}`，由 @linxin666/dsh-client-ui-task-board 的
+///   HostTaskLedger.acquireLock 持有；宿主死亡后下次启动报
+///   "task-board ledger is already owned by process <pid>"。
+///
+/// 只处理「确认残留」的锁：锁内 pid 已死亡（或内容不可解析）。锁内 pid 仍活
+/// 说明真有活宿主（可能是收养的外部 dsh），此时清理会破坏互斥，跳过并告警。
+/// 本函数在每次 stop（含强杀与端口清剿）之后调用；幂等、无锁文件时零开销。
+fn cleanup_stale_dsh_locks(logger: &Arc<Logger>) {
+    // task-board ledger 锁
+    let ledger = crate::core::dshhome::dsh_home()
+        .join("task-board")
+        .join("ledger-v2.lock");
+    if ledger.exists() {
+        let stale = std::fs::read_to_string(&ledger)
+            .ok()
+            .and_then(|raw| parse_lock_holder_pid(&raw))
+            .map(|holder| !process_alive(holder))
+            .unwrap_or(true); // 内容不可解析 → 无法证明宿主存活，按残留处理
+        if stale {
+            match std::fs::remove_file(&ledger) {
+                Ok(()) => logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Info,
+                    &format!(
+                        "已清理 dsh 残留锁 {}（宿主进程已退出）",
+                        ledger.display()
+                    ),
+                ),
+                Err(e) => logger.log(
+                    LogSource::Launcher,
+                    LogLevel::Warn,
+                    &format!("清理 dsh 残留锁 {} 失败: {e}", ledger.display()),
+                ),
+            }
+        } else {
+            logger.log(
+                LogSource::Launcher,
+                LogLevel::Info,
+                &format!(
+                    "task-board 锁 {} 的宿主进程仍存活，跳过清理（疑似外部 dsh 实例）",
+                    ledger.display()
+                ),
+            );
+        }
+    }
+}
+
+/// 从残留锁内容提取宿主 pid（None = 不可解析）。
+/// 实测格式（2026-09-16 现场样本）：{"pid":42500,"token":"...","startedAt":...}
+fn parse_lock_holder_pid(raw: &str) -> Option<u32> {
+    let key = "\"pid\"";
+    let idx = raw.find(key)? + key.len();
+    let rest = &raw[idx..];
+    let digits: String = rest
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<u32>().ok()
 }
 
 /// 检查指定 PID 的进程是否存活（tasklist 精确过滤）
@@ -1220,9 +1428,53 @@ mod tests {
     use super::cmdline_looks_like_dsh;
     use super::decode_console_text;
     use super::extract_web_url;
+    use super::parse_lock_holder_pid;
     use super::starting_convergence;
     use super::DshStatus;
     use super::Listener;
+
+    /// v0.9.6 P0-2：残留锁宿主 pid 提取（实测样本格式）。
+    #[test]
+    fn test_parse_lock_holder_pid() {
+        let raw = r#"{"pid":42500,"token":"818430df-7fdc-4313-bfe5-f9fe1a1a8d2b","startedAt":1789540775557,"probe":"exact"}"#;
+        assert_eq!(parse_lock_holder_pid(raw), Some(42500));
+        // 无 pid 字段
+        assert_eq!(parse_lock_holder_pid(r#"{"token":"x"}"#), None);
+        // pid 非数字
+        assert_eq!(parse_lock_holder_pid(r#"{"pid":"abc"}"#), None);
+        // 完全垃圾
+        assert_eq!(parse_lock_holder_pid("not json"), None);
+    }
+
+    /// v0.9.6 P0-1：stderr 未激活条目扫描的匹配逻辑（dsh auditStartupEntries
+    /// 固定措辞）。样本取自 2026-09-16 审计现场（dsh-web-stderr.log）。
+    #[test]
+    fn test_stderr_inactive_match_logic() {
+        // 标准样本：1 汇总行 + 2 明细行（截取）
+        let sample = "dsh: warning: 5 entries did not activate
+            session-controller (@deepseek-ai/dsh-api-session-controller): pending (waiting for service: workspaceRegistry)
+            workspace-controller (@deepseek-ai/dsh-api-workspace-controller): pending (waiting for service: workspaceRegistry)
+";
+        let hit: Vec<&str> = sample.lines().filter(|line| {
+            let t = line.trim();
+            t.contains("did not activate")
+                || t.contains("): pending")
+                || t.contains("): failed")
+                || t.contains("failed to import")
+        }).collect();
+        assert_eq!(hit.len(), 3);
+        assert!(hit[0].contains("5 entries did not activate"));
+        assert!(hit[1].contains("workspaceRegistry"));
+
+        // 健康样本：无命中
+        let healthy = "time=... msg=\"starting server\"
+GitHub MCP Server running on stdio
+";
+        assert!(healthy.lines().all(|line| !(line.contains("did not activate")
+            || line.contains("): pending")
+            || line.contains("): failed")
+            || line.contains("failed to import"))));
+    }
 
     /// G4（审计 RT-01）：互斥量**中毒**后仍可继续读写（不得 panic）。
     ///

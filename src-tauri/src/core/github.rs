@@ -469,6 +469,61 @@ pub fn install_version(
     .map_err(|e| format!("pnpm build 失败: {e}"))?;
     logger.progress("github", InstallPhase::Build, 100, "构建完成");
 
+    // v0.9.6（预防计划 P1-1）：安装后强制收敛 profile。
+    //
+    // 背景（2026-09-16 审计）：GitHub 通道安装 = 全新 clone + pnpm install/build，
+    // 而用户 profile（~/.dsh/profiles/web）的 node_modules 由 pnpm 按旧安装期的
+    // 依赖树维护；跨大版本（0.1.5 → 0.1.6）时 workspace 内部包拓扑可能变化，
+    // dsh 启动期的 profile 依赖闭环解析（healProfilesModuleFallback）撞上
+    // 「半旧半新」的中间态时，个别 bundle 行（实测 dsh-workspace）会静默
+    // pending → Sessions/工作区不可用（entries did not activate）。
+    //
+    // 官方收敛通道：`dsh plugin install`（无 spec）= 在 profile 目录按 lockfile
+    // 重新 pnpm install 并对账 dsh.profile.bundles（apps/cli/src/plugin.ts），
+    // 幂等、无包变更时近似 no-op。装完即跑一次，确保 profile 与新安装一致后再
+    // 让用户启动。
+    //
+    // 失败策略：只告警不阻断——dsh 本体已构建成功，收敛失败（如 registry 不可达）
+    // 不影响启动器可用性；后续「启动健康审查」（process.rs P0-1）会兜底检出
+    // pending 并自动重启。
+    logger.info("安装后收敛 profile（dsh plugin install，对账依赖与 bundles）…");
+    logger.progress("github", InstallPhase::Install, 95, "收敛 profile…");
+    let converge_args = vec![
+        "plugin".to_string(),
+        "--profile".to_string(),
+        crate::core::dshhome::MANAGED_PROFILE.to_string(),
+        "install".to_string(),
+    ];
+    match crate::core::profile::run_dsh(&converge_args, crate::core::profile::MUTATION_TIMEOUT) {
+        Ok(out) if out.status.success() => {
+            logger.info("profile 收敛完成");
+        }
+        Ok(out) => {
+            let stderr = crate::core::text::decode(&out.stderr);
+            let tail: String = stderr
+                .lines()
+                .rev()
+                .take(8)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            logger.warn(&format!(
+                "profile 收敛未成功（退出码 {}），继续安装流程；若启动后功能缺失请查看日志。{}",
+                out.status.code().unwrap_or(-1),
+                if tail.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("\nstderr 尾部:\n{tail}")
+                }
+            ));
+        }
+        Err(e) => {
+            logger.warn(&format!("profile 收敛执行失败（继续安装流程）: {}", e.message));
+        }
+    }
+
     // v0.2.3：创建全局 dsh shim（加入 npm 全局 bin 目录），
     // 使 `dsh` 命令全局可用并指向本安装目录（否则启动报 program not found）
     install_global_shim(logger)?;

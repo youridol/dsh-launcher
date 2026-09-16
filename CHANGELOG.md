@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.9.6] - 2026-09-16
+
+### 修复（依据 2026-09-16 dsh-v0.1.6-alpha.1 升级故障审计）
+
+- 故障现象：升级 dsh 0.1.6-alpha.1 后（GitHub 通道），dsh 启动显示"已就绪"，但 Web UI
+  的工作区与 Sessions 面板全部不可访问。dsh stderr 记
+  `5 entries did not activate`：session-controller / workspace-controller / ui-git-graph /
+  ui-task-board 等 pending（waiting for service: workspaceRegistry）。
+  实测 RPC（带 token）返回 `gateway/service-unavailable: sessionController is unavailable`。
+- 数据无损：sessions/（74 MB，session.v3.jsonl.zstd）与 storages/workspace.json
+  （domain v2，schema 与 0.1.6 一致）全部完好；健康实例启动后 session/list 完整返回。
+- 成因（证据链见当日审计记录）：切通道安装（pnpm install/build + 插件自动同步失败 2 个
+  未阻断）与 dsh 启动期 profile 依赖闭环解析存在时序竞争；叠加启动器旧停止路径仅
+  等待 1 秒即 taskkill /F 强杀，留下进程级残留（task-board ledger-v2.lock 实测残留，
+  导致 ui-task-board `ledger is already owned by process <pid>`）。健康审查缺失使
+  "端口监听 ≠ 服务健康"的失败实例被标为 Running。
+
+### 变更（预防计划 P0/P1/P2 落地）
+
+- **P0-1 启动健康审查（process.rs）**：`spawn_startup_probe` 在端口就绪后增加 3 秒
+  宽限窗口扫描本次启动的 stderr 落盘文件（每次启动截断重建，故内容即本次输出），
+  命中 dsh `auditStartupEntries` 固定措辞 `entries did not activate`（含 `): pending` /
+  `): failed` / `failed to import` 明细）即升级为 Error 日志（附最多 16 行明细，可直接
+  定位 pending 的服务）并**请求自动重启一次**（探活线程置请求位，对账线程消费执行；
+  `pending_restart_done` 门闩保证只重试一次，重启后仍 pending 判定为持久性问题不再
+  循环重启）。
+- **P0-2 停止流程加固（process.rs）**：优雅等待 1s → 10s（300ms 轮询探测；dsh 的
+  cordis shutdown waterfall 实测 3-8s）；优雅退出与强杀路径均补充分支日志；强杀/
+  清剿后新增 `cleanup_stale_dsh_locks`：清理 `$DSH_HOME/task-board/ledger-v2.lock`
+  等已知残留锁——仅当锁内宿主 pid 已死亡（或内容不可解析）才删，宿主仍活（疑似外部
+  dsh 实例）则跳过并告警，不破坏活实例互斥；幂等，无锁文件零开销。
+- **P1-1 安装后强制收敛（github.rs）**：GitHub 通道 clone+build 完成后、创建 shim 前，
+  执行一次官方收敛通道 `dsh plugin install --profile web`（按 lockfile 重新
+  pnpm install 并对账 dsh.profile.bundles，幂等），确保 profile 依赖闭包与新安装一致
+  后再让用户启动，消除 pnpm 半状态竞态。失败只告警不阻断（dsh 本体已构建成功；启动
+  健康审查 P0-1 会兜底检出 pending）。
+- **P1-2 同步失败不静默、不带病重启（lib.rs / plugin/mod.rs）**：① 自动同步存在失败
+  项时升级为 Error 日志并列出失败包名与处置指引（此前仅 Info"成功 0，失败 2"）；②
+  `plugin::sync` 存在失败项时**跳过自动重启 dsh**（避免以半更新状态的 profile 启动
+  dsh——审计案例诱因之一），提示重试失败项或执行「收敛」后手动启动。
+- **P2 诊断透明化**：健康审查日志附带 did-not-activate 明细（服务名 + 等待原因），
+  修复 dsh 0.1.6 中 workspace 行自身失败不出现在汇总列表、只能靠下游 pending 间接
+  推断的诊断盲区。
+- 新增单测 2 项：`parse_lock_holder_pid`（实测锁样本/无 pid/非数字/垃圾输入）、
+  stderr 未激活匹配逻辑（现场样本 + 健康样本）。
+- 验证：`cargo check --all-targets` 0 错误 0 警告；`cargo test --lib` 219/219 通过；
+  `npx tsc --noEmit` 0 错误；`npm run build` 成功（451.68 KB / gzip 140.15 kB）；
+  集成测试 plugin_pipeline / starting_convergence_e2e / config_default 全过。
+
 ## [0.9.5] - 2026-09-12
 
 ### 变更

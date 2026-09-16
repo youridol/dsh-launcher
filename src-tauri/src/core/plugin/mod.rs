@@ -1326,7 +1326,20 @@ pub fn sync(
     if let Err(e) = registry.save() {
         logger.warn(&format!("保存插件注册表失败: {e}"));
     }
-    let restarted = restart_if_needed(process, logger, was_running);
+    // v0.9.6（预防计划 P1-2）：存在失败项时不自动重启。
+    // 失败 = profile 处于半更新状态（部分包已换版、部分失败回滚），此时重启 dsh
+    // 会让它带着不一致的依赖闭包启动 —— 2026-09-16 审计案例（dsh 0.1.6 升级后
+    // workspace 行 pending → Sessions/工作区不可访问）的诱因之一。让用户在全部
+    // 重试成功（或显式收敛）后再启动，风险面更小。
+    let failed = results.iter().filter(|item| item.result == "failed").count();
+    let restarted = if failed > 0 {
+        logger.warn(&format!(
+            "同步存在 {failed} 个失败项，跳过自动重启 dsh（避免以半更新状态启动）；请在插件面板重试失败项或执行「收敛」，成功后再手动启动"
+        ));
+        false
+    } else {
+        restart_if_needed(process, logger, was_running)
+    };
     Ok(SyncReport {
         applied: true,
         restarted,
