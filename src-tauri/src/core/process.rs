@@ -279,7 +279,7 @@ impl ProcessManager {
         // `cd /d <安装目录> && pnpm dsh %*`；当安装目录被卸载/清空（残留空目录）时，pnpm
         // 找不到本地 dsh 定义 → 把 dsh 当外部命令 → 递归命中 dsh.cmd → pnpm 递归爆炸
         // （cmd → node(pnpm) → cmd → ... 指数级，实测 10 秒积累数百 node.exe）。
-        // 故改用 probe_dsh_command() 纯静态解析（读文件内容 + 目录存在性，零进程开销）。
+        // 故改用 resolve_dsh() 纯静态解析（读文件内容 + 目录存在性，零进程开销）。
         let github_dir = crate::core::github::github_clone_dir();
         let clone_ok = github_dir.join("apps/cli/src/bin.ts").exists();
         let resolved = crate::core::github::resolve_dsh();
@@ -299,13 +299,16 @@ impl ProcessManager {
         }
         let mut cmd;
         if dsh_in_path && !shim_owned {
-            // PATH 中 dsh 为真实 npm 全局包 → 用解析到的 shim 绝对路径启动。
-            // 不能用 `cmd /C dsh`：PATH 首位可能是陈旧损坏 shim，会遮蔽 npm shim。
-            let shim_path = resolved
-                .shim_path
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| std::path::PathBuf::from("dsh"));
+            // PATH 中 dsh 为真实 npm 全局包（resolve_dsh 已跳过损坏自家 shim）→
+            // 用解析到的 shim 绝对路径启动。不能用 `cmd /C dsh`：PATH 首位可能是
+            // 陈旧损坏 shim，会遮蔽 npm shim。
+            let shim_path = match resolved.shim_path {
+                Some(path) => path,
+                None => {
+                    // 逻辑上不可达（Foreign/OwnedShimOk 必有 shim_path）；防御式报错。
+                    return Err("dsh 入口解析异常（可执行 shim 缺失），请在版本管理中重新安装 dsh".to_string());
+                }
+            };
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Info,
@@ -323,15 +326,18 @@ impl ProcessManager {
             };
             self.logger.log(LogSource::Launcher, LogLevel::Info, &msg);
             cmd = direct_node_cmd(&github_dir, port);
-        } else if dsh_in_path {
-            // PATH 中有 dsh 且不是 npm 包（本启动器 shim 特征），但安装目录已不存在
+        } else if shim_owned {
+            // 自家 shim 指向的目录 package.json/apps 存在（resolve_dsh 判 OwnedShimOk），
+            // 但缺少源码入口 apps/cli/src/bin.ts（半克隆/被破坏）→ 不能直接 node 启动，
+            // 也不能执行 shim（会 pnpm 递归）。
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Error,
-                &format!("dsh.cmd 指向的 GitHub 安装目录不存在: {}", github_dir.display()),
+                &format!("dsh 安装目录不完整（缺 apps/cli/src/bin.ts）: {}", github_dir.display()),
             );
-            return Err("dsh 安装目录缺失（GitHub shim 指向的目录已不存在），请在版本管理中重新安装 dsh".to_string());
+            return Err("dsh 安装目录不完整（缺少源码入口），请在版本管理中重新安装 dsh".to_string());
         } else {
+            // 无 GitHub 源码目录，也无任何可用 PATH dsh（None/OwnedShimBroken 已在上方处理）
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Error,

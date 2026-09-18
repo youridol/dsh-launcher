@@ -218,20 +218,15 @@ fn uninstall_github_channel(
     } else {
         logger.info("GitHub 源码目录不存在，跳过清理");
     }
-    // 2. 清理全局 dsh.cmd shim（GitHub 安装时创建的；npm 全局包安装时 npm 会写自己的）
-    let shim = core_github::global_shim_path();
-    if let Some(p) = shim {
-        if p.exists() {
-            match std::fs::remove_file(&p) {
-                Ok(_) => logger.info(&format!("已删除全局 dsh 命令: {}", p.display())),
-                Err(e) => logger.warn(&format!("删除 dsh.cmd shim 失败（继续）: {e}")),
-            }
-        }
-    }
-    // 3. 清理 PATH 其他目录中的陈旧 GitHub shim（历史遗留：早期版本写到与当前
-    //    npm prefix 不同的 PATH 目录，卸载只删当前 prefix 会漏删 → 陈旧 shim 遮蔽
-    //    npm 全局包 dsh.cmd）。仅删「指向已删除目录」的，仍有效的不碰。
-    core_github::remove_stale_github_shims(logger);
+    // 2. 清理全局 dsh.cmd shim（GitHub 安装时创建的；npm 全局包安装时 npm 会写自己的）。
+    //    用 remove_owned_github_shims 而非只删 npm prefix 下的那个：早期版本把自家 shim
+    //    写到过**与当前 `npm prefix -g` 不同的 PATH 目录**（实测
+    //    `C:\home\<user>\.npm-global\dsh.cmd`），只删当前 prefix 会漏删，残留的自家 shim
+    //    排在 PATH 首位会遮蔽随后 npm 安装的真实 shim → 插件面板 `dsh --dump-config`
+    //    报「系统找不到指定的路径」（退出码 1）。此刻已切离 GitHub 通道，删除**全部**
+    //    自家 GitHub shim 安全：即便第 1 步源码目录删除失败（被占用），也不会再留下
+    //    指向它的失效 shim。
+    core_github::remove_owned_github_shims(logger);
     Ok(())
 }
 

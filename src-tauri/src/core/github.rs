@@ -537,7 +537,7 @@ pub fn install_version(
 /// 目标：`dsh` 命令在任意目录可用（PATH 无需额外配置）。
 fn install_global_shim(logger: &Arc<Logger>) -> Result<(), String> {
     let dest = github_clone_dir();
-    let bin_dir = npm_global_bin_dir();
+    let bin_dir = npm_prefix_dir();
     fs::create_dir_all(&bin_dir).map_err(|e| format!("创建全局 bin 目录失败: {e}"))?;
 
     // dsh.cmd：cd 到安装目录后执行 pnpm dsh，透传参数
@@ -550,17 +550,6 @@ fn install_global_shim(logger: &Arc<Logger>) -> Result<(), String> {
     logger.info(&format!("已创建全局 dsh 命令: {} → 安装目录", shim_path.display()));
     Ok(())
 }
-
-/// 全局 dsh.cmd shim 路径（卸载时清理用）
-pub fn global_shim_path() -> Option<PathBuf> {
-    let p = npm_global_bin_dir().join("dsh.cmd");
-    if p.exists() {
-        Some(p)
-    } else {
-        None
-    }
-}
-
 /// PATH 中的 dsh 命令的可安全执行性判定结果
 ///
 /// 背景（v0.4.6 修复进程爆炸）：dsh.cmd shim 内容是
@@ -601,12 +590,7 @@ pub struct ResolvedDsh {
 /// 命中陈旧 shim 即判 `OwnedShimBroken` 并短路 → npm 安装成功却仍报「未安装/安装目录
 /// 缺失」。此处改为遍历全部条目：损坏的本启动器 shim 被跳过，不遮蔽其后的 npm shim。
 pub fn resolve_dsh() -> ResolvedDsh {
-    let Some(paths) = list_dsh_cmd_paths() else {
-        return ResolvedDsh {
-            kind: DshProbe::None,
-            shim_path: None,
-        };
-    };
+    let paths = list_dsh_cmd_paths();
     // 先读取每个候选的内容与目标目录有效性，再交纯函数统一决策（便于单测覆盖
     // 「陈旧 shim 不遮蔽 npm shim」的回归场景）。
     let mut candidates: Vec<(bool, String, bool)> = Vec::with_capacity(paths.len());
@@ -668,63 +652,94 @@ pub fn probe_dsh_command() -> DshProbe {
     resolve_dsh().kind
 }
 
-/// 执行 `where dsh.cmd` 并返回 PATH 中全部 dsh.cmd 绝对路径（无则 None）。
-fn list_dsh_cmd_paths() -> Option<Vec<PathBuf>> {
-    let mut probe = command::hidden_cmd("where");
-    probe.arg("dsh.cmd");
-    let out = probe.output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = crate::core::text::decode(&out.stdout);
-    let paths: Vec<PathBuf> = text
-        .lines()
-        .map(|l| PathBuf::from(l.trim()))
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect();
-    if paths.is_empty() {
-        None
-    } else {
-        Some(paths)
-    }
-}
-
-/// 清理 PATH 所有目录中指向**已失效安装目录**的本启动器 GitHub shim。
+/// 枚举 PATH 中全部 dsh.cmd 绝对路径，按 PATH 顺序去重（大小写不敏感）。
 ///
-/// 历史遗留（BUG 根因）：早期版本可能把 GitHub shim 写到与当前 `npm prefix -g` 不同的
-/// PATH 目录，而卸载只删当前 prefix 下的 shim → 陈旧 shim 残留在 PATH 首位、遮蔽 npm
-/// 全局包生成的 dsh.cmd。此处遍历 PATH 全部目录，仅删除「内容为本启动器 GitHub shim 且
-/// 指向目录已不存在/不完整」的陈旧 shim；仍有效的一律不碰。
-pub fn remove_stale_github_shims(logger: &Logger) {
-    let Ok(path_var) = std::env::var("PATH") else {
-        return;
-    };
-    for dir in std::env::split_paths(&path_var) {
+/// **统一入口**：`resolve_dsh`（解析可执行 shim）与 `remove_*_github_shims`（清理陈旧
+/// shim）共用同一套枚举，避免历史上「一处 `where dsh.cmd`、一处 `env::PATH`」两套来源
+/// 不一致（清理看得到、解析看不到，反之亦然）。直接扫描 PATH 目录，**不 spawn `where`**：
+/// 行为确定、省一个子进程；为与 `command::hidden_cmd` 的子进程 PATH 保持一致，额外纳入
+/// 启动器注入的用户级 node 目录（分发机器上该目录不在本进程 PATH 快照中）。
+fn list_dsh_cmd_paths() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(node_dir) = crate::core::pathutil::node_dir_injection() {
+        dirs.push(PathBuf::from(node_dir));
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        dirs.extend(std::env::split_paths(&path_var).filter(|d| !d.as_os_str().is_empty()));
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
         let shim = dir.join("dsh.cmd");
         if !shim.is_file() {
             continue;
         }
+        let key = shim.to_string_lossy().to_lowercase();
+        if seen.insert(key) {
+            out.push(shim);
+        }
+    }
+    out
+}
+
+/// 一个 dsh.cmd 内容是否为「本启动器 GitHub shim 且已失效」。
+/// 失效 = 指向目录已不存在/不完整，或 shim 内容无法解析出目标目录。
+fn stale_owned_shim(content: &str) -> bool {
+    if !shim_content_is_ours(content) {
+        return false;
+    }
+    match extract_shim_target_dir(content) {
+        Some(target) => !(target.join("package.json").exists() && target.join("apps").is_dir()),
+        None => true,
+    }
+}
+
+/// 按谓词删除给定 dsh.cmd 路径中命中的项，返回已删除路径（供日志/测试断言）。
+/// 与 [`list_dsh_cmd_paths`] 解耦：测试可直接传入临时目录下的 shim。
+fn remove_shims_where(
+    logger: &Logger,
+    shims: impl IntoIterator<Item = PathBuf>,
+    pred: impl Fn(&str) -> bool,
+) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    for shim in shims {
         let Ok(content) = fs::read_to_string(&shim) else {
             continue;
         };
-        if !shim_content_is_ours(&content) {
+        if !pred(&content) {
             continue;
         }
-        let stale = match extract_shim_target_dir(&content) {
-            Some(target) => !(target.join("package.json").exists() && target.join("apps").is_dir()),
-            // 无法解析目标目录 = 损坏 shim
-            None => true,
-        };
-        if stale {
-            match fs::remove_file(&shim) {
-                Ok(_) => logger.info(&format!("已删除陈旧 GitHub shim: {}", shim.display())),
-                Err(e) => logger.warn(&format!(
-                    "删除陈旧 GitHub shim 失败（继续）: {}: {e}",
-                    shim.display()
-                )),
+        match fs::remove_file(&shim) {
+            Ok(_) => {
+                logger.info(&format!("已删除陈旧 dsh shim: {}", shim.display()));
+                removed.push(shim);
             }
+            Err(e) => logger.warn(&format!(
+                "删除陈旧 dsh shim 失败（继续）: {}: {e}",
+                shim.display()
+            )),
         }
     }
+    removed
+}
+
+/// 清理 PATH 中**全部**本启动器 GitHub shim。
+///
+/// 用于「切离 GitHub 通道」（install npm 前置 / 卸载）：此时不再需要任何 GitHub shim，
+/// 无论其指向目录当前是否仍有效——即便源码目录删除失败（被占用），残留的自家 shim
+/// 也不会再遮蔽真实 npm shim。
+pub fn remove_owned_github_shims(logger: &Logger) -> Vec<PathBuf> {
+    remove_shims_where(logger, list_dsh_cmd_paths(), shim_content_is_ours)
+}
+
+/// 清理 PATH 中**已失效**的本启动器 GitHub shim。
+///
+/// 用于启动自愈 / 卸载：只删损坏的（指向目录已不存在/不完整），仍指向有效安装目录的
+/// 一律不碰。历史遗留（BUG 根因）：早期版本可能把 GitHub shim 写到与当前
+/// `npm prefix -g` 不同的 PATH 目录，卸载只删当前 prefix 会漏删 → 陈旧 shim 残留在
+/// PATH 首位、遮蔽 npm 全局包生成的 dsh.cmd。
+pub fn remove_stale_github_shims(logger: &Logger) -> Vec<PathBuf> {
+    remove_shims_where(logger, list_dsh_cmd_paths(), stale_owned_shim)
 }
 
 /// 从本启动器 dsh.cmd shim 内容中提取其 cd 目标安装目录（无则 None）
@@ -745,11 +760,6 @@ fn extract_shim_target_dir(content: &str) -> Option<std::path::PathBuf> {
 /// （install_global_shim 写入；npm 全局包生成的 dsh.cmd 指向 node_modules，不含这两个特征）
 fn shim_content_is_ours(content: &str) -> bool {
     content.contains("github-dsh") && content.contains("pnpm dsh")
-}
-
-/// 定位 npm 全局 bin 目录（Windows：npm 把 .cmd 直接放 prefix 目录，PATH 条目即 prefix）
-fn npm_global_bin_dir() -> PathBuf {
-    npm_prefix_dir()
 }
 
 /// npm 全局 prefix 目录（`npm prefix -g`；失败回退到 pnpm 全局目录）
@@ -792,6 +802,7 @@ mod tests {
     use super::parse_git_percent;
     use super::parse_tags_from_ls_remote;
     use super::shim_content_is_ours;
+    use std::fs;
 
     #[test]
     fn test_parse_git_percent() {
@@ -954,5 +965,83 @@ CALL "C:\Users\Administrator\AppData\Local\dsh-launcher\toolchain\node\node_modu
         let (kind, idx) = select_usable_shim([]);
         assert_eq!(kind, DshProbe::None);
         assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn test_stale_owned_shim_predicate() {
+        use super::stale_owned_shim;
+        let broken_owned = "@echo off\r\ncd /d \"C:\\Users\\A\\Local\\dsh-launcher\\github-dsh\\deepseek-harness\"\r\npnpm dsh %*\r\n";
+        let npm = "@ECHO off\r\nSETLOCAL\r\nCALL \"...node_modules\\@deepseek-ai\\dsh\\bin\\dsh.cmd\" %*\r\n";
+        // npm shim 永不算「陈旧自家 shim」
+        assert!(!stale_owned_shim(npm));
+        assert!(!stale_owned_shim(""));
+        // 自家 shim 但无法解析目标目录（含 github-dsh 特征、无 cd /d 行）→ 陈旧
+        assert!(stale_owned_shim("@echo off\r\nrem github-dsh\r\npnpm dsh %*\r\n"));
+        // 自家 shim 指向不存在的目录 → 陈旧
+        assert!(stale_owned_shim(broken_owned));
+    }
+
+    /// 文件系统级回归：删除函数必须「删陈旧自家 shim / 保留 npm shim / 保留有效自家 shim」。
+    ///
+    /// 复现 npm 通道 BUG 的清理语义：PATH 首位陈旧自家 shim → 必须删；其后的 npm shim
+    /// → 必须保留；仍指向有效安装目录的自家 shim → 启动自愈不得误删。
+    #[test]
+    fn test_remove_shims_filesystem() {
+        use super::{remove_shims_where, shim_content_is_ours, stale_owned_shim};
+        let logger = crate::core::logging::Logger::init();
+        let root = std::env::temp_dir().join(format!("dsh-shim-clean-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let stale = root.join("stale").join("dsh.cmd");
+        let npm = root.join("npm").join("dsh.cmd");
+        let valid = root.join("valid").join("dsh.cmd");
+        // 有效自家 shim：目标目录含 package.json + apps（且路径含 github-dsh 特征）
+        let valid_target = root.join("github-dsh").join("deepseek-harness");
+        fs::create_dir_all(valid_target.join("apps")).unwrap();
+        fs::write(valid_target.join("package.json"), "{}").unwrap();
+        for dir in [stale.parent().unwrap(), npm.parent().unwrap(), valid.parent().unwrap()] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            &stale,
+            "@echo off\r\ncd /d \"C:\\nonexistent\\dsh-launcher\\github-dsh\\deepseek-harness\"\r\npnpm dsh %*\r\n",
+        )
+        .unwrap();
+        fs::write(
+            &npm,
+            "@ECHO off\r\nSETLOCAL\r\nCALL \"...node_modules\\@deepseek-ai\\dsh\\bin\\dsh.cmd\" %*\r\n",
+        )
+        .unwrap();
+        fs::write(
+            &valid,
+            format!(
+                "@echo off\r\ncd /d \"{}\"\r\npnpm dsh %*\r\n",
+                valid_target.display()
+            ),
+        )
+        .unwrap();
+
+        // 启动自愈语义：只删指向已失效目录的自家 shim
+        let removed = remove_shims_where(
+            &logger,
+            [stale.clone(), npm.clone(), valid.clone()],
+            stale_owned_shim,
+        );
+        assert_eq!(removed, vec![stale.clone()], "只应删除指向已失效目录的自家 shim");
+        assert!(!stale.exists(), "陈旧 shim 应已删除");
+        assert!(npm.exists(), "npm shim 必须保留");
+        assert!(valid.exists(), "有效自家 shim 必须保留");
+
+        // 切离 GitHub 通道语义：删全部自家 shim（npm shim 仍保留）
+        let removed = remove_shims_where(
+            &logger,
+            [npm.clone(), valid.clone()],
+            shim_content_is_ours,
+        );
+        assert_eq!(removed, vec![valid.clone()]);
+        assert!(npm.exists(), "npm shim 永不被 remove_owned_github_shims 删除");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

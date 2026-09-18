@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.9.11] - 2026-09-19
+
+### 修复（npm 版本下插件面板 `dsh --dump-config` 报「系统找不到指定的路径」）
+
+- 现象（用户报告）：npm 通道安装后，插件管理面板报
+  `dsh --dump-config 失败（退出码 1）：系统找不到指定的路径。`（启停被禁用，仅可查看）；
+  GitHub 源码编译版本则正常。
+- 根因（与 0.9.10 同源，但漏了插件管理这条路径）：`core/profile.rs` 的
+  `build_dsh_command` 在 `DshEntry::Path` 分支仍用 `hidden_cmd("dsh")`，即
+  `cmd /C dsh ...` 依赖 PATH 解析；而 PATH 首位是早期版本遗留、指向已删除
+  github-dsh 目录的陈旧 GitHub shim，`cmd /C dsh` 命中它 → `pnpm dsh` 在无效目录
+  执行 → 「系统找不到指定的路径」+ 退出码 1，真正的 npm shim 排在后面被遮蔽。
+  实测：`dsh --profile web --dump-config`（PATH 首位）退出码 1；改用 npm shim 绝对
+  路径则退出码 0、输出 568 行合法 dump-config。
+- 修复：`DshEntry::Path` 携带 `resolve_dsh()` 解析出的 shim **绝对路径**，
+  `build_dsh_command` 用它执行（不再 `cmd /C dsh`）；`resolve_entry` 改为
+  GitHub 源码目录优先，其次取解析到的可用 shim，最后才区分「只有损坏自家 shim」
+  （保留防 pnpm 递归爆炸的具名提示）。
+
+### 优化（陈旧 shim 处理：启动自愈 + 统一枚举 + 彻底清理）
+
+- **启动自愈**（`lib.rs`）：启动时（托盘创建后）执行 `remove_stale_github_shims`，
+  自动清除 PATH 中指向已失效目录的自家 GitHub shim。此前只在「切通道/卸载」时
+  清理，历史遗留 shim 必须再切一次通道才会消失；现启动即自愈，仍有效的 shim 不碰。
+- **统一枚举**（`github.rs`）：`list_dsh_cmd_paths` 改为直接扫描 `PATH` 目录（不再
+  spawn `where dsh.cmd`），解析与清理共用同一套枚举，消除「一处 `where`、一处
+  `env::PATH`」两套来源不一致；额外纳入启动器注入的用户级 node 目录，与
+  `hidden_cmd` 子进程 PATH 对齐；按大小写不敏感去重。
+- **彻底清理**：新增 `remove_owned_github_shims`（删**全部**自家 GitHub shim），
+  `uninstall_github_channel`（切离 GitHub 通道）改用它——即便源码目录删除失败
+  （被占用），也不会留下指向它的失效 shim 遮蔽 npm shim；`remove_stale_github_shims`
+  仍只删失效项，供启动自愈使用。
+- **死代码清除**：`global_shim_path` / `npm_global_bin_dir` 已无调用者，删除
+  （复用 `npm_prefix_dir` 唯一实现）。
+- 测试：新增 `stale_owned_shim` 谓词单测、`remove_shims_where` 文件系统级回归
+  （删陈旧自家 shim / 保留 npm shim / 保留有效自家 shim）；lib 单测 226/226。
+- 严格审查补充（同日）：
+  - **CLI 入口自愈**（`cli.rs`）：`dsh-launcher plugin ...` 等无 GUI 调用同样先执行
+    `remove_stale_github_shims`（此前只在 GUI `lib.rs` 启动时自愈，CLI 用户无法自愈）。
+  - **消除双重扫描**（`profile.rs`）：`resolve_entry` 改为单次 `resolve_dsh()` 同时取
+    「类型 + 可用 shim 绝对路径」（此前先 `resolve_dsh()` 取路径、无果时又调
+    `probe_dsh_command()` → 内部再调一次 `resolve_dsh()`，同一次判断扫两遍 PATH）。
+  - **修正 process.rs 启动分支**：删去因 `resolve_dsh` 提前归类而不可达的
+    `else if dsh_in_path` 分支，补回真实可达的「自家 shim 指向目录不完整
+    （缺 apps/cli/src/bin.ts）」具名错误；`shim_path` 由 `unwrap_or("dsh")`
+    改为显式 `match`（消除回退到裸 `dsh` 的隐蔽分支）。
+  - 验证：在真实机器上以探针实测：`resolve_dsh()` 正确选中 npm shim（`Foreign`）、
+    `remove_stale_github_shims()` 精确删除陈旧 shim 且二次运行幂等；npm shim 绝对
+    路径 `--profile web --dump-config` 退出码 0、614 行合法输出。
+- 验证：`cargo check --all-targets` 0 错误 0 警告；`cargo test --lib` 226/226；
+  `npx tsc --noEmit` 干净；`npm run build` 成功；`npx tauri build` 产出 NSIS 安装包。
+
 ## [0.9.10] - 2026-09-19
 
 ### 修复（npm 通道安装成功后仍报「未安装/安装目录缺失」：陈旧 GitHub shim 遮蔽 npm shim）

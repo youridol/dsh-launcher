@@ -80,6 +80,10 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let logger = Arc::new(Logger::init());
+    // 陈旧 dsh shim 自愈（与 GUI 启动路径一致）：CLI 用户（`dsh-launcher plugin ...`）
+    // 同样可能受 PATH 首位陈旧 GitHub shim 遮蔽（`dsh --dump-config` 报「系统找不到
+    // 指定的路径」）。先清掉指向已失效目录的自家 shim，仍有效的不碰。
+    crate::core::github::remove_stale_github_shims(&logger);
     let process = Arc::new(ProcessManager::new(Arc::clone(&logger)));
     let port = AppConfig::load().port;
     if port != 0 && crate::core::port::is_port_in_use(port) {

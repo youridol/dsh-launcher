@@ -218,6 +218,12 @@ pub fn run() {
                 }
                 // 创建系统托盘
                 core::tray::setup_tray(app.handle(), Arc::clone(&process), Arc::clone(&logger));
+                // 陈旧 dsh shim 自愈（修 npm 通道「安装成功却报未安装」的根因）：
+                // PATH 中可能存在早期版本写到其它目录、且指向已删除 github-dsh 的
+                // GitHub shim，它排在 PATH 首位会遮蔽真实的 npm shim（`cmd /C dsh` /
+                // `dsh --dump-config` 均命中它而失败）。启动时先清掉这些已失效的自家
+                // shim，用户无需再切一次通道即可自愈；仍有效的 shim 不碰。
+                core::github::remove_stale_github_shims(&logger);
                 // v0.3.5：启动时探测配置端口——dsh 已在运行（上次退出驻留）则恢复状态
                 // v0.4.13（审计修复 2.2）：adopt_running 内部先校验监听进程是否形如
                 // dsh；端口被非 dsh 进程占用时返回 false 且仅落警告（不标记 Running）。

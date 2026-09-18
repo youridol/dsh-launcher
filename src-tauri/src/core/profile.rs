@@ -37,8 +37,13 @@ pub struct ProfileManifest {
 pub enum DshEntry {
     /// GitHub 通道：源码目录 + node 直接启动
     SourceDir { dir: PathBuf, node: PathBuf },
-    /// PATH 中的 dsh（npm 全局包或可用的自家 shim）
-    Path,
+    /// PATH 中的 dsh（npm 全局包或可用的自家 shim）。
+    ///
+    /// `shim` 是 `resolve_dsh()` 解析出的**绝对路径**——必须用它执行，
+    /// 不能用 `cmd /C dsh`：PATH 首位可能是指向已删除目录的陈旧 GitHub shim
+    /// （见 core/github.rs `resolve_dsh` 注释），`cmd /C dsh` 会命中它并报
+    /// 「系统找不到指定的路径」（退出码 1），而真正的 npm shim 排在后面。
+    Path { shim: PathBuf },
 }
 
 /// GitHub 通道安装目录（存在源码入口时才算可用）。
@@ -75,16 +80,11 @@ pub fn node_exe() -> Option<PathBuf> {
 
 /// 解析 dsh 入口；不可安全执行时返回 `DshNotInstalled`。
 ///
-/// 复用 `github::probe_dsh_command()` 的静态判定：自家 shim 指向损坏目录时
+/// 复用 `github::resolve_dsh()` 的静态判定：自家 shim 指向损坏目录时
 /// **绝不执行** dsh（否则 pnpm 递归进程爆炸，见 core/github.rs 的说明）。
 pub fn resolve_entry() -> Result<DshEntry, PluginError> {
-    let probe = github::probe_dsh_command();
-    if probe == DshProbe::OwnedShimBroken {
-        return Err(PluginError::new(
-            PluginErrorKind::DshNotInstalled,
-            "dsh 安装目录缺失（GitHub shim 指向的目录已不存在或为空），请重新安装 dsh",
-        ));
-    }
+    // 1. GitHub 通道源码目录优先：直接 node 启动 bin.ts（进程树浅、token stdout
+    //    实时、taskkill 干净），且完全绕开 PATH 中的任何 dsh.cmd。
     if let Some(dir) = install_dir() {
         let node = node_exe().ok_or_else(|| {
             PluginError::new(
@@ -94,8 +94,19 @@ pub fn resolve_entry() -> Result<DshEntry, PluginError> {
         })?;
         return Ok(DshEntry::SourceDir { dir, node });
     }
-    if probe != DshProbe::None {
-        return Ok(DshEntry::Path);
+    // 2. 无源码目录时看 PATH：`resolve_dsh()` 一次扫描即得「类型 + 可用 shim 绝对路径」
+    //    （已跳过损坏的自家 shim、取第一个可安全执行的）。
+    let resolved = github::resolve_dsh();
+    if let Some(shim) = resolved.shim_path {
+        return Ok(DshEntry::Path { shim });
+    }
+    // 3. 无任何可用入口：区分「只有损坏的自家 shim」（保留防 pnpm 递归爆炸的具名提示）
+    //    与「PATH 无 dsh」。
+    if resolved.kind == DshProbe::OwnedShimBroken {
+        return Err(PluginError::new(
+            PluginErrorKind::DshNotInstalled,
+            "dsh 安装目录缺失（GitHub shim 指向的目录已不存在或为空），请重新安装 dsh",
+        ));
     }
     Err(PluginError::new(
         PluginErrorKind::DshNotInstalled,
@@ -113,8 +124,10 @@ pub fn build_dsh_command(args: &[String]) -> Result<Command, PluginError> {
             cmd.args(args);
             Ok(cmd)
         }
-        DshEntry::Path => {
-            let mut cmd = crate::core::command::hidden_cmd("dsh");
+        DshEntry::Path { shim } => {
+            // 用解析到的 shim **绝对路径**执行（不能用 `cmd /C dsh`：PATH 首位
+            // 可能是陈旧损坏 shim，会遮蔽 npm shim，见 DshEntry::Path 注释）。
+            let mut cmd = crate::core::command::hidden_cmd(&shim);
             cmd.args(args);
             Ok(cmd)
         }
