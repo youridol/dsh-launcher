@@ -282,14 +282,14 @@ impl ProcessManager {
         // 故改用 probe_dsh_command() 纯静态解析（读文件内容 + 目录存在性，零进程开销）。
         let github_dir = crate::core::github::github_clone_dir();
         let clone_ok = github_dir.join("apps/cli/src/bin.ts").exists();
-        let probe = crate::core::github::probe_dsh_command();
-        let dsh_in_path = probe != crate::core::github::DshProbe::None;
+        let resolved = crate::core::github::resolve_dsh();
+        let dsh_in_path = resolved.kind != crate::core::github::DshProbe::None;
         let shim_owned = matches!(
-            probe,
+            resolved.kind,
             crate::core::github::DshProbe::OwnedShimOk | crate::core::github::DshProbe::OwnedShimBroken
         );
         // 本启动器 shim 指向损坏目录（被卸载/清空）→ 直接报错，绝不执行 dsh（会递归爆炸）
-        if probe == crate::core::github::DshProbe::OwnedShimBroken {
+        if resolved.kind == crate::core::github::DshProbe::OwnedShimBroken {
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Error,
@@ -299,13 +299,19 @@ impl ProcessManager {
         }
         let mut cmd;
         if dsh_in_path && !shim_owned {
-            // PATH 中 dsh 为真实 npm 全局包 → dsh web --port <p> --no-open
+            // PATH 中 dsh 为真实 npm 全局包 → 用解析到的 shim 绝对路径启动。
+            // 不能用 `cmd /C dsh`：PATH 首位可能是陈旧损坏 shim，会遮蔽 npm shim。
+            let shim_path = resolved
+                .shim_path
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| std::path::PathBuf::from("dsh"));
             self.logger.log(
                 LogSource::Launcher,
                 LogLevel::Info,
                 "PATH 中 dsh 为 npm 全局包，用 dsh web 启动",
             );
-            let mut c = command::hidden_cmd("dsh");
+            let mut c = command::hidden_cmd(&shim_path);
             c.args(["web", "--port", &port.to_string(), "--no-open"]);
             cmd = c;
         } else if clone_ok {

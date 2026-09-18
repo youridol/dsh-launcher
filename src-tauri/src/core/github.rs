@@ -582,43 +582,148 @@ pub enum DshProbe {
     Foreign,
 }
 
+/// PATH 中 dsh 命令的解析结果：类型 + 可安全执行的 shim 绝对路径。
+#[derive(Debug, Clone)]
+pub struct ResolvedDsh {
+    /// 该 shim 的类型（见 [`DshProbe`]）
+    pub kind: DshProbe,
+    /// 可安全执行的 dsh.cmd 绝对路径；`OwnedShimBroken` / `None` 时为 None
+    /// （此时**禁止**执行 dsh，否则触发 pnpm 递归爆炸）。
+    pub shim_path: Option<PathBuf>,
+}
+
+/// 遍历 PATH 中全部 `dsh.cmd` 并解析，返回第一个「可安全执行」的（真实 npm 包 shim，
+/// 或指向有效安装目录的本启动器 shim）。
+///
+/// 背景（BUG：npm 通道安装失败）：PATH 中可能存在**多个** dsh.cmd——例如早期版本把
+/// 本启动器 GitHub shim 写到了与当前 `npm prefix -g` 不同的 PATH 目录，卸载时漏删；
+/// 该陈旧 shim 排在 PATH 首位、指向已删除目录。旧实现只读 `where dsh.cmd` 的**第一行**，
+/// 命中陈旧 shim 即判 `OwnedShimBroken` 并短路 → npm 安装成功却仍报「未安装/安装目录
+/// 缺失」。此处改为遍历全部条目：损坏的本启动器 shim 被跳过，不遮蔽其后的 npm shim。
+pub fn resolve_dsh() -> ResolvedDsh {
+    let Some(paths) = list_dsh_cmd_paths() else {
+        return ResolvedDsh {
+            kind: DshProbe::None,
+            shim_path: None,
+        };
+    };
+    // 先读取每个候选的内容与目标目录有效性，再交纯函数统一决策（便于单测覆盖
+    // 「陈旧 shim 不遮蔽 npm shim」的回归场景）。
+    let mut candidates: Vec<(bool, String, bool)> = Vec::with_capacity(paths.len());
+    for path in &paths {
+        match fs::read_to_string(path) {
+            Ok(content) => {
+                let dir_valid = extract_shim_target_dir(&content)
+                    .map(|dir| dir.join("package.json").exists() && dir.join("apps").is_dir())
+                    .unwrap_or(false);
+                candidates.push((true, content, dir_valid));
+            }
+            // 存在但不可读：非本启动器管理，按外部命令处理（保守安全）
+            Err(_) => candidates.push((false, String::new(), false)),
+        }
+    }
+    let (kind, idx) = select_usable_shim(candidates.iter().map(|(r, c, d)| (*r, c.as_str(), *d)));
+    ResolvedDsh {
+        kind,
+        shim_path: idx.map(|i| paths[i].clone()),
+    }
+}
+
+/// 从 PATH 顺序的候选 shim 序列中选出第一个「可安全执行」的（纯决策函数，供单测）。
+///
+/// 每个候选为 `(内容是否可读, shim 内容, 指向安装目录是否有效)`；返回 `(类型, 选中索引)`。
+/// 索引为 None 表示无可用候选（全部损坏或无候选）。
+fn select_usable_shim<'a>(
+    candidates: impl IntoIterator<Item = (bool, &'a str, bool)>,
+) -> (DshProbe, Option<usize>) {
+    let mut saw_broken = false;
+    for (i, (readable, content, dir_valid)) in candidates.into_iter().enumerate() {
+        if !readable {
+            return (DshProbe::Foreign, Some(i));
+        }
+        if !shim_content_is_ours(content) {
+            // 真实 npm 全局包 shim（内容不含 github-dsh/pnpm dsh）→ 可安全执行
+            return (DshProbe::Foreign, Some(i));
+        }
+        if extract_shim_target_dir(content).is_some() && dir_valid {
+            return (DshProbe::OwnedShimOk, Some(i));
+        }
+        // 目标安装目录缺失/空目录，或 shim 内容异常：跳过，继续找 PATH 中后续 shim
+        saw_broken = true;
+    }
+    (
+        if saw_broken {
+            DshProbe::OwnedShimBroken
+        } else {
+            DshProbe::None
+        },
+        None,
+    )
+}
+
 /// 探测 PATH 中 dsh 命令类型（不执行 dsh，仅静态解析 dsh.cmd 内容 + 目录存在性）。
 /// 必须在任何 `dsh --version` / `dsh web` 之前调用：
 /// 若返回 OwnedShimBroken，继续执行 dsh 会触发 pnpm 递归进程爆炸（见 DshProbe 注释）。
 pub fn probe_dsh_command() -> DshProbe {
+    resolve_dsh().kind
+}
+
+/// 执行 `where dsh.cmd` 并返回 PATH 中全部 dsh.cmd 绝对路径（无则 None）。
+fn list_dsh_cmd_paths() -> Option<Vec<PathBuf>> {
     let mut probe = command::hidden_cmd("where");
     probe.arg("dsh.cmd");
-    let Ok(out) = probe.output() else {
-        return DshProbe::None;
-    };
+    let out = probe.output().ok()?;
     if !out.status.success() {
-        return DshProbe::None;
+        return None;
     }
     let text = crate::core::text::decode(&out.stdout);
-    let Some(first) = text.lines().next() else {
-        return DshProbe::None;
-    };
-    let path = PathBuf::from(first.trim());
-    let Ok(content) = fs::read_to_string(&path) else {
-        // 存在但不可读：非本启动器管理，按外部命令处理（保守安全，不执行判断依据不足）
-        return DshProbe::Foreign;
-    };
-    if !shim_content_is_ours(&content) {
-        // 真实 npm 全局包 shim（内容不含 github-dsh/pnpm dsh）
-        return DshProbe::Foreign;
-    }
-    // 本启动器 shim：解析其指向的安装目录（内容中 cd /d "<dir>"）
-    // 格式：@echo off\r\ncd /d "<github_dir>"\r\npnpm dsh %*\r\n
-    let Some(dir) = extract_shim_target_dir(&content) else {
-        // shim 内容异常（无法解析目标目录）：视为损坏，禁止执行
-        return DshProbe::OwnedShimBroken;
-    };
-    let install_valid = dir.join("package.json").exists() && dir.join("apps").is_dir();
-    if install_valid {
-        DshProbe::OwnedShimOk
+    let paths: Vec<PathBuf> = text
+        .lines()
+        .map(|l| PathBuf::from(l.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    if paths.is_empty() {
+        None
     } else {
-        // 目标安装目录缺失/空目录：执行 dsh 会触发 pnpm 递归爆炸，判定为损坏
-        DshProbe::OwnedShimBroken
+        Some(paths)
+    }
+}
+
+/// 清理 PATH 所有目录中指向**已失效安装目录**的本启动器 GitHub shim。
+///
+/// 历史遗留（BUG 根因）：早期版本可能把 GitHub shim 写到与当前 `npm prefix -g` 不同的
+/// PATH 目录，而卸载只删当前 prefix 下的 shim → 陈旧 shim 残留在 PATH 首位、遮蔽 npm
+/// 全局包生成的 dsh.cmd。此处遍历 PATH 全部目录，仅删除「内容为本启动器 GitHub shim 且
+/// 指向目录已不存在/不完整」的陈旧 shim；仍有效的一律不碰。
+pub fn remove_stale_github_shims(logger: &Logger) {
+    let Ok(path_var) = std::env::var("PATH") else {
+        return;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        let shim = dir.join("dsh.cmd");
+        if !shim.is_file() {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&shim) else {
+            continue;
+        };
+        if !shim_content_is_ours(&content) {
+            continue;
+        }
+        let stale = match extract_shim_target_dir(&content) {
+            Some(target) => !(target.join("package.json").exists() && target.join("apps").is_dir()),
+            // 无法解析目标目录 = 损坏 shim
+            None => true,
+        };
+        if stale {
+            match fs::remove_file(&shim) {
+                Ok(_) => logger.info(&format!("已删除陈旧 GitHub shim: {}", shim.display())),
+                Err(e) => logger.warn(&format!(
+                    "删除陈旧 GitHub shim 失败（继续）: {}: {e}",
+                    shim.display()
+                )),
+            }
+        }
     }
 }
 
@@ -813,5 +918,41 @@ CALL "C:\Users\Administrator\AppData\Local\dsh-launcher\toolchain\node\node_modu
         // 非本启动器 npm shim（无 cd /d 行）→ None
         let npm_shim = "@ECHO off\r\nSETLOCAL\r\nCALL \"...node_modules\\@deepseek-ai\\dsh\\bin\\dsh.cmd\" %*\r\n";
         assert!(extract_shim_target_dir(npm_shim).is_none());
+    }
+
+    #[test]
+    fn test_select_usable_shim_skips_stale_owned_shim() {
+        use super::select_usable_shim;
+        use super::DshProbe;
+        let broken_owned = "@echo off\r\ncd /d \"C:\\Users\\A\\Local\\dsh-launcher\\github-dsh\\deepseek-harness\"\r\npnpm dsh %*\r\n";
+        let npm = "@ECHO off\r\nSETLOCAL\r\nCALL \"...node_modules\\@deepseek-ai\\dsh\\bin\\dsh.cmd\" %*\r\n";
+
+        // 回归场景：PATH 首位是陈旧损坏的 GitHub shim，其后才是 npm 全局包 shim →
+        // 旧实现只读首行会误判 OwnedShimBroken，导致 npm 安装成功却报「未安装」。
+        // 修复后应跳过损坏项，选中 npm shim（Foreign）。
+        let (kind, idx) = select_usable_shim([
+            (true, broken_owned, false), // 指向已删除目录
+            (true, npm, false),
+        ]);
+        assert_eq!(kind, DshProbe::Foreign, "应选中 npm shim 而非被陈旧 shim 遮蔽");
+        assert_eq!(idx, Some(1));
+
+        // 全部为损坏的 GitHub shim → 仍判 OwnedShimBroken（保留防递归爆炸短路）
+        let (kind, idx) = select_usable_shim([
+            (true, broken_owned, false),
+            (true, broken_owned, false),
+        ]);
+        assert_eq!(kind, DshProbe::OwnedShimBroken);
+        assert_eq!(idx, None);
+
+        // 有效 GitHub shim 在前 → 选中 OwnedShimOk
+        let (kind, idx) = select_usable_shim([(true, broken_owned, true), (true, npm, false)]);
+        assert_eq!(kind, DshProbe::OwnedShimOk);
+        assert_eq!(idx, Some(0));
+
+        // 无候选 → None
+        let (kind, idx) = select_usable_shim([]);
+        assert_eq!(kind, DshProbe::None);
+        assert_eq!(idx, None);
     }
 }

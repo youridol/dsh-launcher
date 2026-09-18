@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.9.10] - 2026-09-19
+
+### 修复（npm 通道安装成功后仍报「未安装/安装目录缺失」：陈旧 GitHub shim 遮蔽 npm shim）
+
+- 现象（用户报告）：npm 通道安装 `@deepseek-ai/dsh@0.1.6-alpha.2` 日志显示
+  `added 488 packages in 2m`（npm 调试日志实测 `verbose exit 0` + `info ok`），但版本
+  管理面板仍显示「未安装」，点启动报「dsh 安装目录缺失（GitHub shim 指向的目录已不存在
+  或为空）」。即安装本身成功，是**检测/启动**环节误判。
+- 根因（证据链）：PATH 中可存在**多个** dsh.cmd —— 早期版本把本启动器 GitHub shim 写到
+  了与当前 `npm prefix -g`（`%APPDATA%\npm`）不同的 PATH 目录（实测
+  `C:\home\<user>\.npm-global\dsh.cmd`，9/11 遗留），而卸载 GitHub 通道只删当前
+  prefix 下的 shim → 陈旧 shim 残留在 PATH **首位**、内容指向已删除的 github-dsh 安装
+  目录。`probe_dsh_command()` 只读 `where dsh.cmd` 的**第一行**，命中陈旧 shim 即判
+  `OwnedShimBroken` 并短路 → npm 安装成功却仍报「未安装」。
+- 修复：`core::github` 新增 `resolve_dsh()`，遍历 PATH 中**全部** dsh.cmd，跳过损坏的
+  本启动器 shim，返回第一个可安全执行的（真实 npm 包 shim / 指向有效目录的本启动器
+  shim）及其绝对路径；`probe_dsh_command()` 复用它（保留防 pnpm 递归爆炸的短路语义）。
+- `get_installed_version` / `ProcessManager::start` 改用 `resolve_dsh()` 解析到的
+  **绝对路径**执行 dsh，不再 `cmd /C dsh`（PATH 首位陈旧 shim 会遮蔽 npm shim）。
+- `uninstall_github_channel` 新增 `remove_stale_github_shims()`：卸载 GitHub 通道时遍历
+  PATH 全部目录，删除指向已失效安装目录的陈旧 GitHub shim（仍有效的一律不碰）。
+- 测试：新增 `select_usable_shim` 纯决策函数单测（陈旧 shim 不遮蔽 npm shim / 全损坏仍
+  按 OwnedShimBroken 短路 / 有效 GitHub shim 优先 / 无候选返回 None）；lib 单测
+  224/224 通过。
+- 验证：`cargo check --all-targets` 0 错误 0 警告；`npx tsc --noEmit` 干净；
+  `npm run build` 成功；`npx tauri build` 产出 NSIS 安装包。
+
 ## [0.9.9] - 2026-09-16
 
 ### 修复（插件面板陈旧错误误导：@xmanrui/dsh-im / dshmarket 显示"dsh 安装目录缺失"）

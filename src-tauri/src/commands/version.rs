@@ -90,22 +90,18 @@ pub async fn get_installed_version() -> Result<Option<String>, String> {
             }
             return Ok(Some("github:已安装".to_string()));
         }
-        // 2. 静态解析 PATH 中 dsh.cmd：本启动器 shim 指向损坏目录 → 短路（避免递归爆炸）
-        match crate::core::github::probe_dsh_command() {
-            crate::core::github::DshProbe::OwnedShimBroken => {
-                // 安装目录已被卸载/清空：不执行 dsh（执行会 pnpm 递归爆炸），视为未安装
-                return Ok(None);
-            }
-            crate::core::github::DshProbe::None => {
-                return Ok(None);
-            }
-            // OwnedShimOk（目标目录有效，虽不应在此分支，但执行是安全的）与 Foreign 继续
-            crate::core::github::DshProbe::OwnedShimOk
-            | crate::core::github::DshProbe::Foreign => {}
-        }
-        // 3. PATH 中的 dsh --version（npm 全局）。Windows 上 dsh 是 .cmd shim，
-        //    不能直接 spawn（program not found），必须 cmd.exe /C 包装
-        let mut c = command::hidden_cmd("dsh");
+        // 2. 遍历 PATH 全部 dsh.cmd：找到第一个可安全执行的 shim（真实 npm 包 / 指向
+        //    有效目录的本启动器 shim）。只有损坏 shim（执行会 pnpm 递归爆炸）或
+        //    PATH 无 dsh → 视为未安装，短路。
+        let resolved = crate::core::github::resolve_dsh();
+        let Some(shim_path) = resolved.shim_path else {
+            return Ok(None);
+        };
+        // 3. 用解析到的 shim 绝对路径执行 --version（npm 全局或有效 GitHub shim）。
+        //    Windows 上 dsh 是 .cmd shim，不能直接 spawn（program not found），必须
+        //    cmd.exe /C 包装。**必须用绝对路径**：PATH 首位可能是陈旧损坏 shim，
+        //    直接 `cmd /C dsh` 会命中它而非我们解析到的 npm shim。
+        let mut c = command::hidden_cmd(&shim_path);
         c.arg("--version");
         // v0.4.13（审计修复 2.8）：dsh --version 加 60s 兜底
         let out = crate::core::command::run_with_timeout(c, std::time::Duration::from_secs(60))
@@ -232,6 +228,10 @@ fn uninstall_github_channel(
             }
         }
     }
+    // 3. 清理 PATH 其他目录中的陈旧 GitHub shim（历史遗留：早期版本写到与当前
+    //    npm prefix 不同的 PATH 目录，卸载只删当前 prefix 会漏删 → 陈旧 shim 遮蔽
+    //    npm 全局包 dsh.cmd）。仅删「指向已删除目录」的，仍有效的不碰。
+    core_github::remove_stale_github_shims(logger);
     Ok(())
 }
 
